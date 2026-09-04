@@ -97,6 +97,7 @@ deploy.
 | `test_governance.py` | Rules/roles/branding tests (33). |
 | `test_bots.py` | Bot wiring tests (26) — handlers, menus, funnel, roles, owner bypass. |
 | `simulate.py` | Offline dry run: plays a 19-step multi-user session and prints the whole conversation. |
+| `preflight.py` | Checks your tokens/owner id/store before launch, and confirms each token with Telegram. |
 
 ## 6. Report system & performance engine (added)
 - **Report button** on every offered post: receiver flags scam/fraud. The bot never auto-bans —
