@@ -28,6 +28,11 @@ import time
 # CONFIG
 # ---------------------------------------------------------------------------
 OWNER_USERNAME = "@ClickMintHQ"          # exempt from the reward system
+
+
+def _same_handle(a: str, b: str) -> bool:
+    """Telegram @usernames are case-insensitive; compare them that way."""
+    return (a or "").lstrip("@").casefold() == (b or "").lstrip("@").casefold()
 ONBOARDING_SEED = 2                      # free starting credits for new members
 EARN_MIN_BEFORE_SPEND = 1                # must share >= this many before spending
 
@@ -61,6 +66,9 @@ PERF_WEIGHTS = {
 # Band thresholds (score 0..1)
 BAND_HIGH = 0.66
 BAND_MED = 0.33
+# ordering helpers used by matching: bands by quality, statuses by standing
+BAND_ORDER = {"C": 0, "B": 1, "A": 2}
+STATUS_ORDER = {"REMOVED": 0, "RESTRICTED": 1, "WATCH": 2, "ACTIVE": 3}
 
 # Reputation penalties
 REPORT_PENALTY = 0.5        # per confirmed report (reputation component -> 0)
@@ -179,7 +187,7 @@ class CreditLedger:
         m = self._m(username)
         m["size"] = size
         m["tier"] = tier_for_size(size)
-        m["is_owner"] = is_owner or username == OWNER_USERNAME
+        m["is_owner"] = is_owner or _same_handle(username, OWNER_USERNAME)
         m["is_partner"] = is_partner
         self.store["ledger"] = self.ledger
         self.save()
@@ -194,10 +202,23 @@ class CreditLedger:
 
     def set_user_id(self, username: str, uid) -> dict:
         """Remember the Telegram user id behind a username so the bot can DM them
-        later (e.g. to notify that a queued post was approved)."""
+        later (e.g. to notify that a queued post was approved).
+
+        This also SEALS ownership: if the id is the configured owner id, the row
+        is flagged `is_owner` permanently. Exemption used to be discovered only
+        on the paths that happened to call this first, so an owner who typed
+        /balance (or opened a menu) before ever forwarding a post was billed and
+        capped like an ordinary member.
+        """
         m = self._m(username)
+        changed = m.get("user_id") != uid
         m["user_id"] = uid
-        self.save()
+        if self.owner_user_id is not None and uid == self.owner_user_id \
+                and not m.get("is_owner"):
+            m["is_owner"] = True
+            changed = True
+        if changed:                 # never rewrite the store on every update
+            self.save()
         return m
 
     def user_id(self, username: str):
@@ -316,15 +337,25 @@ class CreditLedger:
 
     def _is_exempt(self, username: str) -> bool:
         """Owner is exempt. Recognised by (a) the reserved username, (b) the is_owner
-        flag, or (c) the member's stored user_id == the numeric OWNER_USER_ID."""
+        flag, or (c) the member's stored user_id == the numeric OWNER_USER_ID.
+
+        The username comparison is case-insensitive: Telegram treats @ClickMintHQ
+        and @clickminthq as the same account, and an exact-case compare silently
+        dropped the owner back to member rules.
+        """
         m = self._m(username)
         if m.get("is_owner", False):
             return True
-        if username == OWNER_USERNAME:
+        if _same_handle(username, OWNER_USERNAME):
             return True
         if self.owner_user_id and m.get("user_id") == self.owner_user_id:
             return True
         return False
+
+    def is_exempt_uid(self, uid) -> bool:
+        """Exemption decided from the numeric id alone — no ledger row needed.
+        Use this on entry points where the member may not be registered yet."""
+        return self.owner_user_id is not None and uid == self.owner_user_id
 
     def balance(self, username: str) -> dict:
         m = self._m(username)
@@ -665,13 +696,22 @@ class PerformanceEngine:
 
     # --- like-with-like matching by performance band ---
     def match(self, sender: str, want_channels: int,
-              post_type: str = "General", min_status="ACTIVE") -> list[str]:
+              post_type: str = "General", min_status: str = "WATCH",
+              widen: bool = True) -> list[str]:
         """Same performance BAND as the sender, ignoring subscriber size.
 
         Subscriber size is only a tiebreaker. A channel is only offered a post if
         its own contract accepts that category (`receive_types`) — matching must
-        never push off-niche content at a partner. Blocked channels are excluded,
-        and so is anything the caller asks for beyond `want_channels`.
+        never push off-niche content at a partner. Channels below `min_status`
+        are excluded (default: anything not RESTRICTED/REMOVED).
+
+        BAND WIDENING: peers in the sender's own band always come first, but if
+        that pool is EMPTY the search widens to the nearest band instead of
+        returning nothing. Strict equality deadlocked the network: the moment one
+        channel out-performed everyone else it became the only member of its
+        band, so `match` returned [] and its posts could never be distributed —
+        the bot just said "no matching channel" with no way out. Quality still
+        governs the ORDER; it no longer strands the best member.
         """
         if want_channels is not None and want_channels < 1:
             return []
@@ -679,21 +719,36 @@ class PerformanceEngine:
             return []
         m = self.ledger._m(sender)
         sender_band = self.score(sender)["band"]
-        pool = []
+        ssize = m.get("size", 0)
+        floor = STATUS_ORDER.get(min_status, 1)
+
+        same: list[str] = []
+        near: list[tuple[int, str]] = []
         for username, mm in self.ledger.ledger.items():
             if username == sender:
                 continue
-            if self._blocked(username) and username != OWNER_USERNAME:
+            if self._blocked(username) and not _same_handle(username, OWNER_USERNAME):
+                continue
+            if STATUS_ORDER.get(mm.get("status", "ACTIVE"), 0) < floor:
                 continue
             if not allows_receive(mm, post_type):
                 continue                      # honours the receiver's contract
-            if self.score(username)["band"] != sender_band:
-                continue
-            pool.append(username)
+            band = self.score(username)["band"]
+            if band == sender_band:
+                same.append(username)
+            elif widen:
+                near.append((abs(BAND_ORDER.get(band, 0) -
+                                 BAND_ORDER.get(sender_band, 0)), username))
+
+        def _closeness(u: str) -> int:
+            return abs(self.ledger._m(u).get("size", 0) - ssize)
+
         # tiebreak: similar size preferred; then sort by size closeness
-        ssize = m.get("size", 0)
-        pool.sort(key=lambda u: abs(self.ledger._m(u).get("size", 0) - ssize))
-        return pool[:want_channels]
+        same.sort(key=_closeness)
+        if same:
+            return same[:want_channels]
+        near.sort(key=lambda t: (t[0], _closeness(t[1])))
+        return [u for _, u in near][:want_channels]
 
     def _blocked(self, username: str) -> bool:
         return self.status(username) in ("RESTRICTED", "REMOVED")

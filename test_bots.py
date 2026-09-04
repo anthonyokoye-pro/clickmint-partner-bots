@@ -588,6 +588,42 @@ def test_admin_invite_button_is_owner_only():
     print("OK admin-bot invite codes are owner-only")
 
 
+
+# --- added after the 2026-09 dry-run simulation (simulate.py) ---------------
+def test_owner_is_recognised_before_ever_forwarding():
+    """The owner's numeric id was bound to the ledger only inside the forward
+    handler. An owner whose first action was /balance got the member reply and
+    was billed like a member. Every update now binds identity first."""
+    s = _fresh_bot(reward_bot)
+    errs = run(feed(reward_bot, make_message("/balance", uid=OWNER_ID,
+                                             username="ownerhq")))
+    assert_no_errors(errs, "owner /balance as a first message")
+    assert "exempt" in s.texts().lower(), s.texts()
+    assert reward_bot.ledger._is_exempt("@ownerhq")
+    print("OK the owner is exempt from their very first message")
+
+
+def test_owner_broadcast_is_not_offered_to_the_owner():
+    """`owner_targets` skipped rows flagged is_owner, but the owner's own row is
+    only flagged once known — so the owner was sent their own post and could tap
+    Agree on it."""
+    s = _fresh_bot(reward_bot)
+    _register(reward_bot, "ownerhq", OWNER_ID, 5000)
+    for name, uid in (("bob", 1002), ("carol", 1003)):
+        _register(reward_bot, name, uid, 2500)
+    s.reset()
+    run(feed(reward_bot, make_message("broadcast", uid=OWNER_ID,
+                                      username="ownerhq", forwarded=True)))
+    s.reset()
+    errs = run(feed(reward_bot, make_callback("s:all", OWNER_ID, "ownerhq")))
+    assert_no_errors(errs, "owner routes to all")
+    targets = {d.get("chat_id") for d in s.sent()
+               if str(d.get("chat_id", "")).startswith("@")}
+    assert "@ownerhq" not in targets, targets
+    assert {"@bob", "@carol"} <= targets, targets
+    print("OK the owner's broadcast is never offered back to the owner")
+
+
 ALL_TESTS = [
     test_all_handlers_are_coroutines,
     test_expected_callbacks_are_registered,
@@ -613,6 +649,9 @@ ALL_TESTS = [
     test_owner_menu_is_not_reachable_by_a_member,
     test_admin_dashboard_owner_only_and_back_works,
     test_admin_invite_button_is_owner_only,
+    # --- added after the dry-run simulation ---
+    test_owner_is_recognised_before_ever_forwarding,
+    test_owner_broadcast_is_not_offered_to_the_owner,
 ]
 
 

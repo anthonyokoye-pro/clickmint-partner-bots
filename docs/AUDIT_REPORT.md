@@ -9,9 +9,10 @@ every module.
 | Area | Before this session | After |
 |---|---|---|
 | Compiles (all modules) | ✅ PASS | ✅ PASS |
-| Core engine tests | "ALL TESTS PASSED" (ran 3×, no count) | ✅ **23/23**, one runner, exits non-zero on failure |
+| Core engine tests | "ALL TESTS PASSED" (ran 3×, no count) | ✅ **28/28**, one runner, exits non-zero on failure |
 | Governance tests | 23/23 (always exit 0) | ✅ **33/33**, exits non-zero on failure |
-| Bot wiring tests | *did not exist* | ✅ **24/24** (new `test_bots.py`) |
+| Bot wiring tests | *did not exist* | ✅ **26/26** (new `test_bots.py`) |
+| Scripted dry run | *did not exist* | ✅ clean (new `simulate.py`, transcript in `DRY_RUN.md`) |
 | 3 bots import + register handlers | ✅ PASS | ✅ PASS (reward 10 msg/13 cb, partner 5/7, admin 2/3) |
 | 3 bots actually *work* at runtime | ❌ **no** — every menu raised `TypeError` | ✅ every menu, funnel and panel exercised by tests |
 | Secrets not in code | ✅ PASS | ✅ PASS |
@@ -25,14 +26,51 @@ render a single button, could not register a channel, and could not route a post
 ## 2. Checks executed
 ```bash
 python3 -m py_compile *.py                # PASS
-python3 test_core.py                      # ALL TESTS PASSED (23)
+python3 test_core.py                      # ALL TESTS PASSED (28)
 python3 test_governance.py                # 33/33 governance tests passed
-python3 test_bots.py                      # ALL BOT WIRING TESTS PASSED (24)
+python3 test_bots.py                      # ALL BOT WIRING TESTS PASSED (26)
+python3 simulate.py                       # 19-step dry run — SIMULATION CLEAN
 python3 branding.py --check               # all copy within Telegram's limits
 # import check with patched tokens: all three bots register their handlers
 git check-ignore .env reward_ledger.json partnership_state.json   # all ignored
 git check-ignore .env.example             # NOT ignored (tracked template) ✓
 ```
+
+## 2b. Third pass — the scripted dry run (`simulate.py`)
+
+After the suites were green, a **19-step multi-user session** was scripted and played
+through the real dispatchers: four members register, the owner bootstraps the network,
+posts circulate, a scam is refused, a borderline post is queued, a report is filed and
+judged, caps bite. Buttons are pressed *by their label*, read off the keyboard the bot
+actually rendered.
+
+Passing tests did not mean the product worked. The dry run found three more real defects
+that every suite had missed, because each one only appears in a **sequence** of actions:
+
+| # | Defect | Why the tests missed it | Fix |
+|---|---|---|---|
+| D1 | **The owner was billed like a member.** `set_user_id` (which links the numeric owner id to the ledger row) was only ever called inside the forward handler. An owner whose first action was `/balance`, `/start` or any menu button was not recognised — no exemption, credits charged, cap applied. | `test_bots.py` always registered the owner first, which called `set_user_id` as a side effect. The dry run had the owner type `/balance` cold. | Identity is now bound by an **outer middleware on every update** in `reward_bot.py` and `partnership_bot.py`; `set_user_id` seals `is_owner` when the id matches, and only writes to disk when something changed. |
+| D2 | **The owner's broadcast was offered to the owner.** `owner_targets` skipped rows flagged `is_owner`, but that flag was set late (see D1), so `@ClickMintHQ` appeared in its own distribution list and could tap "Agree" on its own post. | No test asserted who was *absent* from the target list. | `owner_targets(post_type, sender=…)` now excludes the sender and any exempt row. |
+| D3 | **The best channel in the network was stranded.** `match` required an *exact* band equality. The first member to out-perform the others became the only channel in band A, so `match` returned `[]` — every post it submitted was answered with "no matching channel", permanently. A two-member network deadlocks the moment one of them performs. | `test_performance_match_like_with_like` only ever tested a pool that *had* same-band peers. | Band **widening**: same-band peers still win outright; if that pool is empty the search falls back to the nearest band. Quality still orders the results, it just no longer isolates the top performer. |
+
+Two smaller things were fixed alongside them: owner `@username` matching is now
+case-insensitive (Telegram treats `@ClickMintHQ` and `@clickminthq` as one account, an
+exact compare silently demoted the owner), and `match`'s `min_status` parameter — which
+was accepted and then ignored entirely — now filters by standing.
+
+Five regression tests were added for these (`test_core.py` 23 → 28, `test_bots.py`
+24 → 26), and `simulate.py --quiet` runs as part of `./run_tests.sh`.
+
+### Design questions the dry run raised (not changed — your call)
+- **Cold start is a deadlock by design.** `earn-first` means a member must share someone
+  else's post before their own can circulate. At genesis nobody has earned, so nothing
+  can move until the **owner** (exempt) puts the first post into circulation. That works,
+  and the dry run demonstrates it — but it means the network cannot bootstrap without the
+  owner posting, and the 2-credit onboarding seed is unusable until then.
+- **A pending offer lowers your band.** `mark_offered` counts immediately while
+  `mark_posted` only lands when the member taps Agree, so a channel that has been offered
+  posts it hasn't answered *yet* scores as unreliable and can shift band. Defensible as an
+  "agree rate", but it makes bands jumpy in a small network.
 
 ## 3. Findings
 

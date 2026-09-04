@@ -41,6 +41,17 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
+@dp.update.outer_middleware()
+async def bind_identity(handler, event, data):
+    """Same identity binding as the reward bot: the owner must be recognised on
+    the very first update, not only after their first forward."""
+    src = getattr(event, "message", None) or getattr(event, "callback_query", None)
+    fu = getattr(src, "from_user", None)
+    if fu is not None and not fu.is_bot:
+        ledger.set_user_id("@" + (fu.username or str(fu.id)), fu.id)
+    return await handler(event, data)
+
+
 def _uid(msg) -> int:
     return msg.from_user.id
 

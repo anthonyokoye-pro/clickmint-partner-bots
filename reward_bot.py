@@ -59,6 +59,23 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
+@dp.update.outer_middleware()
+async def bind_identity(handler, event, data):
+    """Bind @username -> numeric user id on EVERY update, before any handler.
+
+    Owner exemption is decided from the numeric id, but the id was only ever
+    recorded inside the forward handler. So an owner whose first action was
+    /balance, /start or any menu button was charged credits and capped like an
+    ordinary member until they happened to forward something. Binding here
+    means every entry point knows who it is talking to.
+    """
+    src = getattr(event, "message", None) or getattr(event, "callback_query", None)
+    fu = getattr(src, "from_user", None)
+    if fu is not None and not fu.is_bot:
+        ledger.set_user_id("@" + (fu.username or str(fu.id)), fu.id)
+    return await handler(event, data)
+
+
 def _uid(msg) -> int:
     return msg.from_user.id
 
@@ -520,12 +537,20 @@ async def owner_forward(msg: types.Message, u: str):
         ]))
 
 
-def owner_targets(post_type: str = "General") -> list[str]:
+def owner_targets(post_type: str = "General", sender: str | None = None) -> list[str]:
     """The owner routes to EVERY active, non-blocked channel that accepts this
-    category (any size/band/tier). Not a Telegram handler — a plain helper."""
+    category (any size/band/tier). Not a Telegram handler — a plain helper.
+
+    `sender` is excluded: the owner's own channel used to appear in its own
+    distribution list, so the owner was offered their own post and could tap
+    "Agree" on it (the self-deal guard only fires at that later step). Any
+    exempt/owner row is skipped for the same reason.
+    """
     out = []
     for username, m in ledger.ledger.items():
-        if m.get("is_owner"):
+        if m.get("is_owner") or ledger._is_exempt(username):
+            continue
+        if sender and username == sender:
             continue
         if m.get("status") in ("RESTRICTED", "REMOVED"):
             continue
@@ -557,14 +582,14 @@ async def pick_spend(cb: types.CallbackQuery):
         if not is_owner:
             await cb.answer("Only the owner can route to all.", show_alert=True)
             return
-        targets = owner_targets(post_type)
+        targets = owner_targets(post_type, sender=sender)
     elif is_owner:
         try:
             n = int(raw)
         except ValueError:
             await cb.answer("Bad option.", show_alert=True)
             return
-        targets = owner_targets(post_type)[:max(n, 0)]
+        targets = owner_targets(post_type, sender=sender)[:max(n, 0)]
     else:
         try:
             n = int(raw)

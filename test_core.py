@@ -435,6 +435,75 @@ def test_forward_only_still_blocks_copies():
     print("OK forward-only accepts genuine forwards only")
 
 
+
+# --- added after the 2026-09 dry-run simulation (simulate.py) ---------------
+def test_owner_is_exempt_from_the_very_first_message():
+    """The owner id used to be linked to the ledger row only inside the forward
+    handler, so an owner who typed /balance (or opened any menu) first was
+    treated as an ordinary member: charged credits and capped."""
+    ledger, _ = new_ledger()
+    ledger.owner_user_id = 777001
+    ledger.set_user_id("@bossman", 777001)       # what the bots now do on EVERY update
+    assert ledger._is_exempt("@bossman")
+    assert ledger._m("@bossman")["is_owner"] is True
+    ok, _why = ledger.can_spend("@bossman")
+    assert ok, "owner must be able to route before earning anything"
+    print("OK owner exemption is sealed on first contact (not only after a forward)")
+
+
+def test_owner_username_match_is_case_insensitive():
+    """Telegram treats @ClickMintHQ and @clickminthq as the same account; an
+    exact-case compare silently demoted the owner to member rules."""
+    ledger, _ = new_ledger()
+    assert ledger._is_exempt(OWNER_USERNAME.lower())
+    assert ledger._is_exempt(OWNER_USERNAME.upper())
+    print("OK owner @username is matched case-insensitively")
+
+
+def test_best_performer_is_not_stranded_by_band_matching():
+    """Strict band equality deadlocked the network: the first channel to
+    out-perform everyone became the only member of band A, so match() returned
+    [] and its posts could never be distributed."""
+    ledger, perf = make_perf()
+    for u in ("@star", "@mid1", "@mid2"):
+        ledger.register(u, 2000)
+    perf.mark_offered("@star"); perf.mark_posted("@star")      # band A, alone
+    for u in ("@mid1", "@mid2"):
+        perf.mark_offered(u); perf.mark_offered(u); perf.mark_posted(u)   # lower band
+    assert perf.score("@star")["band"] == "A"
+    assert all(perf.score(u)["band"] != "A" for u in ("@mid1", "@mid2"))
+    got = perf.match("@star", want_channels=5)
+    assert got, "the top performer must still reach somebody"
+    assert set(got) <= {"@mid1", "@mid2"}
+    print("OK band matching widens instead of stranding the best channel")
+
+
+def test_band_widening_never_overrides_a_same_band_peer():
+    """Widening is a fallback only: if same-band peers exist they win outright,
+    so 'quality over size' still governs who sees a post first."""
+    ledger, perf = make_perf()
+    for u in ("@a", "@peer", "@weak"):
+        ledger.register(u, 2000)
+    for u in ("@a", "@peer"):
+        perf.mark_offered(u); perf.mark_posted(u)
+    perf.mark_offered("@weak"); perf.mark_offered("@weak")     # offered, never posted
+    got = perf.match("@a", want_channels=5)
+    assert got == ["@peer"], got
+    print("OK same-band peers still take precedence over widened matches")
+
+
+def test_match_honours_min_status():
+    """`min_status` was accepted and then ignored entirely."""
+    ledger, perf = make_perf()
+    for u in ("@a", "@watched"):
+        ledger.register(u, 1500)
+        perf.mark_offered(u); perf.mark_posted(u)
+    perf.set_status("@watched", "WATCH")
+    assert "@watched" in perf.match("@a", 5)                   # default: WATCH is fine
+    assert "@watched" not in perf.match("@a", 5, min_status="ACTIVE")
+    print("OK match() actually applies min_status")
+
+
 ALL_TESTS = [
     test_tiering, test_credit_lifecycle, test_anticheat,
     test_subscriber_tier_is_not_the_gate, test_owner_exemption,
@@ -452,6 +521,12 @@ ALL_TESTS = [
     test_views_provider_failure_never_fabricates,
     test_store_is_atomic_and_merges_concurrent_writers,
     test_forward_only_still_blocks_copies,
+    # --- added after the dry-run simulation ---
+    test_owner_is_exempt_from_the_very_first_message,
+    test_owner_username_match_is_case_insensitive,
+    test_best_performer_is_not_stranded_by_band_matching,
+    test_band_widening_never_overrides_a_same_band_peer,
+    test_match_honours_min_status,
 ]
 
 

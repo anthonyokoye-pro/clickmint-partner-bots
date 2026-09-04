@@ -3,8 +3,9 @@
 Three bots (reward · partnership · owner admin panel) sharing one verified engine
 (`core.py` + `governance.py`). Zero budget, free hosting, JSON store.
 
-**Status:** `python3 test_core.py` 23/23 · `python3 test_governance.py` 33/33 ·
-`python3 test_bots.py` 24/24 (bot wiring). See `docs/AUDIT_REPORT.md`.
+**Status:** `python3 test_core.py` 28/28 · `python3 test_governance.py` 33/33 ·
+`python3 test_bots.py` 26/26 (bot wiring) · `python3 simulate.py` clean dry run.
+See `docs/AUDIT_REPORT.md` and the readable transcript in `docs/DRY_RUN.md`.
 
 ## 0. Important reality check (read first)
 - **A bot can only post into a channel where it is an ADMIN with "Post Messages."**
@@ -56,12 +57,15 @@ auto-deploy).
 ## 4. Verify everything (no Telegram, no network)
 ```bash
 python3 -m py_compile *.py     # compile check
-python3 test_core.py           # ALL TESTS PASSED (23)  — engine
+python3 test_core.py           # ALL TESTS PASSED (28)  — engine
 python3 test_governance.py     # 33/33 governance tests passed — rules & roles
-python3 test_bots.py           # ALL BOT WIRING TESTS PASSED (24) — handlers/menus/funnel
+python3 test_bots.py           # ALL BOT WIRING TESTS PASSED (26) — handlers/menus/funnel
+python3 simulate.py            # scripted dry run: prints every screen, asserts every rule
 ```
 Or just `./run_tests.sh`, which runs all of the above plus `python3 branding.py --check`.
 
+`simulate.py` is the human-readable counterpart: same machinery, but it prints each screen and
+clicks buttons **by their label**, so a dead button or a missing menu entry fails the run.
 `test_bots.py` drives real Telegram Update objects through each bot's dispatcher against a
 mocked session, so a dead handler, an unrenderable menu or a broken funnel is caught before
 deploy.
@@ -89,9 +93,10 @@ deploy.
 | `ui.py` | Shared button menus + role routing. |
 | `branding.py` | The approved branding copy (`docs/BOT_BRANDING.md`) + a pusher for the Bot API. |
 | `views_provider.py` | **Optional** MTProto observer — the only way to read live channel views. |
-| `test_core.py` | Engine tests (23). |
+| `test_core.py` | Engine tests (28). |
 | `test_governance.py` | Rules/roles/branding tests (33). |
-| `test_bots.py` | Bot wiring tests (24) — handlers, menus, funnel, roles, owner bypass. |
+| `test_bots.py` | Bot wiring tests (26) — handlers, menus, funnel, roles, owner bypass. |
+| `simulate.py` | Offline dry run: plays a 19-step multi-user session and prints the whole conversation. |
 
 ## 6. Report system & performance engine (added)
 - **Report button** on every offered post: receiver flags scam/fraud. The bot never auto-bans —
