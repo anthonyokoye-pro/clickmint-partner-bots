@@ -86,9 +86,11 @@ git check-ignore .env.example             # NOT ignored (tracked template) ✓
   → `sys.exit(1)` on failure.
 - There were **no tests at all** for the Telegram layer. → `test_bots.py` (24 tests) drives
   real `Update` objects through each dispatcher with a mocked session.
-  ⚠️ **Action for the repo owner:** add a `run: python test_bots.py` step to
-  `.github/workflows/tests.yml` (the assistant's GitHub app is not allowed to edit workflow
-  files, so that one line has to be added by hand). `./run_tests.sh` runs everything locally.
+  ⚠️ **Action for the repo owner:** `.github/workflows/tests.yml` is already updated in the
+  working tree (it now runs compile + core + governance + wiring + `branding.py --check`),
+  but GitHub blocks workflow edits from the assistant's app, so it is the one file left
+  uncommitted — `git add .github/workflows/tests.yml && git commit && git push` it yourself.
+  `./run_tests.sh` runs the same set locally.
 
 ### 3.5 What is CORRECT (verified, keep)
 - Pure, offline-testable engine split from Telegram wiring.

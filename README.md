@@ -66,13 +66,15 @@ Or just `./run_tests.sh`, which runs all of the above plus `python3 branding.py 
 mocked session, so a dead handler, an unrenderable menu or a broken funnel is caught before
 deploy.
 
-> **CI note:** `.github/workflows/tests.yml` still only runs the two older suites. Add the
-> wiring suite by appending this step (workflow files can't be edited by the assistant's
-> GitHub app):
-> ```yaml
->       - name: Run bot wiring tests
->         run: python test_bots.py
+> **CI note:** `.github/workflows/tests.yml` in this working tree already runs all four
+> checks, but that file is **not pushed** — GitHub refuses workflow edits from the
+> assistant's app ("without `workflows` permission"). Commit it yourself:
+> ```bash
+> git add .github/workflows/tests.yml
+> git commit -m "CI: run the bot wiring suite + branding check"
+> git push
 > ```
+> (Or paste the same two steps into the file via GitHub's web editor.)
 
 ## 5. Files
 | File | Purpose |
