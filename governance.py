@@ -23,6 +23,7 @@ Everything here runs on plain dicts + a JsonStore, so test_governance.py can run
 with no bot and no network.
 """
 from __future__ import annotations
+import re
 import time
 import uuid
 
@@ -133,20 +134,45 @@ TERMS_TEXT = (
 )
 
 
+def _pattern_regex(pattern: str):
+    """Compile a pattern with word boundaries where they make sense.
+
+    Plain substring matching hard-blocks innocent posts: "reclaimed" contains
+    "claim", "$100xyz" contains "100x", "broadcast" contains "adca"… A wrongly
+    refused post costs a real member a slot, so boundaries are applied at each
+    end that is a word character (patterns like "dm @" keep their open end).
+    """
+    left = r"(?<!\w)" if pattern[:1].isalnum() else ""
+    right = r"(?!\w)" if pattern[-1:].isalnum() else ""
+    return re.compile(left + re.escape(pattern) + right, re.IGNORECASE)
+
+
+_HARD_RE = [(p, _pattern_regex(p)) for p in HARD_BLOCK_PATTERNS]
+_SOFT_RE = [(p, _pattern_regex(p)) for p in SOFT_REVIEW_PATTERNS]
+
+
+def matched_patterns(text: str) -> tuple[list[str], list[str]]:
+    """Return (hard hits, soft hits) — useful for the review queue's reason."""
+    t = text or ""
+    hard = [p for p, rx in _HARD_RE if rx.search(t)]
+    soft = [p for p, rx in _SOFT_RE if rx.search(t)]
+    return hard, soft
+
+
 def classify_submission(text: str) -> str:
     """Return 'block' | 'review' | 'pass'.
 
-    • any HARD_BLOCK hit            -> 'block' (bot refuses outright)
+    • any HARD_BLOCK hit            -> 'block' (bot refuses the POST — note that
+                                       refusing a post is never a ban; only a
+                                       human can act against a channel)
     • else any SOFT_REVIEW hit      -> 'review' (human decides)
     • else                          -> 'pass'
     """
-    t = (text or "").lower()
-    for p in HARD_BLOCK_PATTERNS:
-        if p in t:
-            return "block"
-    for p in SOFT_REVIEW_PATTERNS:
-        if p in t:
-            return "review"
+    hard, soft = matched_patterns(text)
+    if hard:
+        return "block"
+    if soft:
+        return "review"
     return "pass"
 
 
@@ -200,7 +226,7 @@ class ReviewQueue:
     def submit(self, category: str, sender: str, text: str, source: str,
                target: str = "", reason: str = "") -> dict:
         item = {
-            "id": len(self.store[self.key]) + 1,
+            "id": self._next_id(),
             "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
             "category": category, "sender": sender, "target": target,
             "text": (text or "")[:600], "source": source,
@@ -211,6 +237,13 @@ class ReviewQueue:
         self.store[self.key] = items
         self.store.sync()
         return item
+
+    def _next_id(self) -> int:
+        """Monotonic id. `len()+1` re-issues an id as soon as anything is pruned
+        from the queue, and two items sharing an id make approve/reject ambiguous."""
+        ids = [i.get("id", 0) for i in self.store[self.key]
+               if isinstance(i.get("id"), int)]
+        return (max(ids) + 1) if ids else 1
 
     def pending(self) -> list:
         return [i for i in self.store[self.key] if i.get("status") == "pending"]

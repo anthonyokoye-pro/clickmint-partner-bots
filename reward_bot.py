@@ -25,17 +25,16 @@ import logging
 import time
 import datetime as dt
 from aiogram import Bot, Dispatcher, types
+from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.filters import Command
-from aiogram.types import (InlineKeyboardMarkup, InlineKeyboardButton,
-                           ReplyKeyboardMarkup, KeyboardButton)
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from core import (CreditLedger, Distribution, DeliveryLog, ReportRegistry,
-                  PerformanceEngine, OWNER_USERNAME, is_forward, forward_source)
+from core import (CreditLedger, DeliveryLog, ReportRegistry, PerformanceEngine,
+                  is_forward, forward_source, allows_receive)
 from store import JsonStore
 from scheduler import Scheduler
 from governance import (SubmissionGate, ReviewQueue, PartnerContractRegistry,
-                        RoleRegistry, POST_CATEGORIES, TERMS_TEXT,
-                        daily_post_cap, SCOPES)
+                        RoleRegistry, POST_CATEGORIES, TERMS_TEXT, daily_post_cap)
 import config
 import ui
 
@@ -78,14 +77,112 @@ def _can_panel(uid, scope) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# PER-USER SESSION STATE
+# ---------------------------------------------------------------------------
+# The submission funnel (terms accepted -> category -> style -> forward -> pair
+# count) used to be kept in single global store keys ("accepted_terms",
+# "pending_cat", "pending", ...). With more than one member using the bot at the
+# same time that state is shared: B picking a category overwrote A's, and A's
+# forwarded post could be routed with B's settings. Everything is now keyed by
+# the Telegram user id.
+SESSION_TTL = 24 * 3600          # stale funnels are dropped after a day
+
+
+def _sessions() -> dict:
+    s = store.get("sessions")
+    return s if isinstance(s, dict) else {}
+
+
+def _session(uid) -> dict:
+    return _sessions().get(str(uid), {})
+
+
+def _session_set(uid, **kw) -> dict:
+    sessions = _sessions()
+    s = dict(sessions.get(str(uid), {}))
+    s.update(kw)
+    s["ts"] = time.time()
+    sessions[str(uid)] = s
+    now = time.time()
+    for k in [k for k, v in sessions.items()
+              if now - float(v.get("ts", now)) > SESSION_TTL]:
+        sessions.pop(k, None)                 # prune stale funnels
+    store["sessions"] = sessions
+    store.sync()
+    return s
+
+
+def _session_clear(uid, *keys) -> None:
+    sessions = _sessions()
+    s = dict(sessions.get(str(uid), {}))
+    if keys:
+        for k in keys:
+            s.pop(k, None)
+        sessions[str(uid)] = s
+    else:
+        sessions.pop(str(uid), None)
+    store["sessions"] = sessions
+    store.sync()
+
+
+def _parse_registration(text: str):
+    """Parse '/start @chan 1200' (or '/register @chan 1200').
+
+    Returns (username, size) or (None, error_message). Never raises: a typo must
+    answer with help, not kill the handler.
+    """
+    parts = (text or "").split()
+    if len(parts) < 3:
+        return None, ("Usage: /register @yourchannel <subscriber_count>\n"
+                      "e.g.  /register @MyChan 1200")
+    username = parts[1]
+    if not username.startswith("@"):
+        username = "@" + username
+    if len(username) < 2:
+        return None, "That channel @username doesn't look right."
+    raw = parts[2].replace(",", "").replace("_", "")
+    try:
+        size = int(raw)
+    except ValueError:
+        return None, f"'{parts[2]}' is not a number. Example: /register @MyChan 1200"
+    if size < 0:
+        return None, "Subscriber count can't be negative."
+    if size > 100_000_000:
+        return None, "That subscriber count isn't plausible."
+    return (username, size), None
+
+
+def _do_register(msg, username: str, size: int) -> str:
+    m = ledger.register(username, size)
+    ledger.set_user_id(username, msg.from_user.id)
+    s = perf.score(username)
+    cap = daily_post_cap(size, s["band"], m.get("status", "ACTIVE"),
+                         m.get("is_owner", False))
+    return (f"✅ Registered {username} — {size} subs, tier {m['tier']}, "
+            f"band {s['band']}.\n"
+            f"Daily post cap: {'unlimited (owner)' if cap == -1 else cap} "
+            "(size × performance, not size alone).\n"
+            f"Credits: {m['balance']} (onboarding seed). Earn more by sharing "
+            "other members' posts.")
+
+
+# ---------------------------------------------------------------------------
 # /start  -> branch by role: Owner / Admin / User, all via BUTTONS
 # ---------------------------------------------------------------------------
 @dp.message(Command("start"))
 async def start(msg: types.Message):
     uid = _uid(msg)
-    if uid <= 0:
-        pass  # aiogram always gives a real user id
     role = roles.role(uid)
+    # `/start @chan 1200` registers the channel. The old build advertised this in
+    # the welcome text but never parsed the arguments, so nobody could register
+    # and every member stayed at size 0 (which pinned their cap at the floor).
+    if len((msg.text or "").split()) >= 3:
+        parsed, err = _parse_registration(msg.text)
+        if err:
+            await msg.answer(err, reply_markup=ui.main_menu(role))
+            return
+        await msg.answer(_do_register(msg, *parsed), reply_markup=ui.main_menu(role))
+        return
     if role == "owner":
         await msg.answer(
             "🛠 Welcome, Owner. Your menu controls everyone — users, admins, "
@@ -97,10 +194,33 @@ async def start(msg: types.Message):
     else:
         head = ("Welcome to CLICKMINT.\n"
                 "To use the network, register your channel first:\n"
-                "Send: /start @yourchannel <subscriber_count>\n"
-                "e.g.  /start @MyChan 1200")
+                "Send: /register @yourchannel <subscriber_count>\n"
+                "e.g.  /register @MyChan 1200")
         await msg.answer(head,
                          reply_markup=ui.main_menu("user"))
+
+
+@dp.message(Command("register"))
+async def register_cmd(msg: types.Message):
+    parsed, err = _parse_registration(msg.text)
+    if err:
+        await msg.answer(err)
+        return
+    await msg.answer(_do_register(msg, *parsed),
+                     reply_markup=ui.main_menu(roles.role(_uid(msg))))
+
+
+@dp.message(Command("balance"))
+async def balance_cmd(msg: types.Message):
+    u = _uname(msg)
+    b = ledger.balance(u)
+    if ledger._is_exempt(u):
+        await msg.answer("👑 Owner — exempt from credits, caps and funnels.")
+        return
+    await msg.answer(
+        f"💳 {u}: balance {b['balance']} · earned {b['earned']} · spent {b['spent']}\n"
+        "You earn 1 credit each time you share another member's post, and spend "
+        "1 credit per (post → channel) pair.")
 
 
 # admins log in via a one-time invite code (must have contacted the owner first)
@@ -126,9 +246,17 @@ async def menu_nav(cb: types.CallbackQuery):
     if which == "hub":
         await cb.message.edit_text("Choose an option:", reply_markup=ui.main_menu(role))
     elif which == "owner":
+        # A normal member could open the owner panel screen just by sending the
+        # callback data — the panels themselves were guarded, but the menu wasn't.
+        if role != "owner":
+            await cb.answer("Owner only.", show_alert=True)
+            return
         await cb.message.edit_text("🛠 Owner Panel", reply_markup=ui.role_menu("owner"))
     elif which == "admin":
-        await cb.message.edit_text("🛠 Admin Panel", reply_markup=ui.role_menu("admin"))
+        if role not in ("owner", "admin"):
+            await cb.answer("Owner/admin only.", show_alert=True)
+            return
+        await cb.message.edit_text("🛠 Admin Panel", reply_markup=ui.role_menu(role))
     elif which == "submit":
         await submit_menu(cb)
         return
@@ -162,44 +290,44 @@ async def submit_menu(cb: types.CallbackQuery):
     await cb.message.edit_text(
         TERMS_TEXT,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton("✅ Accept & continue", callback_data="terms:accept")],
-            [InlineKeyboardButton("❌ Not now", callback_data="menu:hub")],
+            [InlineKeyboardButton(text="✅ Accept & continue", callback_data="terms:accept")],
+            [InlineKeyboardButton(text="❌ Not now", callback_data="menu:hub")],
         ]))
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("terms:"))
 async def accept_terms(cb: types.CallbackQuery):
     if cb.data == "terms:accept":
-        store["accepted_terms"] = _uname(cb)
-        store.sync()
+        _session_set(cb.from_user.id, accepted_terms=True)
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(t, callback_data=f"cat:{t}")] for t in POST_CATEGORIES
-        ] + [[InlineKeyboardButton("⬅️ Back", callback_data="menu:hub")]])
+            [InlineKeyboardButton(text=t, callback_data=f"cat:{t}")] for t in POST_CATEGORIES
+        ] + [[InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")]])
         await cb.message.edit_text(
             "Select the NICHE category of your post (must match what the target "
             "channel has agreed to receive):", reply_markup=kb)
     else:
         await cb.message.edit_text("No problem. Send a command or use the menu.",
-                                   reply_markup=ui.main_menu("user"))
+                                   reply_markup=ui.main_menu(roles.role(cb.from_user.id)))
     await cb.answer()
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("cat:"))
 async def pick_category(cb: types.CallbackQuery):
     cat = cb.data.split(":", 1)[1]
-    store["pending_cat"] = cat
-    store["pending_user"] = _uname(cb)
-    store.sync()
+    if cat not in POST_CATEGORIES:
+        await cb.answer("Unknown category.", show_alert=True)
+        return
+    _session_set(cb.from_user.id, cat=cat)
     # Ask post style (forward / direct / pin) + notification (loud / silent).
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("🔁 Forward", callback_data="style:fwd"),
-         InlineKeyboardButton("⚡ Direct", callback_data="style:direct"),
-         InlineKeyboardButton("📌 Pin", callback_data="style:pin")],
-        [InlineKeyboardButton("🔔 Loud", callback_data="ntf:loud"),
-         InlineKeyboardButton("🔕 Silent", callback_data="ntf:silent")],
-        [InlineKeyboardButton("✅ Submit (you must FORWARD the post next)",
+        [InlineKeyboardButton(text="🔁 Forward", callback_data="style:fwd"),
+         InlineKeyboardButton(text="⚡ Direct", callback_data="style:direct"),
+         InlineKeyboardButton(text="📌 Pin", callback_data="style:pin")],
+        [InlineKeyboardButton(text="🔔 Loud", callback_data="ntf:loud"),
+         InlineKeyboardButton(text="🔕 Silent", callback_data="ntf:silent")],
+        [InlineKeyboardButton(text="✅ Submit (you must FORWARD the post next)",
                               callback_data="style:submit")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="menu:hub")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")],
     ])
     await cb.message.edit_text(
         f"Category: **{cat}**\n\nChoose post style & notification:\n\n"
@@ -219,25 +347,30 @@ async def pick_style(cb: types.CallbackQuery):
             "attribution stays intact).\n\n" + gate.attribution_tip())
         await cb.answer()
         return
-    store["pending_style"] = style
-    store.sync()
+    if style not in ("fwd", "direct", "pin"):
+        await cb.answer("Unknown style.", show_alert=True)
+        return
+    _session_set(cb.from_user.id, style=style)
     await cb.answer(f"Style: {style}")
     await cb.message.edit_text(f"Post style set to **{style}**. Choose notification:",
                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                   [InlineKeyboardButton("🔔 Loud", callback_data="ntf:loud"),
-                                    InlineKeyboardButton("🔕 Silent", callback_data="ntf:silent")],
-                                   [InlineKeyboardButton("✅ Submit", callback_data="style:submit")],
+                                   [InlineKeyboardButton(text="🔔 Loud", callback_data="ntf:loud"),
+                                    InlineKeyboardButton(text="🔕 Silent", callback_data="ntf:silent")],
+                                   [InlineKeyboardButton(text="✅ Submit", callback_data="style:submit")],
                                ]))
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("ntf:"))
 async def pick_ntf(cb: types.CallbackQuery):
-    store["pending_ntf"] = cb.data.split(":")[1]
-    store.sync()
-    await cb.answer(f"Notification: {cb.data.split(':')[1]}")
+    ntf = cb.data.split(":")[1]
+    if ntf not in ("loud", "silent"):
+        await cb.answer("Unknown option.", show_alert=True)
+        return
+    _session_set(cb.from_user.id, ntf=ntf)
+    await cb.answer(f"Notification: {ntf}")
     await cb.message.edit_text("Now **forward** the post here to distribute it.",
                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                   [InlineKeyboardButton("✅ Submit", callback_data="style:submit")],
+                                   [InlineKeyboardButton(text="✅ Submit", callback_data="style:submit")],
                                ]))
 
 
@@ -259,7 +392,7 @@ async def show_cap(cb: types.CallbackQuery):
 
 
 def back_btn_q(cb: str):
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("⬅️ Back", callback_data=cb)]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Back", callback_data=cb)]])
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +401,8 @@ def back_btn_q(cb: str):
 @dp.message(lambda m: is_forward(m))
 async def on_forward(msg: types.Message):
     u = _uname(msg)
-    ledger.set_user_id(u, msg.from_user.id)   # remember id so we can DM them later
+    uid = msg.from_user.id
+    ledger.set_user_id(u, uid)                # remember id so we can DM them later
 
     # ===== OWNER FAST-PATH: fully exempt — no terms/category/gate/cap =====
     # The owner bypasses the entire submission funnel. Route freely, to any channel,
@@ -278,39 +412,40 @@ async def on_forward(msg: types.Message):
         await owner_forward(msg, u)
         return
 
-    # 1) terms accepted?
-    if store.get("accepted_terms") != u:
+    sess = _session(uid)
+    # 1) terms accepted? (per user — never a single global flag)
+    if not sess.get("accepted_terms"):
         await msg.answer("First accept the posting terms: /start → Submit a post.",
-                         reply_markup=ui.main_menu(roles.role(msg.from_user.id)))
+                         reply_markup=ui.main_menu(roles.role(uid)))
         return
     # 2) category declared?
-    cat = store.get("pending_cat")
+    cat = sess.get("cat")
     if not cat:
         await msg.answer("Please pick your post's niche category first (/start → Submit).")
         return
-    # 3) daily cap check (size + performance).
+    # 3) daily cap check (size + performance) — informational here; the slots are
+    #    only CONSUMED once the member picks how many channels to route to.
     m = ledger._m(u)
     s = perf.score(u)
     cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"),
                          m.get("is_owner", False))
-    day = time.strftime("%Y-%m-%d")
-    if m.get("last_cap_day") != day:
-        m["last_cap_day"] = day
-        m["cap_used_today"] = 0
-    if cap != -1 and m.get("cap_used_today", 0) >= cap:
+    left = ledger.cap_left(u, cap)
+    if left == 0:
         await msg.answer(f"⛔ Daily post cap reached ({cap}). "
-                         "Your cap is based on size × performance. It resets tomorrow "
-                         "(UTC).")
+                         "Your cap is based on size × performance and resets at "
+                         "00:00 UTC.")
         return
-    # 4) submission gate (needs target receive-types; gather from ledger targets).
-    gate_target_types = []
-    ok, verdict, why = gate.gate(cat, (msg.text or ""), gate_target_types)
+    # 4) submission gate. Category validity + terms are checked here; the
+    #    per-target category match is enforced again at matching time, because
+    #    each receiving channel has its own contract.
+    ok, verdict, why = gate.gate(cat, _submitted_text(msg), [])
     if not ok:
         await msg.answer(f"⛔ Refused: {why}\n\n{gate.attribution_tip()}")
         return
     if verdict == "review":
-        # human review queue
-        item = review.submit(cat, u, msg.text or "", forward_source(msg), reason=why)
+        # human review queue — a borderline pattern NEVER auto-bans anyone
+        item = review.submit(cat, u, _submitted_text(msg), forward_source(msg),
+                             reason=why)
         await msg.answer(f"⚠ This post hits a borderline pattern. It's queued for "
                          f"human review (#{item['id']}). You'll be notified when it's "
                          "approved.")
@@ -321,133 +456,207 @@ async def on_forward(msg: types.Message):
     if not ok_spend:
         await msg.answer(f"Not eligible yet: {why_spend}")
         return
-    # 6) ask how many (post->channel) pairs (1..5), style preserved from pending.
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("1", callback_data="s:1"), InlineKeyboardButton("2", callback_data="s:2")],
-        [InlineKeyboardButton("3", callback_data="s:3"), InlineKeyboardButton("4", callback_data="s:4")],
-        [InlineKeyboardButton("5", callback_data="s:5")],
-    ])
-    await msg.answer("How many (post→channel) pairs? 1 credit each. "
+    # 6) ask how many (post->channel) pairs — never offer more than the member
+    #    can actually afford in credits AND in remaining daily cap slots.
+    balance = ledger.balance(u)["balance"]
+    max_pairs = min(5, balance, left)
+    if max_pairs < 1:
+        await msg.answer("You have no credits left today. Share another member's "
+                         "post to earn one.")
+        return
+    row = [InlineKeyboardButton(text=str(n), callback_data=f"s:{n}")
+           for n in range(1, max_pairs + 1)]
+    kb = InlineKeyboardMarkup(inline_keyboard=[row[i:i + 3] for i in range(0, len(row), 3)])
+    await msg.answer(f"How many (post→channel) pairs? 1 credit each "
+                     f"(balance {balance}, {left} cap slot(s) left today). "
                      "Sending ONE post to 5 channels = 5 credits.",
                      reply_markup=kb)
-    from_chat = getattr(msg, "forward_from_chat", None)
-    store["pending"] = {
+    _session_set(uid, pending=_pending_from(msg, u, cat, sess))
+
+
+def _submitted_text(msg) -> str:
+    """The text the gate should read: a forwarded photo/video carries its words
+    in `caption`, not `text`. Reading only `text` let captioned scam posts walk
+    straight through the gate."""
+    return (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+
+
+def _pending_from(msg, u: str, cat: str, sess: dict, owner_exempt: bool = False) -> dict:
+    """Snapshot of the post being distributed.
+
+    We remember the copy the member forwarded INTO the bot chat
+    (chat_id + message_id). Re-forwarding that keeps Telegram's original
+    attribution header, and unlike forwarding from the source channel it works
+    without the bot being a member of that channel.
+    """
+    return {
         "user": u, "tier": ledger.balance(u)["tier"], "post_type": cat,
-        "source": forward_source(msg), "style": store.get("pending_style", "fwd"),
-        "ntf": store.get("pending_ntf", "loud"),
-        "forward_from_chat_id": from_chat.id if from_chat else msg.chat.id,
-        "forward_from_message_id": getattr(msg, "forward_from_message_id", None),
+        "source": forward_source(msg),
+        "style": sess.get("style", "fwd"),
+        "ntf": sess.get("ntf", "loud"),
+        "from_chat_id": msg.chat.id,
+        "from_message_id": msg.message_id,
+        "owner_exempt": owner_exempt,
     }
-    store.sync()
 
 
 async def owner_forward(msg: types.Message, u: str):
     """The owner's exempt path: skip terms/category/gate/cap, just pick how many
     (post->channel) pairs to route. No credits, no cap, route to any channel."""
-    from_chat = getattr(msg, "forward_from_chat", None)
-    style = store.get("pending_style", "fwd")
-    store["pending"] = {
-        "user": u, "tier": ledger.balance(u)["tier"], "post_type": store.get("pending_cat", "General"),
-        "source": forward_source(msg), "style": style,
-        "ntf": store.get("pending_ntf", "loud"),
-        "forward_from_chat_id": from_chat.id if from_chat else msg.chat.id,
-        "forward_from_message_id": getattr(msg, "forward_from_message_id", None),
-        "owner_exempt": True,
-    }
-    store.sync()
+    sess = _session(msg.from_user.id)
+    _session_set(msg.from_user.id,
+                 pending=_pending_from(msg, u, sess.get("cat", "General"), sess,
+                                       owner_exempt=True))
     await msg.answer(
         "👑 **Owner mode** — you're exempt: no terms, no category check, no cap, "
         "no credit cost.\n\nSend the post style too if you want one: use the Submit menu "
         "to pre-pick forward/direct/pin + loud/silent, or it defaults to **Forward+loud**.\n\n"
         "How many (post→channel) pairs to route? (Free — you're exempt.)",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton("1", callback_data="s:1"), InlineKeyboardButton("2", callback_data="s:2")],
-            [InlineKeyboardButton("3", callback_data="s:3"), InlineKeyboardButton("4", callback_data="s:4")],
-            [InlineKeyboardButton("5", callback_data="s:5")],
-            [InlineKeyboardButton("All matching", callback_data="s:all")],
+            [InlineKeyboardButton(text="1", callback_data="s:1"), InlineKeyboardButton(text="2", callback_data="s:2")],
+            [InlineKeyboardButton(text="3", callback_data="s:3"), InlineKeyboardButton(text="4", callback_data="s:4")],
+            [InlineKeyboardButton(text="5", callback_data="s:5")],
+            [InlineKeyboardButton(text="All matching", callback_data="s:all")],
         ]))
 
 
-@dp.callback_query(lambda c: c.data and c.data.startswith("s:"))
 def owner_targets(post_type: str = "General") -> list[str]:
-    """The owner routes to EVERY active, non-blocked channel (any size/band/tier)."""
+    """The owner routes to EVERY active, non-blocked channel that accepts this
+    category (any size/band/tier). Not a Telegram handler — a plain helper."""
     out = []
     for username, m in ledger.ledger.items():
         if m.get("is_owner"):
             continue
         if m.get("status") in ("RESTRICTED", "REMOVED"):
             continue
+        if not allows_receive(m, post_type):
+            continue
         out.append(username)
     return out
 
 
+# NOTE: this decorator used to sit on `owner_targets` (the helper right above),
+# which meant the *helper* was registered as the s: handler and `pick_spend` was
+# never wired up at all — tapping 1..5 did nothing and no post was ever routed.
+@dp.callback_query(lambda c: c.data and c.data.startswith("s:"))
 async def pick_spend(cb: types.CallbackQuery):
     sender = _uname(cb)
+    uid = cb.from_user.id
     raw = cb.data.split(":")[1]
     is_owner = ledger._is_exempt(sender)
-    pending = store.get("pending", {})
+    sess = _session(uid)
+    pending = sess.get("pending") or {}
+    if not pending:
+        await cb.answer("That submission expired — forward the post again.",
+                        show_alert=True)
+        return
+    post_type = pending.get("post_type", "General")
 
     if raw == "all":
         # Owner only: route to every ACTIVE channel (any size/band), no limit.
         if not is_owner:
             await cb.answer("Only the owner can route to all.", show_alert=True)
             return
-        targets = owner_targets(pending.get("post_type", "General"))
+        targets = owner_targets(post_type)
+    elif is_owner:
+        try:
+            n = int(raw)
+        except ValueError:
+            await cb.answer("Bad option.", show_alert=True)
+            return
+        targets = owner_targets(post_type)[:max(n, 0)]
     else:
-        n = int(raw)
-        ok, why = ledger.spend(sender, n)
+        try:
+            n = int(raw)
+        except ValueError:
+            await cb.answer("Bad option.", show_alert=True)
+            return
+        if n < 1:
+            await cb.answer("Pick at least one channel.", show_alert=True)
+            return
+        # Find the real targets FIRST. Charging n credits and then discovering
+        # only 2 matching channels exist used to burn the difference for nothing.
+        targets = perf.match(sender, want_channels=n, post_type=post_type)
+        if not targets:
+            await cb.answer("No matching channel in your performance band accepts "
+                            f"'{post_type}' right now. Nothing was charged.",
+                            show_alert=True)
+            return
+        # The SENDER's daily cap is what limits posting — the old build charged the
+        # cap to each RECEIVER instead, so the sender's cap never applied at all.
+        m = ledger._m(sender)
+        cap = daily_post_cap(m.get("size", 0), perf.score(sender)["band"],
+                             m.get("status", "ACTIVE"), m.get("is_owner", False))
+        left = ledger.cap_left(sender, cap)
+        if left != -1 and left < len(targets):
+            targets = targets[:left]
+        if not targets:
+            await cb.answer("Daily post cap reached. It resets at 00:00 UTC.",
+                            show_alert=True)
+            return
+        ok, why = ledger.spend(sender, len(targets))
         if not ok:
             await cb.answer(why, show_alert=True)
             return
-        # The owner routes anywhere (not just same-band); others match like-with-like.
-        if is_owner:
-            pool = owner_targets(pending.get("post_type", "General"))
-            targets = pool[:n] if n else []
-        else:
-            targets = perf.match(sender, want_channels=n,
-                                 post_type=pending.get("post_type", "General"))
+        ok_cap, why_cap = ledger.consume_cap(sender, cap, len(targets))
+        if not ok_cap:                      # cap was eaten between the two checks
+            ledger.refund(sender, len(targets))  # give back what we just charged
+            await cb.answer(why_cap, show_alert=True)
+            return
+
+    _session_clear(uid, "pending")          # one submission = one distribution
     await cb.message.answer(f"Distributing to {len(targets)} channel(s): {targets or 'none'}.")
     source = pending.get("source", "unknown")
     style = pending.get("style", "fwd")
     ntf = pending.get("ntf", "loud") == "silent"
     for target in targets:
         perf.mark_offered(target)
-        m = ledger._m(target)
-        m["cap_used_today"] = m.get("cap_used_today", 0) + 1
-        ledger.save()
         if ledger.is_direct(target):
             await direct_deliver(cb, sender, target, pending, style=style, silent=ntf)
         else:
             audit.record(bot="reward", sender=sender, source=source,
-                         post_type=pending.get("post_type", "General"),
+                         post_type=post_type,
                          target_channel=target, mode="chain", status="offered",
                          forward_valid=True, style=style)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton("✅ Agree (forward it)", callback_data=f"chain:agree:{sender}"),
-                 InlineKeyboardButton("❌ Disagree (skip)", callback_data=f"chain:dis:{sender}")],
-                [InlineKeyboardButton("🚩 Report as scam/fraud", callback_data=f"report:{sender}:{target}")],
+                [InlineKeyboardButton(text="✅ Agree (forward it)", callback_data=f"chain:agree:{sender}"),
+                 InlineKeyboardButton(text="❌ Disagree (skip)", callback_data=f"chain:dis:{sender}")],
+                [InlineKeyboardButton(text="🚩 Report as scam/fraud", callback_data=f"report:{sender}:{target}")],
             ])
-            await bot.send_message(target,
-                                   f"{sender} has a {style} post ({pending.get('post_type','General')}) "
-                                   f"for your band. Agree to forward, skip, or report.",
-                                   reply_markup=kb)
+            try:
+                await bot.send_message(target,
+                                       f"{sender} has a {style} post ({post_type}) "
+                                       f"for your band. Agree to forward, skip, or report.",
+                                       reply_markup=kb)
+            except Exception as e:
+                # One unreachable channel must not abort the whole distribution.
+                logging.warning("offer to %s failed: %s", target, e)
+                audit.record(bot="reward", sender=sender, source=source,
+                             post_type=post_type, target_channel=target,
+                             mode="chain", status="failed", forward_valid=True,
+                             error=str(e)[:120])
     await cb.answer("done", show_alert=False)
 
 
 async def direct_deliver(cb, sender, target, pending, style="fwd", silent=False):
     """Direct delivery to a channel where the bot is admin. forwardMessage keeps
     attribution. If style == 'pin', also pin after posting (channel pin = silent)."""
-    f_chat_id = pending.get("forward_from_chat_id")
-    f_msg_id = pending.get("forward_from_message_id")
+    f_chat_id = pending.get("from_chat_id", pending.get("forward_from_chat_id"))
+    f_msg_id = pending.get("from_message_id", pending.get("forward_from_message_id"))
+    if f_chat_id is None or f_msg_id is None:
+        # FORWARD-ONLY: no genuine message to forward means nothing gets posted.
+        # (The old build sent a "[direct] forwarded post from @x" placeholder —
+        # an un-attributed bot message pretending to be the member's post.)
+        audit.record(bot="reward", sender=sender, target_channel=target,
+                     mode="direct", status="failed", forward_valid=False,
+                     error="no source message to forward")
+        await cb.message.answer(f"⚠ Nothing to forward to {target} — resubmit the "
+                                "post as a forward.")
+        return
     try:
-        if f_chat_id is not None and f_msg_id is not None:
-            sent = await bot.forward_message(chat_id=target, from_chat_id=f_chat_id,
-                                             message_id=f_msg_id,
-                                             disable_notification=silent)
-        else:
-            sent = await bot.send_message(target,
-                                          f"[direct] forwarded post from {sender}",
-                                          disable_notification=silent)
+        sent = await bot.forward_message(chat_id=target, from_chat_id=f_chat_id,
+                                         message_id=f_msg_id,
+                                         disable_notification=silent)
         perf.mark_posted(target)
         if style == "pin":
             try:
@@ -466,35 +675,61 @@ async def direct_deliver(cb, sender, target, pending, style="fwd", silent=False)
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("chain:"))
 async def chain_delivery(cb: types.CallbackQuery):
-    _, decision, sender = cb.data.split(":")
+    parts = cb.data.split(":", 2)
+    if len(parts) < 3:
+        await cb.answer("Malformed action.", show_alert=True)
+        return
+    _, decision, sender = parts
     target = _uname(cb)
+    if target == sender:
+        await cb.answer("You can't agree to your own post.", show_alert=True)
+        return
     if decision == "agree":
-        ledger.earn(sender)
+        # The credit goes to the channel that SHARES someone else's post — i.e.
+        # the target that just agreed. Crediting the sender (as the old build
+        # did) let anyone mint credits simply by broadcasting their own posts.
+        ledger.earn(target)
         perf.mark_posted(target)
         audit.record(bot="reward", sender=sender, target_channel=target,
                      mode="chain", status="agreed", forward_valid=True)
+        bal = ledger.balance(target)["balance"]
         await cb.message.answer("Thanks! Forward the post to your channel to complete "
-                                "this (using forwardMessage keeps the original attribution).")
+                                "this (using forwardMessage keeps the original "
+                                f"attribution). +1 credit — balance {bal}.")
     else:
         audit.record(bot="reward", sender=sender, target_channel=target,
                      mode="chain", status="skipped", forward_valid=True)
         await cb.message.answer("Skipped. Moving to the next target.")
-    await cb.message.edit_reply_markup(None)
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass                       # the buttons were already cleared
     await cb.answer()
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("report:"))
 async def report_post(cb: types.CallbackQuery):
-    _, sender, target = cb.data.split(":")
+    parts = cb.data.split(":")
+    if len(parts) < 3:
+        await cb.answer("Malformed action.", show_alert=True)
+        return
+    _, sender, target = parts[0], parts[1], parts[2]
     reporter = _uname(cb)
+    # A report NEVER bans anyone by itself: it is filed as `pending` and only a
+    # human (owner/scoped admin) can confirm it and apply an action.
     item = reports.report(sender=sender, reporter=reporter,
-                          reported_post={"target_channel": target,
-                                         "post_type": store.get("pending", {}).get("post_type", "General")},
+                          reported_post={"target_channel": target},
                           reason="receiver flagged as inappropriate/scam/fraud")
     audit.record(bot="reward", sender=sender, target_channel=target,
                  mode="chain", status="skipped", forward_valid=True)
-    await cb.message.answer(f"🚩 Report #{item['id']} logged against {sender}. Admins will review.")
-    await cb.message.edit_reply_markup(None)
+    await cb.message.answer(f"🚩 Report #{item['id']} logged against {sender}. "
+                            "A human reviews every report — nothing is auto-banned.")
+    owner_notify(f"🚩 New report #{item['id']}: {reporter} flagged {sender}. "
+                 "Review it in the admin panel.")
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
     await cb.answer()
 
 
@@ -512,11 +747,10 @@ async def partner_menu(cb: types.CallbackQuery):
     buttons = []
     for r in mine[:8]:
         other = r["b"] if r["a"] == u else r["a"]
-        buttons.append([InlineKeyboardButton(
-            f"• {other}  [{r['status']}]", callback_data=f"partner:view:{r['id']}")])
+        buttons.append([InlineKeyboardButton(text=f"• {other}  [{r['status']}]", callback_data=f"partner:view:{r['id']}")])
     buttons += [
-        [InlineKeyboardButton("➕ New partnership", callback_data="partner:new")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="menu:hub")],
+        [InlineKeyboardButton(text="➕ New partnership", callback_data="partner:new")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")],
     ]
     if not mine:
         lines.append("(No active partnerships yet.)")
@@ -532,8 +766,7 @@ async def partner_flow(cb: types.CallbackQuery):
         await cb.message.edit_text(
             "Enter the other channel's **@username** (they must have added the bot as "
             "admin in that channel too, so both can post):")
-        store["partner_phase"] = "username"
-        store.sync()
+        _session_set(cb.from_user.id, partner_phase="username")
         await cb.answer()
         return
     if act == "view":
@@ -544,9 +777,9 @@ async def partner_flow(cb: types.CallbackQuery):
             return
         other = r["b"] if _uname(cb) == r["a"] else r["a"]
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton("🔄 Renew", callback_data=f"partner:renew:{rid}"),
-             InlineKeyboardButton("🔒 Request close", callback_data=f"partner:close:{rid}")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="menu:partners")],
+            [InlineKeyboardButton(text="🔄 Renew", callback_data=f"partner:renew:{rid}"),
+             InlineKeyboardButton(text="🔒 Request close", callback_data=f"partner:close:{rid}")],
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:partners")],
         ])
         await cb.message.edit_text(
             f"📜 Contract with {other} [{r['status']}]\n"
@@ -558,6 +791,13 @@ async def partner_flow(cb: types.CallbackQuery):
         return
     if act == "renew":
         r = contracts.renew(parts[2], note=f"renewed by {_uname(cb)}")
+        if not r:
+            await cb.answer("That contract is closed or unknown.", show_alert=True)
+            return
+        if _uname(cb) not in (r.get("a"), r.get("b")):
+            await cb.answer("Only the two partners can renew this contract.",
+                            show_alert=True)
+            return
         owner_notify(f"🔄 Partnership RENEWED {r['id']}: {r['a']} <-> {r['b']}")
         await cb.answer("Partnership renewed. Owner notified.")
         await cb.message.edit_text("✅ Renewed. Owner notified.", reply_markup=ui.role_menu(roles.role(cb.from_user.id)))
@@ -567,7 +807,14 @@ async def partner_flow(cb: types.CallbackQuery):
         if not r:
             await cb.answer("not found", show_alert=True)
             return
+        if _uname(cb) not in (r.get("a"), r.get("b")):
+            await cb.answer("Only the two partners can close this contract.",
+                            show_alert=True)
+            return
         r = contracts.request_close(parts[2], by=_uname(cb), reason="requested by partner")
+        if not r:
+            await cb.answer("That contract is already closed.", show_alert=True)
+            return
         owner_notify(f"🔒 CLOSE REQUESTED {r['id']}: {r['a']} <-> {r['b']} by {_uname(cb)}\n"
                      "You give the final close (/partner_close).")
         await cb.answer("Close requested. Owner notified; you'll get the final close.")
@@ -576,37 +823,51 @@ async def partner_flow(cb: types.CallbackQuery):
         return
 
 
-@dp.message()
+# This catch-all is registered BEFORE /rank, /audit, /reports and /schedule.
+# aiogram stops at the first matching handler and treats a plain `return` as
+# "handled", so as a bare `@dp.message()` it silently swallowed every command
+# defined below it — those four commands never ran. It now (a) never matches a
+# command and (b) returns UNHANDLED when it has nothing to capture, so the
+# update keeps flowing to the handlers underneath.
+@dp.message(lambda m: not (m.text or "").startswith("/"))
 async def partner_username_capture(msg: types.Message):
     """Capture the partner @username typed by a user during 'New partnership'."""
-    if msg.text and msg.text.startswith("/"):
-        return  # let commands through
-    if store.get("partner_phase") != "username":
-        return  # not in this flow -> let forward guard handle it
+    uid = msg.from_user.id
+    sess = _session(uid)
+    if sess.get("partner_phase") != "username":
+        return UNHANDLED       # not in this flow -> let other handlers try
     u = _uname(msg)
-    other = msg.text.strip()
+    other = (msg.text or "").strip()
+    if not other:
+        await msg.answer("Send the partner channel's @username.")
+        return
     if not other.startswith("@"):
         other = "@" + other
-    if other == u:
+    if other.lower() == u.lower():
         await msg.answer("You can't partner with yourself.")
         return
     # Both must be registered in the ledger.
     if other not in ledger.ledger:
         await msg.answer(f"{other} is not registered with CLICKMINT yet.")
-        store["partner_phase"] = None
-        store.sync()
+        _session_clear(uid, "partner_phase")
+        return
+    existing = [r for r in contracts.between(u, other)
+                if r.get("status") in ("ACTIVE", "RENEWED", "CLOSE_REQUESTED")]
+    if existing:
+        await msg.answer(f"You already have an open contract with {other} "
+                         f"(#{existing[0]['id']}).")
+        _session_clear(uid, "partner_phase")
         return
     m = ledger._m(u)
     other_m = ledger._m(other)
     if not (m.get("direct_mode") and other_m.get("direct_mode")):
         await msg.answer("Both channels must have added the bot as admin (Post Messages) "
                          "so you can post into each other. Fix that on both sides, then retry.")
-        store["partner_phase"] = None
-        store.sync()
+        _session_clear(uid, "partner_phase")
         return
     fields = contracts.self_contract_fields()
     rec = contracts.open(u, other, {"note": f"opened by {u}",
-                                    "types": store.get("pending_cat", "General")})
+                                    "types": sess.get("cat", "General")})
     owner_notify(f"🤝 NEW PARTNERSHIP OPENED {rec['id']}: {u} <-> {other}")
     await msg.answer(
         f"🤝 Partnership opened between {u} and {other} (#{rec['id']}).\n\n"
@@ -614,8 +875,7 @@ async def partner_username_capture(msg: types.Message):
         "\nOwner was notified and is the mediator. Both sides must honour the terms "
         "(niche-only, no-ads, no-spam, safety). Either can request close if it stops "
         "benefiting.")
-    store["partner_phase"] = None
-    store.sync()
+    _session_clear(uid, "partner_phase")
 
 
 def owner_notify(text: str):
@@ -639,10 +899,43 @@ async def _notify_owner(text: str):
 async def panel(cb: types.CallbackQuery):
     _, which = cb.data.split(":", 1)
     uid = cb.from_user.id
-    if which in ("review", "admins", "terms"):
+    # Every panel except the public terms text is owner/admin only. (The old
+    # build only guarded three of them; audit / reports / rank / direct /
+    # scheduled were unguarded — and, worse, unimplemented: those buttons in
+    # ui.role_menu fell through and did nothing at all.)
+    if which != "terms":
         if not _can_panel(uid, "reward") and not _can_panel(uid, "partnership"):
             await cb.answer("Owner/admin only.", show_alert=True)
             return
+    if which == "audit":
+        log = audit.last(12)
+        lines = [audit.summary(), ""]
+        for r in reversed(log):
+            lines.append(f"[{r.get('ts')}] {r.get('sender')} -> {r.get('target_channel')} "
+                         f"| {r.get('status')} | {r.get('post_type')}")
+        await _panel_edit(cb, "\n".join(lines[:45]) or "No deliveries yet.",
+                          ui.role_menu(roles.role(uid)))
+        await cb.answer()
+        return
+    if which == "reports":
+        await show_reports_panel(cb)
+        return
+    if which == "rank":
+        await _panel_edit(cb, _rank_text(), ui.role_menu(roles.role(uid)))
+        await cb.answer()
+        return
+    if which == "direct":
+        rows = [f"{u:<22} {'direct ✔' if m.get('direct_mode') else 'chain —'}"
+                for u, m in ledger.ledger.items()]
+        await _panel_edit(cb, "⚡ DELIVERY MODE PER CHANNEL\n\n" +
+                          ("\n".join(rows[:40]) or "No channels registered yet."),
+                          ui.role_menu(roles.role(uid)))
+        await cb.answer()
+        return
+    if which == "scheduled":
+        await _panel_edit(cb, sched.upcoming_text(), ui.role_menu(roles.role(uid)))
+        await cb.answer()
+        return
     if which == "review":
         pending = review.pending()
         if not pending:
@@ -653,9 +946,9 @@ async def panel(cb: types.CallbackQuery):
         kb = []
         for it in pending[:8]:
             lines.append(f"#{it['id']} | {it['category']} | by {it['sender']}\n  {it['text'][:80]}")
-            kb.append([InlineKeyboardButton(f"✅ Approve #{it['id']}", callback_data=f"review:approve:{it['id']}"),
-                       InlineKeyboardButton(f"❌ Reject #{it['id']}", callback_data=f"review:reject:{it['id']}")])
-        kb.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:admin")])
+            kb.append([InlineKeyboardButton(text=f"✅ Approve #{it['id']}", callback_data=f"review:approve:{it['id']}"),
+                       InlineKeyboardButton(text=f"❌ Reject #{it['id']}", callback_data=f"review:reject:{it['id']}")])
+        kb.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu:admin")])
         await cb.message.edit_text("\n".join(lines[:40]), reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
         await cb.answer()
         return
@@ -669,10 +962,10 @@ async def panel(cb: types.CallbackQuery):
             "pick a scope, and send them the code — they enter it with /adminlogin.\n"
             "• Admins are SCOPED: reward, partnership, or both.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton("🔑 Generate invite (reward)", callback_data="admin:invite:reward"),
-                 InlineKeyboardButton("🔑 Generate invite (partnership)", callback_data="admin:invite:partnership")],
-                [InlineKeyboardButton("🔑 Generate invite (both)", callback_data="admin:invite:both")],
-                [InlineKeyboardButton("⬅️ Back", callback_data="menu:owner")],
+                [InlineKeyboardButton(text="🔑 Generate invite (reward)", callback_data="admin:invite:reward"),
+                 InlineKeyboardButton(text="🔑 Generate invite (partnership)", callback_data="admin:invite:partnership")],
+                [InlineKeyboardButton(text="🔑 Generate invite (both)", callback_data="admin:invite:both")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:owner")],
             ]))
         await cb.answer()
         return
@@ -681,6 +974,96 @@ async def panel(cb: types.CallbackQuery):
         await cb.answer()
         return
     await cb.answer()
+
+
+async def _panel_edit(cb, text, kb):
+    """Render a panel, tolerating Telegram's "message is not modified"."""
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except Exception as e:
+        if "not modified" not in str(e).lower():
+            logging.warning("panel render failed: %s", e)
+
+
+def _rank_text() -> str:
+    lines = ["🏆 PERFORMANCE RANK (band A/B/C — performance, not size):", ""]
+    for username, m in ledger.ledger.items():
+        if m.get("is_owner"):
+            continue
+        s = perf.score(username)
+        cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"))
+        lines.append(f"{username:<22} {s['band']}  {s['score']:.2f}  {s['status']}  "
+                     f"direct={'✔' if ledger.is_direct(username) else '—'}  "
+                     f"cap={cap}  ({m.get('size', 0)})")
+    if len(lines) == 2:
+        lines.append("No channels registered yet.")
+    return "\n".join(lines[:50])
+
+
+async def show_reports_panel(cb: types.CallbackQuery):
+    """Pending reports + the HUMAN actions. Nothing here is automatic: a report
+    only affects a channel when a person taps one of these buttons."""
+    uid = cb.from_user.id
+    pending = reports.pending()
+    if not pending:
+        await _panel_edit(cb, "✅ No pending reports.", ui.role_menu(roles.role(uid)))
+        await cb.answer()
+        return
+    lines = [f"🚩 {len(pending)} pending report(s) — a human decides each one:", ""]
+    kb = []
+    for r in pending[:5]:
+        lines.append(f"#{r['id']} {r['sender']} — reported by {r['reporter']}\n"
+                     f"   {r.get('reason', '')[:70]}")
+        kb.append([InlineKeyboardButton(text=f"👍 Dismiss #{r['id']}",
+                                        callback_data=f"rep:clear:{r['id']}"),
+                   InlineKeyboardButton(text=f"⚠️ Warn #{r['id']}",
+                                        callback_data=f"rep:warn:{r['id']}")])
+        kb.append([InlineKeyboardButton(text=f"⛔ Restrict #{r['id']}",
+                                        callback_data=f"rep:restrict:{r['id']}"),
+                   InlineKeyboardButton(text=f"🚫 Remove #{r['id']}",
+                                        callback_data=f"rep:remove:{r['id']}")])
+    kb.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")])
+    await _panel_edit(cb, "\n".join(lines[:40]),
+                      InlineKeyboardMarkup(inline_keyboard=kb))
+    await cb.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("rep:"))
+async def decide_report(cb: types.CallbackQuery):
+    """The human step behind a report. Until this runs, a reported channel keeps
+    its status — one report (or one keyword) never bans anybody."""
+    uid = cb.from_user.id
+    if not _can_panel(uid, "reward"):
+        await cb.answer("Owner/admin only.", show_alert=True)
+        return
+    parts = cb.data.split(":")
+    if len(parts) < 3:
+        await cb.answer("Malformed action.", show_alert=True)
+        return
+    action, rid = parts[1], parts[2]
+    try:
+        rid = int(rid)
+    except ValueError:
+        await cb.answer("Bad report id.", show_alert=True)
+        return
+    try:
+        if action == "clear":
+            item = reports.clear(rid)
+            await cb.answer(f"#{rid} dismissed — no penalty.")
+        else:
+            item = reports.confirm(rid, action=action, note=f"by {_uname(cb)}")
+            if action == "restrict":
+                perf.set_status(item["sender"], "RESTRICTED")
+            elif action == "remove":
+                perf.set_status(item["sender"], "REMOVED")
+            elif action == "warn":
+                perf.set_status(item["sender"], "WATCH")
+            await cb.answer(f"#{rid} confirmed: {action}.")
+    except KeyError:
+        await cb.answer("That report no longer exists.", show_alert=True)
+        return
+    owner_notify(f"🚩 Report #{rid} on {item['sender']}: {action} by {_uname(cb)}.")
+    await show_reports_panel(cb)
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("admin:invite:"))
@@ -752,11 +1135,12 @@ async def notify_loop():
 # ---------------------------------------------------------------------------
 # Legacy command fallbacks (still work for power users)
 # ---------------------------------------------------------------------------
-@dp.message(Command("agree"))
-async def agree(msg: types.Message):
-    u = _uname(msg)
-    m = ledger.earn(u)
-    await msg.answer(f"+1 credit. Balance {m['balance']} (earned {m['earned']}).")
+# NOTE: there used to be an `/agree` command here that called `ledger.earn()` for
+# whoever typed it — i.e. a self-service credit printer that let any member mint
+# unlimited credits and bypass the earn-first rule. Agreeing is only meaningful
+# for a real offer, so it now lives exclusively on the offer's inline buttons
+# (`chain:agree:<sender>`), where the credit is granted to the channel that
+# actually shares someone else's post.
 
 
 @dp.message(Command("rank"))
@@ -764,16 +1148,7 @@ async def rank_view(msg: types.Message):
     if not _can_panel(msg.from_user.id, "reward"):
         await msg.answer("Owner/admin only.")
         return
-    lines = ["PERFORMANCE RANK (band A/B/C):", ""]
-    for username, m in ledger.ledger.items():
-        if m.get("is_owner"):
-            continue
-        s = perf.score(username)
-        cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"))
-        lines.append(f"{username:<22} {s['band']}  {s['score']:.2f}  {s['status']}  "
-                     f"direct={'✔' if ledger.is_direct(username) else '—'}  "
-                     f"cap={cap}  ({m.get('size',0)})")
-    await msg.answer("\n".join(lines[:55]))
+    await msg.answer(_rank_text())
 
 
 @dp.message(Command("audit"))
@@ -818,17 +1193,25 @@ async def schedule_direct(msg: types.Message):
     if not target.startswith("@"):
         target = "@" + target
     try:
-        at = dt.datetime.strptime(f"{day_str} {hm}", "%Y-%m-%d %H:%M").timestamp()
+        # The prompt promises UTC. strptime().timestamp() interpreted the time in
+        # the SERVER's local zone, so a box on anything but UTC posted at the
+        # wrong hour — the one thing a scheduled partner slot must get right.
+        at = dt.datetime.strptime(f"{day_str} {hm}", "%Y-%m-%d %H:%M").replace(
+            tzinfo=dt.timezone.utc).timestamp()
     except ValueError:
         await msg.answer("Bad time. Use YYYY-MM-DD HH:MM in UTC.")
         return
     if at < time.time():
-        await msg.answer("That time is in the past.")
+        await msg.answer("That time is in the past (times are UTC).")
         return
-    pending = store.get("pending", {})
+    pending = _session(msg.from_user.id).get("pending") or {}
+    if not pending.get("from_message_id"):
+        await msg.answer("Forward the post to me first, then schedule it — "
+                         "otherwise there's nothing to deliver.")
+        return
     rec = sched.schedule(at=at, target=target, sender=pending.get("user", _uname(msg)),
-                         from_chat_id=pending.get("forward_from_chat_id"),
-                         from_message_id=pending.get("forward_from_message_id"),
+                         from_chat_id=pending.get("from_chat_id"),
+                         from_message_id=pending.get("from_message_id"),
                          post_type=pending.get("post_type", "General"))
     await msg.answer(f"⏰ Scheduled #{rec['id']} to {target} at {day_str} {hm} UTC.")
     audit.record(bot="reward", sender=pending.get("user", _uname(msg)),
@@ -844,15 +1227,24 @@ async def run_due():
                                           from_chat_id=rec["from_chat_id"],
                                           message_id=rec["from_message_id"])
             else:
-                await bot.send_message(rec["target"], f"[direct] posted from {rec['sender']}")
+                # Forward-only: without the original message there is nothing
+                # genuine to deliver, so we do NOT post a fabricated stand-in.
+                sched.mark_done(rec["id"], note="no source message — skipped")
+                audit.record(bot="reward", sender=rec["sender"], target_channel=rec["target"],
+                             mode="direct", status="failed", forward_valid=False,
+                             error="no source message to forward")
+                continue
             perf.mark_posted(rec["target"])
             sched.mark_done(rec["id"])
             audit.record(bot="reward", sender=rec["sender"], target_channel=rec["target"],
                          mode="direct", status="delivered", forward_valid=True)
         except Exception as e:
-            sched.mark_done(rec["id"], note=str(e)[:120])
-            audit.record(bot="reward", sender=rec["sender"], target_channel=rec["target"],
-                         mode="direct", status="failed", forward_valid=True, error=str(e)[:120])
+            # Retry a transient failure instead of dropping an agreed slot.
+            gave_up = sched.fail(rec["id"], note=str(e)[:120])
+            if gave_up:
+                audit.record(bot="reward", sender=rec["sender"], target_channel=rec["target"],
+                             mode="direct", status="failed", forward_valid=True,
+                             error=str(e)[:120])
 
 
 async def scheduler_loop():

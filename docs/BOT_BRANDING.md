@@ -44,20 +44,20 @@ Shorter alternative (if you want one line): `CLICKMINT Partner Network`
 > is your username. **Set it / confirm it before you build the t.me links.**
 
 ### Description  (≤512 chars — shown at the start of the chat)
+> ⚠️ Telegram hard-rejects a description over 512 characters. The previous copy in this
+> doc was **697 characters** and would have failed `setMyDescription`. The version below
+> is 506 characters and is the one kept in `branding.py` (checked by a test).
 ```
 CLICKMINT is a partner & reward network for AI, crypto and airdrop channels.
 
 Earn credits by sharing another channel's post, then spend them to get your own posts
-shared across the network. Every share is tracked, every post is vetted: niche-related
-content only, no spam, no money-asking, no scam, no third-party ad posts.
+shared across the network. Every post is vetted: niche content only, no spam, no
+money-asking, no scam, no third-party ads.
 
-Performance matters more than size — your daily post cap scales with your channel size
-× how well it actually performs, so small high-engagement channels get a fair shot and
-nobody can spam.
+Performance beats size — your daily cap scales with size x how well you actually
+perform, so small high-engagement channels get a fair shot.
 
-Partner directly with quality channels you choose, agree a contract (type, volume,
-timing, duration), and the owner mediates so neither side is cheated. Safe. Fair. Built
-to grow.
+Partner with channels you choose, agree a contract, and the owner mediates.
 ```
 
 ### About / short description  (≤120 chars — profile page + share)
@@ -97,6 +97,7 @@ without losing quality or trust.
 ### About  (≤120)
 ```
 Cross-promote with trusted complementary channels. Contract-bound, owner-mediated, safe.
+```
 
 ---
 
@@ -125,6 +126,17 @@ Owner-only dashboard for the CLICKMINT partner network.
 ```
 
 ---
+
+## The copy also lives in code
+`branding.py` holds these exact strings and can push them to Telegram for you:
+
+```bash
+python3 branding.py --check   # print what would be applied (sends nothing)
+python3 branding.py           # apply name + description + about + command menu
+```
+`test_governance.py` checks every field against Telegram's limits, so the copy here and
+the copy in the bots can't drift apart or exceed a limit again. The **username** is the
+one field this cannot set — it is permanent and must be chosen in @BotFather.
 
 ## Applying this in @BotFather
 For each bot (`/mybots` → tap bot → Edit):

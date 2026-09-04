@@ -7,7 +7,9 @@ env
 #  and so they survive deploys as persistent files)
 reward_ledger.json
 partnership_state.json
-*.json
+*.lock
+# NOTE: deliberately NOT a blanket `*.json` — that also swallowed any config or
+# seed file we might legitimately want to commit. Add new runtime files by name.
 
 # ---- Python ----
 __pycache__/

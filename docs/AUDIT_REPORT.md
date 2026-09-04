@@ -1,69 +1,130 @@
 # CLICKMINT — Full Codebase Audit Report
 
-**Date:** 2026-09-04 · **Scope:** the entire `partner_bots` codebase · **Method:** compile
-check, automated test suites, wiring/import check, targeted code review.
+**Date:** 2026-09-04 (second pass, GitHub-connected session) · **Scope:** the whole
+`clickmint-partner-bots` repo · **Method:** compile check, the three test suites, live
+handler-dispatch tests against a mocked Telegram session, and a targeted code review of
+every module.
 
 ## 1. Summary (verdict)
-| Area | Status |
-|---|---|
-| Compiles (all modules) | ✅ PASS |
-| Core engine tests | ✅ 14/14 |
-| Governance rules tests | ✅ 23/23 (was falsely 21/21 — **fixed**) |
-| 3 bots import + register handlers | ✅ PASS |
-| Secrets not in code | ✅ PASS (env vars + `.gitignore`) |
-| Owner exemption (incl. numeric id) | ✅ verified end-to-end |
-| Overall | **Healthy, deployable.** 5 issues found; all addressed. |
+| Area | Before this session | After |
+|---|---|---|
+| Compiles (all modules) | ✅ PASS | ✅ PASS |
+| Core engine tests | "ALL TESTS PASSED" (ran 3×, no count) | ✅ **23/23**, one runner, exits non-zero on failure |
+| Governance tests | 23/23 (always exit 0) | ✅ **33/33**, exits non-zero on failure |
+| Bot wiring tests | *did not exist* | ✅ **24/24** (new `test_bots.py`) |
+| 3 bots import + register handlers | ✅ PASS | ✅ PASS (reward 10 msg/13 cb, partner 5/7, admin 2/3) |
+| 3 bots actually *work* at runtime | ❌ **no** — every menu raised `TypeError` | ✅ every menu, funnel and panel exercised by tests |
+| Secrets not in code | ✅ PASS | ✅ PASS |
+| Owner exemption (numeric id) | ✅ unit-tested | ✅ unit-tested **and** end-to-end through the bot |
+| Overall | Looked green, was not runnable | **Green and actually exercised.** |
+
+The previous audit was accurate about the *engine*. What it never tested was the
+**Telegram layer**, and that is where the serious defects were: the baseline could not
+render a single button, could not register a channel, and could not route a post.
 
 ## 2. Checks executed
 ```bash
-python3 -m py_compile *.py                     # PASS
-python3 test_core.py                           # 14/14 PASS
-python3 test_governance.py                     # 23/23 PASS
-python3 -c "<import all 3 bots w/ patched token>"   # all handlers registered
+python3 -m py_compile *.py                # PASS
+python3 test_core.py                      # ALL TESTS PASSED (23)
+python3 test_governance.py                # 33/33 governance tests passed
+python3 test_bots.py                      # ALL BOT WIRING TESTS PASSED (24)
+python3 branding.py --check               # all copy within Telegram's limits
+# import check with patched tokens: all three bots register their handlers
 git check-ignore .env reward_ledger.json partnership_state.json   # all ignored
-git check-ignore .env.example                  # NOT ignored (tracked template) ✓
+git check-ignore .env.example             # NOT ignored (tracked template) ✓
 ```
 
 ## 3. Findings
 
-### 3.1 Bugs FOUND and FIXED this session
-| # | Severity | What was wrong | Why it mattered | Fix |
-|---|---|---|---|---|
-| **1** | **Medium** | `test_governance.py` had its `if __name__=="__main__"` runner **in the middle** of the file. The two owner-exemption test functions were defined *after* it, so they **never ran**. It printed `21/21` although 23 tests existed. | A silent blind spot — the owner-exemption guarantee looked green but wasn't being tested. | Moved the runner to the **end**; now `23/23` run, and it prints a `FAILED:` list on any failure. |
-| **2** | **Low** | Dead/shadowed `menu:cap` handler in `reward_bot.py`. `menu_nav` matches `startswith("menu:")` and already dispatches `which=="cap"`, so a separate `@dp.callback_query(startswith("menu:cap"))` handler was unreachable. | Redundant code, confusing to maintain. | Removed the shadowed handler; `show_cap` is reached via `menu_nav`. |
-| **3** | **Medium** | Owner exemption was keyed to the literal username `@ClickMintHQ`. If the owner's username string differed (case/space) or they forwarded from a different account, they'd silently be treated as a normal member and charged. | The core "owner is exempt" promise could fail in the field. | `_is_exempt()` now also recognizes a member whose stored `user_id == OWNER_USER_ID` — matching the role system. Added tests. |
-| **4** | Prev. high | `pick_spend` parsed `int(data.split(':')[1])`, which would crash on the new `s:all` owner option. | Runtime crash on "route to all." | Reads `raw` as a string and handles `"all"` before int-casting. |
-| **5** | **Low** | `.gitignore` has broad `*.json`, which would swallow any future committed JSON config/seed. | Could block legitimate config files. | Noted; keep the JSON ignore narrow to `reward_ledger.json`/`partnership_state.json` if you add config JSON. |
+### 3.1 Critical — the bots could not run
+| # | What was wrong | Impact | Fix |
+|---|---|---|---|
+| **C1** | **Every inline button used a positional argument** (`InlineKeyboardButton("Text", callback_data=…)`). aiogram 3 models are pydantic: positional args raise `TypeError: BaseModel.__init__() takes 1 positional argument`. 82 call sites across `ui.py` and the three bots. | *Every* menu, panel and prompt crashed the moment a user tapped `/start`. The old import-only check never constructed a button, so it passed. | All call sites converted to `text=…`; `test_bots.py` renders every menu. |
+| **C2** | The `@dp.callback_query(startswith("s:"))` decorator sat on **`owner_targets`**, a plain sync helper, so **`pick_spend` was never registered**. | Tapping 1–5 (or "All") did nothing: no post was ever distributed, no credit ever spent. The whole point of the bot. | Decorator moved to `pick_spend`; a test asserts every registered handler is a coroutine and that the funnel's handlers exist. |
+| **C3** | `reward_bot` advertised `/start @chan <subs>` but **never parsed the arguments**, and had no `/register`. | Nobody could register. Every member stayed at `size 0`, pinned to the minimum daily cap. | `/start` parses args (tolerantly) and a `/register` command was added; both validate the number instead of raising. |
+| **C4** | `admin_bot` used `@dp.message(types.Message)` — the Message **class** as a filter. | The owner dashboard never opened. | `@dp.message(Command("start"))` + a catch-all fallback. |
+| **C5** | The catch-all `@dp.message()` in `reward_bot` was registered **before** `/rank`, `/audit`, `/reports`, `/schedule` and returned `None` (= "handled"). | Those four commands were dead. | The catch-all no longer matches commands and returns `UNHANDLED` when idle. |
 
-### 3.2 What is CORRECT (verified, keep)
-- **Credit lifecycle + anti-cheat:** 1 credit = 1 (post, channel); earn-first; onboarding seed; owner exempt — all pass.
-- **Owner exemption** is robust (by numeric id) and tested.
-- **Forced-forward-only** (real attribution) enforced.
-- **Performance > size**: like-with-like band matching; size is only a tiebreaker; no fake views (uses proxy when no MTProto).
-- **No auto-ban on report/keyword** — reports and borderline posts go to **human review**.
-- **Scoped-admins** via one-time invite code, least privilege (owner only grants).
-- **Contract mediation** (owner notified on open/renew/close; close only final via owner).
-- **Agreed-time scheduler** works for direct delivery (attack attribution kept via `forwardMessage`).
+### 3.2 High — economy, caps and moderation were wrong
+| # | What was wrong | Impact | Fix |
+|---|---|---|---|
+| **H1** | On "Agree", the credit was given to **the sender** (`ledger.earn(sender)`), not the channel that agreed to share. | Credit inflation: broadcasting your own post *earned* you credits. Inverts the whole 1:1 economy. | `ledger.earn(target)`, plus a wiring test asserting sender balance is unchanged. |
+| **H2** | `/agree` was a plain command calling `earn()` for whoever typed it. | Any member could mint unlimited credits and bypass earn-first. | Command removed; agreeing only exists on a real offer's buttons. |
+| **H3** | The daily cap was incremented on each **receiver** (`m["cap_used_today"]` of the target), and the sender's counter was reset in memory but never saved. | The size × performance cap **never applied to anyone**; receivers were penalised for being chosen. | Cap accounting moved into `CreditLedger` (`cap_used` / `cap_left` / `consume_cap`, UTC day, atomic) and charged to the sender. Enforced in both network bots. |
+| **H4** | `pick_spend` charged `n` credits *before* finding targets. | Members paid for pairs that were never delivered. | Targets are resolved first, the member is charged for `len(targets)`, and a failed cap-consume refunds via a new `ledger.refund()` (which deliberately does **not** count as an "earn"). |
+| **H5** | `ReportRegistry.report()` did `item.update(reported_post)`. Passing a delivery-log row (which has `status`/`sender`/`id`) overwrote the report's own fields. | A report could be stored already marked `delivered` — invisible to `pending()`, so it never reached a human. | Post context is nested under `post`; only safe keys are mirrored; ids are `max+1` (same fix in `ReviewQueue`). |
+| **H6** | Nothing in any bot ever called `ReportRegistry.confirm()` / `clear()`. | Reports could be filed but **never actioned** — the "human review" promise had no human interface. | New 🚩 Pending-reports panel with Dismiss / Warn / Restrict / Remove, owner/admin-scoped, plus the pending count on the admin dashboard. |
+| **H7** | `PerformanceEngine.match()` ignored `post_type`. | Off-niche posts were pushed at channels whose contract excluded that category. | Matching honours each target's `receive_types` (shared `allows_receive()` helper). |
 
-### 3.3 Known limitations (honest — not bugs, but real)
-1. **No live channel views** without `views_provider.py` (MTProto/Telethon). Bot API can't read
-   views; the engine falls back to the reliability proxy (deliberately never fakes views).
-2. **JSON store, not a DB** — fine to hundreds of users; move to SQLite on the same free box
-   (still $0) when you hit write-locking; Postgres only on real demand.
-3. **Chain mode can't guarantee a manual partner post**; use direct mode (bot = admin) for guaranteed delivery.
-4. **Human recruitment isn't automated** — the bots handle post-"yes" mechanics, not winning the yes.
+### 3.3 Medium — multi-user state, storage, time, robustness
+| # | What was wrong | Impact | Fix |
+|---|---|---|---|
+| **M1** | The submission funnel lived in **global** store keys (`accepted_terms`, `pending_cat`, `pending`, `partner_phase`, `contract_phase`, `contract_user`). | With two members online at once, B's category overwrote A's and A's post was routed with B's settings. A classic silent data-corruption bug. | Per-user sessions keyed by Telegram id, with a 24h TTL prune, in both network bots. |
+| **M2** | `JsonStore.sync()` dumped the in-memory dict straight over the file, with no lock. All three bots share these files. | Lost updates (admin approving a post could wipe the reward bot's ledger) and a truncated file on a crash = total data loss. | Atomic write (temp file + `os.replace` + `fsync`), read-merge before write, `fcntl` lock, and tolerant loading. Covered by a test with two writers. |
+| **M3** | `/schedule` parsed the time with `strptime().timestamp()` — the **server's** timezone — while telling the user "UTC". | Scheduled partner posts fired at the wrong hour on any non-UTC host. | Parsed as UTC explicitly; scheduler timestamps/display switched to `gmtime`. |
+| **M4** | A failed scheduled delivery called `mark_done()`. | One transient error silently dropped an agreed partner slot. | `Scheduler.fail()` retries up to 3 attempts before giving up, recording the error. |
+| **M5** | Direct delivery / scheduler fell back to `send_message("[direct] forwarded post from @x")` when the source message was missing. | An un-attributed bot message posing as the member's post — a **forward-only violation**. | No stand-in is ever posted; the attempt is audited as `failed` with `forward_valid=False`. |
+| **M6** | The gate read only `msg.text`. | A scam post with its words in an image **caption** walked straight through. | Gate reads `text or caption` in both bots (regression test included). |
+| **M7** | Delivery used `forward_from_chat.id` — the *source channel* — as the forward origin. | Requires the bot to be inside the partner's source channel; normally fails. | Re-forwards the copy the member sent to the bot, which keeps Telegram's original attribution header and always works. |
+| **M8** | Substring matching in `classify_submission`. | "reclaimed" hard-blocked on "claim", "$100xyz" on "100x" — false blocks on innocent posts. | Word-boundary-aware matching (open ends preserved for patterns like `dm @`), plus `matched_patterns()` for reasons. |
+| **M9** | `partnership_bot` crashed on `/start @X notanumber` (`int()`), and `"@" + None` for a user with no Telegram username. | Handler exceptions on ordinary user mistakes. | Both parsed defensively; contract flow keyed by user id. |
+| **M10** | The partnership "🚩 Report" button only wrote an audit line — no report was filed. | "Admins review" was untrue; nothing to review. | Files a real pending report (still no auto-ban). |
+| **M11** | `partnership_bot` imported `daily_post_cap` but never enforced it. | That network had **no** posting limit at all. | Cap enforced, and a slot is only consumed when a post is actually offered. |
+| **M12** | `dash:back` was shadowed by the `dash:` handler registered above it. | The Back button did nothing on every admin panel. | Handled inside `dash()`; `_safe_edit` also swallows Telegram's "message is not modified". |
+| **M13** | `ui.role_menu` offered Audit / Reports / Rank / Direct / Scheduled buttons that no handler implemented, and the guard only covered 3 of 8 panels. | Dead buttons; unguarded panels. | All panels implemented and uniformly owner/admin-gated (test: every panel renders, and none renders for a normal member). |
+| **M14** | `admin_bot.is_owner` compared against `OWNER_USER_ID` even when unset (0). | A misconfigured deploy could hand the panel to id 0. | Unset owner id matches nobody. |
+| **M15** | Score used only `forwards` for engagement, trusted any provider payload, and used the stored size even when the provider reported live subs. | Junk (or a string/negative) from a provider poisoned the score. | Values are validated (`_num`), reactions included, live `subs` preferred — and still **never fabricated** when unavailable. |
+| **M16** | `.gitignore` had a blanket `*.json`. | Any future config/seed JSON would be silently ignored. | Narrowed to the two runtime files (+ `*.lock`), with a note. |
+| **M17** | The branding doc's reward description was **697 chars** against Telegram's 512 limit, and one code fence was unclosed. | `setMyDescription` would reject it. | Copy rewritten to 506 chars, moved into `branding.py`, doc fixed, and a test enforces every limit. |
 
-## 4. How to re-audit in the next session (no wasted limit)
+### 3.4 Test-suite defects (the audit's own blind spots)
+- `test_core.py` contained **three** stacked `if __name__ == "__main__"` runners: the suite
+  ran three times, and the two later lists were stale, so newer tests were skipped on those
+  passes. It printed "ALL TESTS PASSED" three times with **no count**, and always exited 0.
+  → one runner, at the end, prints `ALL TESTS PASSED (23)`, exits non-zero on failure.
+- `test_governance.py` printed `FAILED:` but still **exited 0** → CI could never go red.
+  → `sys.exit(1)` on failure.
+- There were **no tests at all** for the Telegram layer. → `test_bots.py` (24 tests) drives
+  real `Update` objects through each dispatcher with a mocked session.
+  ⚠️ **Action for the repo owner:** add a `run: python test_bots.py` step to
+  `.github/workflows/tests.yml` (the assistant's GitHub app is not allowed to edit workflow
+  files, so that one line has to be added by hand). `./run_tests.sh` runs everything locally.
+
+### 3.5 What is CORRECT (verified, keep)
+- Pure, offline-testable engine split from Telegram wiring.
+- **No auto-ban:** a hard-block refuses a *post*, never a channel; borderline → review queue;
+  reports are `pending` until a human acts. Tested from both the engine and the bot side.
+- **No fake views:** the provider is optional and validated; failure degrades to the
+  reliability proxy and reports `views: None` rather than inventing a number.
+- **Forward-only:** genuine forwards only, and no un-attributed stand-in is ever posted.
+- **Quality over size:** like-with-like performance bands + the receiver's contract; size is
+  only a tiebreaker; the cap is size × performance.
+- **Owner exemption** by numeric id, now proven end-to-end through the bot funnel.
+- **Scoped admins:** only the owner issues single-use codes; scope is enforced, unknown
+  scopes are dropped, revocation sticks.
+- **Zero budget:** still JSON on free hosting — hardened rather than replaced.
+
+## 4. Known limitations (honest — not bugs)
+1. **No live channel views** without `views_provider.py` (MTProto). Bot API cannot read them.
+2. **JSON store, not a DB.** Now atomic + merge-safe under three processes; move to SQLite
+   (same free box) if write contention ever shows up. Postgres only on real demand.
+3. **Chain mode can't guarantee a manual partner post** — use direct mode for guarantees.
+4. **Channel identity = the member's Telegram @username** throughout the bots. It works, but
+   a member whose channel handle differs from their user handle is modelled loosely. A future
+   change should store a channel↔user mapping at registration.
+5. **Human recruitment isn't automated** — the bots handle post-"yes" mechanics.
+
+## 5. How to re-audit next session
 ```bash
-cd partner_bots
 pip install -r requirements.txt
-python3 -m py_compile *.py          # expect no errors
-python3 test_core.py                # expect ALL TESTS PASSED (14)
-python3 test_governance.py          # expect 23/23 governance tests passed
-# then import-check the 3 bots with a patched token; set OWNER_USER_ID + tokens in .env
+python3 -m py_compile *.py        # expect no errors
+python3 test_core.py              # expect ALL TESTS PASSED (23)
+python3 test_governance.py        # expect 33/33
+python3 test_bots.py              # expect ALL BOT WIRING TESTS PASSED (24)
+python3 branding.py --check       # expect all fields within limits
 ```
 
-## 5. Verdict
-The codebase is **structurally sound, tested, and deploy-ready** on zero budget. The one real
-issue (the test-runner blind spot hiding the owner-exemption tests) has been fixed and is now
-covered. Remaining items are honest limitations to plan around, not defects.
+## 6. Verdict
+The engine was sound; the **bots were not runnable** and the credit economy, the daily cap
+and the report loop were each wrong in a way the old tests could not see. All of it is fixed
+and now covered by a test that fails loudly, in CI, if it regresses.

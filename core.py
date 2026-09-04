@@ -73,6 +73,12 @@ INVALID_POST_PENALTY = 0.2  # per post that arrived as a copy/non-forward
 FORWARD_ONLY = True
 
 
+def utc_day() -> str:
+    """Today's date in UTC. All caps/limits reset on the UTC day boundary — the
+    same clock the posting terms quote, whatever timezone the host runs in."""
+    return time.strftime("%Y-%m-%d", time.gmtime())
+
+
 def is_forward(msg) -> bool:
     """True only if the incoming Telegram message is a real forward.
 
@@ -145,6 +151,8 @@ class CreditLedger:
     def __init__(self, store):
         self.store = store                      # dict-like persistence (see store.py)
         self.ledger = self.store.get("ledger", {})
+        if not isinstance(self.ledger, dict):   # corrupt/legacy file -> start clean
+            self.ledger = {}
         # numeric owner id, so the owner is recognised by their Telegram id (matching
         # the role system) — not only by username. Set by the bot at startup. When set,
         # any member whose stored user_id equals this is treated as the owner (exempt).
@@ -179,6 +187,9 @@ class CreditLedger:
 
     def save(self):
         self.store["ledger"] = self.ledger
+        # the member dicts are mutated in place, so tell the store our copy wins
+        if hasattr(self.store, "mark_dirty"):
+            self.store.mark_dirty("ledger")
         self.store.sync()
 
     def set_user_id(self, username: str, uid) -> dict:
@@ -235,18 +246,73 @@ class CreditLedger:
         self.save()
         return True, f"spent {n_pairs} credits. Balance now {m['balance']}."
 
+    # --- refunds ---
+    def refund(self, username: str, n_pairs: int) -> dict:
+        """Give back credits charged for pairs that were never delivered.
+
+        Deliberately NOT `earn()`: a refund must not count as "shared someone
+        else's post", or a member could satisfy the earn-first rule by failing.
+        """
+        m = self._m(username)
+        if self._is_exempt(username) or n_pairs < 1:
+            return m
+        m["balance"] += n_pairs
+        m["spent"] = max(0, m.get("spent", 0) - n_pairs)
+        self.save()
+        return m
+
     # --- anti-flood ---
     def mark_delivered(self, username: str) -> bool:
         m = self._m(username)
-        day = time.strftime("%Y-%m-%d")
-        if m["last_deliver_day"] != day:
+        day = utc_day()
+        if m.get("last_deliver_day") != day:
             m["delivered_today"] = 0
             m["last_deliver_day"] = day
+            self.save()
         if m["delivered_today"] >= DAILY_DELIVERY_CAP:
             return False
         m["delivered_today"] += 1
         self.save()
         return True
+
+    # --- daily POST cap accounting (the SENDER's own cap, per UTC day) --------
+    # The cap itself (size x performance) is computed in governance.daily_post_cap;
+    # this only tracks how much of it a member has used today. Kept here so the
+    # reward and partnership bots cannot drift apart on the accounting.
+    def cap_used(self, username: str) -> int:
+        """Slots the member has used today (auto-resets at UTC midnight)."""
+        m = self._m(username)
+        day = utc_day()
+        if m.get("last_cap_day") != day:
+            m["last_cap_day"] = day
+            m["cap_used_today"] = 0
+            self.save()
+        return int(m.get("cap_used_today", 0) or 0)
+
+    def cap_left(self, username: str, cap: int) -> int:
+        """How many slots remain. `cap` == -1 (owner) means unlimited."""
+        if cap == -1 or self._is_exempt(username):
+            return -1
+        return max(0, cap - self.cap_used(username))
+
+    def consume_cap(self, username: str, cap: int, n: int = 1) -> tuple[bool, str]:
+        """Charge `n` slots against today's cap. Owner/exempt is never charged.
+
+        Returns (ok, reason). Nothing is consumed when it would exceed the cap,
+        so a partial batch can never silently eat someone's whole day.
+        """
+        if n < 1:
+            return False, "nothing to consume"
+        if cap == -1 or self._is_exempt(username):
+            return True, "exempt — no cap"
+        used = self.cap_used(username)
+        if used + n > cap:
+            return False, (f"daily post cap reached ({used}/{cap} used today). "
+                           "Your cap is size × performance and resets at 00:00 UTC.")
+        m = self._m(username)
+        m["cap_used_today"] = used + n
+        self.save()
+        return True, f"{used + n}/{cap} of today's cap used."
 
     def _is_exempt(self, username: str) -> bool:
         """Owner is exempt. Recognised by (a) the reserved username, (b) the is_owner
@@ -288,6 +354,16 @@ class CreditLedger:
 # ---------------------------------------------------------------------------
 # PARTNERSHIP TERMS CONTRACT
 # ---------------------------------------------------------------------------
+def allows_receive(member: dict, post_type: str) -> bool:
+    """Does this member's contract accept a post of `post_type`?
+
+    An empty receive list means "anything"; a list containing 'General' also
+    means "anything". Missing key is tolerated (older ledger rows).
+    """
+    rec = (member or {}).get("receive_types") or []
+    return (not rec) or (post_type in rec) or ("General" in rec)
+
+
 class Contract:
     SETTABLE = POST_TYPES
 
@@ -300,8 +376,7 @@ class Contract:
         return member
 
     def allows_receive(self, member: dict, post_type: str) -> bool:
-        rec = member["receive_types"]
-        return (not rec) or (post_type in rec) or ("General" in rec)
+        return allows_receive(member, post_type)
 
 
 # ---------------------------------------------------------------------------
@@ -378,22 +453,40 @@ class ReportRegistry:
 
     def report(self, sender: str, reported_post: dict, reporter: str,
                reason: str = "", note: str = "") -> dict:
-        """A receiver reports a post that a sender offered to their channel."""
+        """A receiver reports a post that a sender offered to their channel.
+
+        The post context is kept in its own `post` sub-dict: it arrives from the
+        caller as an arbitrary dict (often a delivery-log row, which has its own
+        `status`/`sender`/`id` keys) and merging it into the report used to
+        overwrite the report's own bookkeeping — a 'pending' report could land
+        in the store already marked 'delivered' and never show up for review.
+        No auto-ban either way: every report starts life as `pending`.
+        """
         item = {
-            "id": len(self.all()) + 1,
+            "id": self._next_id(),
             "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
             "sender": sender,                       # the channel that offered the post
             "reporter": reporter,                   # the receiver who flagged it
             "reason": reason, "note": note,
             "status": "pending",                    # pending | reviewed-ok | confirmed
             "action": None,                         # None | warn | restrict | remove
+            "post": dict(reported_post or {}),      # post/forward context (never merged)
         }
-        item.update(reported_post)                  # attach post/forward context
+        # Convenience mirrors for the panels, but only for keys that can't collide.
+        for k in ("target_channel", "post_type", "source", "message_id"):
+            if k in (reported_post or {}):
+                item[k] = reported_post[k]
         log = self.store[self.key]
         log.append(item)
         self.store[self.key] = log
         self.store.sync()
         return item
+
+    def _next_id(self) -> int:
+        """Monotonic id — len()+1 would re-issue an id if a report is ever
+        removed/pruned, and two reports sharing an id break confirm/clear."""
+        ids = [i.get("id", 0) for i in self.all() if isinstance(i.get("id"), int)]
+        return (max(ids) + 1) if ids else 1
 
     def all(self, status: str | None = None) -> list:
         items = self.store.get(self.key, [])
@@ -442,6 +535,21 @@ class ReportRegistry:
 # ---------------------------------------------------------------------------
 # PERFORMANCE ENGINE (replaces subscriber-size as the match key)
 # ---------------------------------------------------------------------------
+def _num(value):
+    """Coerce a view-provider field to a non-negative number, or None.
+
+    A flaky/hostile provider must never poison the score with a string, a
+    negative, or a NaN — and we never substitute a made-up number for it.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    if value != value or value < 0:            # NaN or negative
+        return None
+    return value
+
+
 class PerformanceEngine:
     """Scores each channel on actual PERFORMANCE (reach ratio + engagement +
     reliability + reputation), buckets them into High/Medium/Low, and matches
@@ -481,14 +589,22 @@ class PerformanceEngine:
                 extra = self.views_provider(username) or {}
             except Exception:
                 extra = {}
-        subs = max(m.get("size", 0), 1)
-        views = extra.get("views")
+            if not isinstance(extra, dict):
+                extra = {}
+        # A provider that can see the channel reports the live subscriber count;
+        # otherwise fall back to the registered size. NEVER invent either number.
+        subs = _num(extra.get("subs")) or max(m.get("size", 0), 1)
+        subs = max(subs, 1)
+        views = _num(extra.get("views"))
         if views is not None:
             comp["reach"] = min(views / subs / 0.60, 1.0)     # 60% reach = max
             views_count = views
-        fwd = extra.get("forwards", 0)
+        # engagement = (reactions + forwards) / views, as documented. Both parts
+        # are optional: whatever the provider actually reports is what we use.
+        fwd = _num(extra.get("forwards")) or 0
+        reactions = _num(extra.get("reactions")) or 0
         if views_count:
-            comp["engagement"] = min((fwd) / max(views_count, 1) / 2.0, 1.0)
+            comp["engagement"] = min((fwd + reactions) / max(views_count, 1) / 2.0, 1.0)
 
         # reliability (did they actually forward what was offered?)
         comp["reliability"] = min(posted / max(offered, 1), 1.0)
@@ -551,8 +667,14 @@ class PerformanceEngine:
     def match(self, sender: str, want_channels: int,
               post_type: str = "General", min_status="ACTIVE") -> list[str]:
         """Same performance BAND as the sender, ignoring subscriber size.
-        Subscriber size is only a tiebreaker. Only ACTIVE (and better) channels
-        listed as targets by default."""
+
+        Subscriber size is only a tiebreaker. A channel is only offered a post if
+        its own contract accepts that category (`receive_types`) — matching must
+        never push off-niche content at a partner. Blocked channels are excluded,
+        and so is anything the caller asks for beyond `want_channels`.
+        """
+        if want_channels is not None and want_channels < 1:
+            return []
         if self._blocked(sender):
             return []
         m = self.ledger._m(sender)
@@ -563,6 +685,8 @@ class PerformanceEngine:
                 continue
             if self._blocked(username) and username != OWNER_USERNAME:
                 continue
+            if not allows_receive(mm, post_type):
+                continue                      # honours the receiver's contract
             if self.score(username)["band"] != sender_band:
                 continue
             pool.append(username)
