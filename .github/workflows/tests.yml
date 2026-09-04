@@ -1,0 +1,30 @@
+name: Tests
+
+# Runs the full offline engine + governance test suite on every push and every
+# pull request. This is your safety net: if a change breaks the logic, GitHub
+# flags it before it ever gets deployed. No secrets needed — tests are offline.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile-check all modules
+        run: python -m py_compile *.py
+
+      - name: Run core engine tests
+        run: python test_core.py
+
+      - name: Run governance tests
+        run: python test_governance.py

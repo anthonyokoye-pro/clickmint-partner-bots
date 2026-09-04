@@ -1,0 +1,30 @@
+# CLICKMINT Reward Bot — systemd service.
+# Deployed FROM GITHUB: the WorkingDirectory is a git clone/pull of your repo.
+#
+# Setup (once):
+#   sudo mkdir -p /opt/clickmint && sudo chown $USER /opt/clickmint
+#   git clone https://github.com/<YOU>/<REPO>.git /opt/clickmint
+#   cd /opt/clickmint && pip install -r requirements.txt
+#   cp .env.example .env      # then fill in REAL tokens + OWNER_USER_ID
+#   sudo cp clickmint.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now clickmint-reward
+# On every push, run:   sudo systemctl restart clickmint-reward  (or let CI auto-deploy)
+
+[Unit]
+Description=CLICKMINT Reward Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=clickmint
+WorkingDirectory=/opt/clickmint
+# Load secrets (tokens + owner id) from a git-ignored .env file next to the repo.
+EnvironmentFile=/opt/clickmint/.env
+ExecStart=/usr/bin/python3 /opt/clickmint/reward_bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

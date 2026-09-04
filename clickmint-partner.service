@@ -1,0 +1,19 @@
+# CLICKMINT Partnership Bot — systemd service (same host, same repo).
+# Same setup as clickmint.service. Works on Oracle Always Free / a Pi / any VPS.
+
+[Unit]
+Description=CLICKMINT Partnership Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=clickmint
+WorkingDirectory=/opt/clickmint
+EnvironmentFile=/opt/clickmint/.env
+ExecStart=/usr/bin/python3 /opt/clickmint/partnership_bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

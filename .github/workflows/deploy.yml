@@ -1,0 +1,38 @@
+name: Deploy
+
+# OPTIONAL auto-deploy to your own server (Oracle Always Free / Pi / any VPS).
+# On a push to `main`, this SSHes into your box, `git pull`s the repo, installs deps,
+# and restarts the two bot services. Works with the systemd services + deploy.sh.
+#
+# To enable:
+#   1) In your repo:  Settings -> Secrets and variables -> Actions -> New repository secret
+#        DEPLOY_HOST     = your server IP or hostname
+#        DEPLOY_USER     = e.g. clickmint
+#        DEPLOY_KEY      = a private SSH deploy key (see below)
+#        DEPLOY_PORT     = 22 (optional)
+#   2) Add the matching PUBLIC key to the server's ~/.ssh/authorized_keys for DEPLOY_USER,
+#      and make sure the app repo is at /opt/clickmint (see deploy.sh).
+#   3) Commit this workflow. It only runs on push to main.
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    if: github.repository_owner != 'none'   # change/remove as needed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          port: ${{ secrets.DEPLOY_PORT || '22' }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            set -e
+            cd /opt/clickmint
+            git pull --ff-only
+            python3 -m venv .venv
+            .venv/bin/pip install -r requirements.txt
+            sudo systemctl restart clickmint-reward clickmint-partner

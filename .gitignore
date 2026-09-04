@@ -1,0 +1,24 @@
+# ---- SECRETS: never commit your tokens / owner id ----
+.env
+env
+
+# ---- Runtime state: the bots' whole "database" is these JSON files ----
+# (they are generated at runtime; keep them OUT of git so you don't leak data
+#  and so they survive deploys as persistent files)
+reward_ledger.json
+partnership_state.json
+*.json
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- Editors / OS ----
+.DS_Store
+.idea/
+.vscode/
+*.log
