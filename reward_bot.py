@@ -1383,6 +1383,27 @@ async def notify_loop():
             for item in review.pending_notify("reward"):
                 if await _notify_review_sender(item):
                     review.clear_notify(item["id"])
+            # Keep one replaceable availability bubble per known member.
+            for member in ledger.ledger.values():
+                recipient = member.get("user_id")
+                if not recipient:
+                    continue
+                count = available.count(recipient)
+                bubble = bubbles.get(recipient)
+                if count == bubble.get("count") and bubble.get("message_id"):
+                    continue
+                text = f"📬 {count} post(s) available — tap /available to view" if count else "📭 No posts currently available"
+                try:
+                    if bubble.get("message_id"):
+                        await bot.edit_message_text(text, chat_id=int(recipient),
+                                                    message_id=bubble["message_id"])
+                    else:
+                        sent = await bot.send_message(int(recipient), text)
+                        bubble["message_id"] = sent.message_id
+                    bubbles.set(recipient, count, bubble.get("message_id"))
+                except Exception:
+                    # A blocked/deleted chat is not fatal to the notification loop.
+                    pass
             # Unclaimed offers get one related-category opportunity after 12h.
             for item in reroutes.due():
                 related = item.get("related_categories", [])
