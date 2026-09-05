@@ -7,6 +7,10 @@ Three bots (reward · partnership · owner admin panel) sharing one verified eng
 `python3 test_bots.py` 26/26 (bot wiring) · `python3 simulate.py` clean dry run.
 See `docs/AUDIT_REPORT.md` and the readable transcript in `docs/DRY_RUN.md`.
 
+**New here / not comfortable with the terminal?** Read **[START_HERE.md](START_HERE.md)** —
+it walks the whole setup in plain language. Short version: `bash setup.sh` asks for your
+three bot tokens and your Telegram id, then `bash run_bots.sh start` turns the bots on.
+
 ## 0. Important reality check (read first)
 - **A bot can only post into a channel where it is an ADMIN with "Post Messages."**
   There is no legitimate way around channel posting permission.
@@ -98,6 +102,9 @@ deploy.
 | `test_bots.py` | Bot wiring tests (26) — handlers, menus, funnel, roles, owner bypass. |
 | `simulate.py` | Offline dry run: plays a 19-step multi-user session and prints the whole conversation. |
 | `preflight.py` | Checks your tokens/owner id/store before launch, and confirms each token with Telegram. |
+| `setup.sh` | Guided first-time setup: asks four questions, writes `.env`, installs deps, verifies. |
+| `run_bots.sh` | start / stop / status / logs for all three bots at once. |
+| `START_HERE.md` | Beginner-friendly setup guide (no terminal experience assumed). |
 
 ## 6. Report system & performance engine (added)
 - **Report button** on every offered post: receiver flags scam/fraud. The bot never auto-bans —

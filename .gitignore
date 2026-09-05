@@ -11,6 +11,11 @@ partnership_state.json
 # NOTE: deliberately NOT a blanket `*.json` — that also swallowed any config or
 # seed file we might legitimately want to commit. Add new runtime files by name.
 
+# ---- run_bots.sh working files ----
+logs/
+run/
+.env.backup.*
+
 # ---- Python ----
 __pycache__/
 *.py[cod]

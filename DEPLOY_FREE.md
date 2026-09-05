@@ -71,6 +71,10 @@ network first, earn users, and *then* buy the upgrade when it pays for itself.
 
 ---
 
+> **Not comfortable with the terminal?** Use **[START_HERE.md](START_HERE.md)** instead —
+> same steps, explained from scratch, with `bash setup.sh` doing the typing for you.
+> This file is the reference version.
+
 ## Step 1 — create the three bots in @BotFather
 Open [@BotFather](https://t.me/BotFather) in Telegram and run `/newbot` **three times**
 (one per bot). It gives you a token like `8123456789:AAF9x…` each time — that token *is*
