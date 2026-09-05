@@ -457,16 +457,35 @@ async def menu_nav(cb: types.CallbackQuery):
                     f"Spend {amount(1)} per post → channel delivery.")
         await cb.message.edit_text(text, parse_mode="HTML",
                                    reply_markup=back_btn_q("menu:hub"))
+    elif which in ("add_channel", "add_group"):
+        kind = "group" if which == "add_group" else "channel"
+        _session_set(uid, destination_phase="name", destination_kind=kind)
+        label = "GROUP" if kind == "group" else "CHANNEL"
+        await cb.message.edit_text(
+            f"➕ <b>ADD {label}</b>\n\n"
+            f"Send the {kind}'s @username or public link.\n"
+            "Then I will ask for its current member/subscriber count.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:channels")],
+            ]))
     elif which == "channels":
         rows = channels.mine(uid)
         if not rows:
-            text = "📂 No channels/groups registered yet.\nUse /register @name <subscriber_count>."
+            text = "📂 <b>MY CHANNELS / GROUPS</b>\n\nNo destinations registered yet."
         else:
-            text = "📂 MY CHANNELS / GROUPS\n\n" + "\n".join(
+            text = "📂 <b>MY CHANNELS / GROUPS</b>\n\n" + "\n".join(
                 f"• {r.get('username')} · {r.get('kind')} · band {r.get('band')} · "
                 f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}"
                 for r in rows)
-        await cb.message.edit_text(text, reply_markup=ui.main_menu(role, include_partnership=False))
+        await cb.message.edit_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Add channel", callback_data="menu:add_channel"),
+                 InlineKeyboardButton(text="➕ Add group", callback_data="menu:add_group")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")],
+            ]))
     elif which == "owner":
         # A normal member could open the owner panel screen just by sending the
         # callback data — the panels themselves were guarded, but the menu wasn't.
@@ -1106,6 +1125,44 @@ async def partner_flow(cb: types.CallbackQuery):
         await cb.answer("Close requested. Owner notified; you'll get the final close.")
         await cb.message.edit_text("🔒 Close requested. Awaiting owner's final close.",
                                    reply_markup=ui.role_menu(roles.role(cb.from_user.id)))
+        return
+
+
+@dp.message(lambda m: not (m.text or "").startswith("/")
+            and _session(m.from_user.id).get("destination_phase"))
+async def destination_capture(msg: types.Message):
+    """Button-led registration: add a channel/group without a command."""
+    uid = msg.from_user.id
+    sess = _session(uid)
+    raw = (msg.text or "").strip()
+    if sess.get("destination_phase") == "name":
+        if raw.startswith("https://t.me/"):
+            raw = "@" + raw.rstrip("/").split("/")[-1].split("?")[0]
+        if not raw.startswith("@"):
+            raw = "@" + raw
+        if len(raw) < 2 or " " in raw or raw == "@":
+            await msg.answer("Please send a valid @username or public Telegram link.")
+            return
+        _session_set(uid, destination_phase="size", destination_name=raw)
+        await msg.answer(f"👥 Now send the current member/subscriber count for <b>{raw}</b>.",
+                         parse_mode="HTML",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                             [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")]]))
+        return
+    if sess.get("destination_phase") == "size":
+        try:
+            size = int(raw.replace(",", "").replace("_", ""))
+        except ValueError:
+            await msg.answer("Send numbers only, for example: 1200")
+            return
+        if size < 0 or size > 100_000_000:
+            await msg.answer("That member/subscriber count is not plausible.")
+            return
+        name = sess.get("destination_name")
+        kind = sess.get("destination_kind", "channel")
+        _session_clear(uid)
+        await msg.answer(_do_register(msg, name, size, kind=kind), parse_mode="HTML",
+                         reply_markup=ui.main_menu(roles.role(uid), include_partnership=False))
         return
 
 

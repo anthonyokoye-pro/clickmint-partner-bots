@@ -79,6 +79,13 @@ def _session(uid) -> dict:
     return _sessions().get(str(uid), {})
 
 
+def _session_clear(uid) -> None:
+    sessions = _sessions()
+    sessions.pop(str(uid), None)
+    store["sessions"] = sessions
+    store.sync()
+
+
 def _session_set(uid, **kw) -> dict:
     sessions = _sessions()
     s = dict(sessions.get(str(uid), {}))
@@ -207,6 +214,34 @@ async def contract_pick(cb: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("menu:"))
 async def menu_nav(cb: types.CallbackQuery):
     which = cb.data.split(":", 1)[1]
+    uid = cb.from_user.id
+    if which in ("add_channel", "add_group"):
+        kind = "group" if which == "add_group" else "channel"
+        _session_set(uid, destination_phase="name", destination_kind=kind)
+        label = "GROUP" if kind == "group" else "CHANNEL"
+        await cb.message.edit_text(
+            f"➕ <b>ADD {label}</b>\n\nSend the {kind}'s @username or public link.\n"
+            "Then send its current member/subscriber count.", parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:channels")]]))
+        await cb.answer(); return
+    if which == "channels":
+        rows = channels.mine(uid)
+        text = "📂 <b>MY CHANNELS / GROUPS</b>\n\n" + ("\n".join(
+            f"• {r.get('username')} · {r.get('kind')} · band {r.get('band')} · "
+            f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}" for r in rows)
+            if rows else "No destinations registered yet.")
+        await cb.message.edit_text(text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Add channel", callback_data="menu:add_channel"),
+                 InlineKeyboardButton(text="➕ Add group", callback_data="menu:add_group")],
+                [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")]]))
+        await cb.answer(); return
+    if which == "cancel":
+        _session_clear(uid)
+        await cb.message.edit_text("❌ Cancelled.", reply_markup=ui.main_menu(roles.role(uid)))
+        await cb.answer(); return
     if which == "submit":
         await cb.message.edit_text(
             TERMS_TEXT,
@@ -424,6 +459,43 @@ async def notify_loop():
         except Exception as e:
             logging.warning("notify_loop error: %s", e)
         await asyncio.sleep(15)
+
+
+@dp.message(lambda m: not (m.text or "").startswith("/")
+            and _session(m.from_user.id).get("destination_phase"))
+async def destination_capture(msg: types.Message):
+    """Button-led registration for partnership destinations."""
+    uid = msg.from_user.id
+    sess = _session(uid)
+    raw = (msg.text or "").strip()
+    if sess.get("destination_phase") == "name":
+        if raw.startswith("https://t.me/"):
+            raw = "@" + raw.rstrip("/").split("/")[-1].split("?")[0]
+        if not raw.startswith("@"):
+            raw = "@" + raw
+        if len(raw) < 2 or " " in raw or raw == "@":
+            await msg.answer("Please send a valid @username or public Telegram link."); return
+        _session_set(uid, destination_phase="size", destination_name=raw)
+        await msg.answer(f"👥 Now send the current member/subscriber count for <b>{raw}</b>.",
+                         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                             [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")]]))
+        return
+    if sess.get("destination_phase") == "size":
+        try:
+            size = int(raw.replace(",", "").replace("_", ""))
+        except ValueError:
+            await msg.answer("Send numbers only, for example: 1200"); return
+        if size < 0 or size > 100_000_000:
+            await msg.answer("That member/subscriber count is not plausible."); return
+        name = sess.get("destination_name"); kind = sess.get("destination_kind", "channel")
+        m = ledger.register(name, size, is_partner=True)
+        channels.add(uid, name, name, kind, ["General"], size=size, bot_added=False)
+        ledger.set_user_id(name, uid); _session_clear(uid)
+        await msg.answer(f"✅ <b>DESTINATION REGISTERED</b> — {name}\n\n"
+                         f"👥 Audience: {size:,}\n📈 Band: {perf.score(name)['band']}\n"
+                         "⚠️ Add the bot for accurate delivery and statistics.",
+                         parse_mode="HTML", reply_markup=ui.main_menu(roles.role(uid)))
+        return
 
 
 # --- owner/admin audit ---
