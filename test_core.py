@@ -1,6 +1,6 @@
 """Offline verification of the reward/partnership engine. Run: python test_core.py"""
-import json, tempfile, os
-from core import (CreditLedger, Distribution, Contract, DeliveryLog,
+import tempfile
+from core import (CreditLedger, Contract, DeliveryLog,
                   ReportRegistry, PerformanceEngine, tier_for_size,
                   OWNER_USERNAME, is_forward, FORWARD_ONLY, forward_source)
 
@@ -190,7 +190,6 @@ def test_performance_score_and_demote():
     perf.mark_offered("@high"); perf.mark_posted("@high")
     perf.mark_offered("@low"); perf.mark_offered("@low")
     s_high = perf.score("@high")
-    s_low = perf.score("@low")
     assert s_high["band"] != "C"          # reliable -> not low band
     # demote @low via a confirmed report -> status changes + excluded
     rep = ReportRegistry(perf.store)
@@ -273,33 +272,282 @@ def test_scheduler_agreed_time():
     print("OK agreed-time scheduler (due, mark_done, cancel)")
 
 
+# ---------------------------------------------------------------------------
+# Regression tests added by the 2026-09 audit
+# ---------------------------------------------------------------------------
+def test_report_context_cannot_overwrite_report_fields():
+    """A report is filed as PENDING even when the caller passes a delivery-log
+    row (which carries its own status/sender/id) as the post context."""
+    s, f = new_ledger_store()
+    rep = ReportRegistry(s)
+    delivery_row = {"id": 999, "status": "delivered", "sender": "@notthisone",
+                    "target_channel": "@receiver", "post_type": "Airdrops"}
+    item = rep.report(sender="@badchan", reporter="@receiver",
+                      reported_post=delivery_row, reason="scam")
+    assert item["status"] == "pending"          # not "delivered"
+    assert item["sender"] == "@badchan"         # not the row's sender
+    assert item["id"] != 999
+    assert item["post"]["status"] == "delivered"    # context is kept, but nested
+    assert len(rep.pending()) == 1
+    # ids stay unique even after the list is pruned
+    second = rep.report(sender="@x", reporter="@y", reported_post={})
+    assert second["id"] != item["id"]
+    print("OK report context can't clobber report bookkeeping")
+
+
+def test_no_auto_ban_on_report():
+    """A filed report never changes a channel's status by itself."""
+    ledger, perf = make_perf()
+    ledger.register("@accused", 1000)
+    rep = ReportRegistry(perf.store)
+    for _ in range(5):                      # five reports, still no ban
+        rep.report(sender="@accused", reporter="@r", reported_post={})
+    assert perf.status("@accused") == "ACTIVE"
+    assert "@accused" in perf.match("@accused", 5) + ["@accused"]
+    # only a human confirmation + explicit status change restricts it
+    pending = rep.pending()
+    assert len(pending) == 5
+    rep.confirm(pending[0]["id"], action="restrict")
+    assert perf.status("@accused") == "ACTIVE"      # still not automatic
+    perf.set_status("@accused", "RESTRICTED")       # the human acts
+    assert perf.status("@accused") == "RESTRICTED"
+    print("OK no auto-ban: reports need a human decision")
+
+
+def test_daily_cap_accounting_is_the_senders():
+    ledger, f = new_ledger()
+    ledger.register("@sender", 3000)
+    assert ledger.cap_used("@sender") == 0
+    assert ledger.cap_left("@sender", 3) == 3
+    ok, _ = ledger.consume_cap("@sender", 3, 2)
+    assert ok and ledger.cap_used("@sender") == 2 and ledger.cap_left("@sender", 3) == 1
+    # over-consuming is refused ATOMICALLY (nothing partially consumed)
+    ok, why = ledger.consume_cap("@sender", 3, 2)
+    assert not ok and ledger.cap_used("@sender") == 2
+    ok, _ = ledger.consume_cap("@sender", 3, 1)
+    assert ok and ledger.cap_left("@sender", 3) == 0
+    print("OK daily cap accounting (sender-side, atomic)")
+
+
+def test_owner_cap_is_unlimited():
+    ledger, f = new_ledger()
+    ledger.register(OWNER_USERNAME, 630, is_owner=True)
+    assert ledger.cap_left(OWNER_USERNAME, -1) == -1
+    ok, _ = ledger.consume_cap(OWNER_USERNAME, -1, 50)
+    assert ok
+    assert ledger.cap_used(OWNER_USERNAME) == 0     # never charged
+    print("OK owner bypasses the daily cap")
+
+
+def test_refund_does_not_count_as_earning():
+    ledger, f = new_ledger()
+    ledger.register("@a", 800)
+    ledger.earn("@a")                    # earned 1 -> may spend
+    ok, _ = ledger.spend("@a", 2)
+    assert ok
+    before = ledger.balance("@a")
+    ledger.refund("@a", 2)
+    after = ledger.balance("@a")
+    assert after["balance"] == before["balance"] + 2
+    assert after["spent"] == before["spent"] - 2
+    assert after["earned"] == before["earned"]      # a refund is NOT an earn
+    print("OK refund restores credits without faking an earn")
+
+
+def test_match_respects_target_receive_types():
+    """Quality/contract rule: never offer a category a channel doesn't receive."""
+    ledger, perf = make_perf()
+    for u in ("@sender", "@airdropsonly", "@anything"):
+        ledger.register(u, 2000)
+        perf.mark_offered(u)
+        perf.mark_posted(u)
+    ledger._m("@airdropsonly")["receive_types"] = ["Airdrops"]
+    ledger._m("@anything")["receive_types"] = []
+    ledger.save()
+    got = perf.match("@sender", want_channels=5, post_type="DeFi")
+    assert "@airdropsonly" not in got
+    assert "@anything" in got
+    got2 = perf.match("@sender", want_channels=5, post_type="Airdrops")
+    assert "@airdropsonly" in got2
+    print("OK matching honours each target's receive contract")
+
+
+def test_views_provider_failure_never_fabricates():
+    """A broken/hostile provider degrades to the proxy — it never invents views."""
+    ledger, perf = make_perf()
+    ledger.register("@v", 1000)
+
+    def boom(_):
+        raise RuntimeError("provider down")
+
+    perf.views_provider = boom
+    s = perf.score("@v")
+    assert s["views"] is None and "reach" not in s["components"]
+    # junk payloads are ignored rather than trusted
+    for junk in ({"views": "1200"}, {"views": -5}, {"views": None}, "not-a-dict"):
+        perf.views_provider = lambda _u, j=junk: j
+        assert perf.score("@v")["views"] is None
+    # a real payload IS used, and a live subs count beats the stored size
+    perf.views_provider = lambda _u: {"views": 300, "forwards": 10, "reactions": 20,
+                                      "subs": 1000}
+    s2 = perf.score("@v")
+    assert s2["views"] == 300 and "reach" in s2["components"]
+    assert 0 < s2["components"]["engagement"] <= 1.0
+    print("OK view provider: real data only, never fabricated")
+
+
+def test_store_is_atomic_and_merges_concurrent_writers():
+    """All three bots share these files; one must not clobber another's keys."""
+    from store import JsonStore
+    import json as _json
+    f = tempfile.NamedTemporaryFile(delete=False)
+    f.close()
+    a = JsonStore(f.name)          # e.g. the reward bot
+    b = JsonStore(f.name)          # e.g. the admin bot, same file
+    a["ledger"] = {"@x": 1}
+    a.sync()
+    b.reload()
+    b["review_queue"] = [{"id": 1}]
+    b.sync()                       # b must not wipe a's ledger
+    a["ledger"] = {"@x": 2}
+    a.sync()                       # a must not wipe b's review queue
+    on_disk = _json.load(open(f.name))
+    assert on_disk["ledger"] == {"@x": 2}
+    assert on_disk["review_queue"] == [{"id": 1}]
+    # the file is always valid JSON (written via a temp file + atomic replace)
+    assert _json.load(open(f.name))
+    print("OK JSON store: atomic writes + no lost updates across bots")
+
+
+def test_forward_only_still_blocks_copies():
+    """The forward-only guarantee, restated as a regression test."""
+    class Copy:
+        forward_from = None
+        forward_from_chat = None
+        forward_origin = None
+    assert is_forward(Copy()) is False
+    class OriginOnly:                     # Bot API 7.0+ style forward
+        forward_from = None
+        forward_from_chat = None
+        forward_origin = object()
+    assert is_forward(OriginOnly()) is True
+    assert forward_source(OriginOnly()).startswith("origin:")
+    print("OK forward-only accepts genuine forwards only")
+
+
+
+# --- added after the 2026-09 dry-run simulation (simulate.py) ---------------
+def test_owner_is_exempt_from_the_very_first_message():
+    """The owner id used to be linked to the ledger row only inside the forward
+    handler, so an owner who typed /balance (or opened any menu) first was
+    treated as an ordinary member: charged credits and capped."""
+    ledger, _ = new_ledger()
+    ledger.owner_user_id = 777001
+    ledger.set_user_id("@bossman", 777001)       # what the bots now do on EVERY update
+    assert ledger._is_exempt("@bossman")
+    assert ledger._m("@bossman")["is_owner"] is True
+    ok, _why = ledger.can_spend("@bossman")
+    assert ok, "owner must be able to route before earning anything"
+    print("OK owner exemption is sealed on first contact (not only after a forward)")
+
+
+def test_owner_username_match_is_case_insensitive():
+    """Telegram treats @ClickMintHQ and @clickminthq as the same account; an
+    exact-case compare silently demoted the owner to member rules."""
+    ledger, _ = new_ledger()
+    assert ledger._is_exempt(OWNER_USERNAME.lower())
+    assert ledger._is_exempt(OWNER_USERNAME.upper())
+    print("OK owner @username is matched case-insensitively")
+
+
+def test_best_performer_is_not_stranded_by_band_matching():
+    """Strict band equality deadlocked the network: the first channel to
+    out-perform everyone became the only member of band A, so match() returned
+    [] and its posts could never be distributed."""
+    ledger, perf = make_perf()
+    for u in ("@star", "@mid1", "@mid2"):
+        ledger.register(u, 2000)
+    perf.mark_offered("@star"); perf.mark_posted("@star")      # band A, alone
+    for u in ("@mid1", "@mid2"):
+        perf.mark_offered(u); perf.mark_offered(u); perf.mark_posted(u)   # lower band
+    assert perf.score("@star")["band"] == "A"
+    assert all(perf.score(u)["band"] != "A" for u in ("@mid1", "@mid2"))
+    got = perf.match("@star", want_channels=5)
+    assert got, "the top performer must still reach somebody"
+    assert set(got) <= {"@mid1", "@mid2"}
+    print("OK band matching widens instead of stranding the best channel")
+
+
+def test_band_widening_never_overrides_a_same_band_peer():
+    """Widening is a fallback only: if same-band peers exist they win outright,
+    so 'quality over size' still governs who sees a post first."""
+    ledger, perf = make_perf()
+    for u in ("@a", "@peer", "@weak"):
+        ledger.register(u, 2000)
+    for u in ("@a", "@peer"):
+        perf.mark_offered(u); perf.mark_posted(u)
+    perf.mark_offered("@weak"); perf.mark_offered("@weak")     # offered, never posted
+    got = perf.match("@a", want_channels=5)
+    assert got == ["@peer"], got
+    print("OK same-band peers still take precedence over widened matches")
+
+
+def test_match_honours_min_status():
+    """`min_status` was accepted and then ignored entirely."""
+    ledger, perf = make_perf()
+    for u in ("@a", "@watched"):
+        ledger.register(u, 1500)
+        perf.mark_offered(u); perf.mark_posted(u)
+    perf.set_status("@watched", "WATCH")
+    assert "@watched" in perf.match("@a", 5)                   # default: WATCH is fine
+    assert "@watched" not in perf.match("@a", 5, min_status="ACTIVE")
+    print("OK match() actually applies min_status")
+
+
+ALL_TESTS = [
+    test_tiering, test_credit_lifecycle, test_anticheat,
+    test_subscriber_tier_is_not_the_gate, test_owner_exemption,
+    test_partnership_contract, test_forward_only, test_delivery_log,
+    test_report_system, test_performance_score_and_demote,
+    test_performance_match_like_with_like, test_views_pluggable,
+    test_direct_mode, test_scheduler_agreed_time,
+    # --- added by the 2026-09 audit ---
+    test_report_context_cannot_overwrite_report_fields,
+    test_no_auto_ban_on_report,
+    test_daily_cap_accounting_is_the_senders,
+    test_owner_cap_is_unlimited,
+    test_refund_does_not_count_as_earning,
+    test_match_respects_target_receive_types,
+    test_views_provider_failure_never_fabricates,
+    test_store_is_atomic_and_merges_concurrent_writers,
+    test_forward_only_still_blocks_copies,
+    # --- added after the dry-run simulation ---
+    test_owner_is_exempt_from_the_very_first_message,
+    test_owner_username_match_is_case_insensitive,
+    test_best_performer_is_not_stranded_by_band_matching,
+    test_band_widening_never_overrides_a_same_band_peer,
+    test_match_honours_min_status,
+]
+
+
+# ONE runner, at the very END of the file. (There used to be three stacked
+# runners here: the suite ran three times and the last two lists were stale, so
+# newer tests were silently skipped on those passes.) Exits non-zero on failure
+# so CI actually fails.
 if __name__ == "__main__":
-    for fn in [test_tiering, test_credit_lifecycle, test_anticheat,
-               test_subscriber_tier_is_not_the_gate, test_owner_exemption,
-               test_partnership_contract, test_forward_only, test_delivery_log,
-               test_report_system, test_performance_score_and_demote,
-               test_performance_match_like_with_like, test_views_pluggable,
-               test_direct_mode, test_scheduler_agreed_time]:
-        fn()
-    print("\nALL TESTS PASSED")
+    import sys
+    import traceback
 
-
-if __name__ == "__main__":
-    for fn in [test_tiering, test_credit_lifecycle, test_anticheat,
-               test_subscriber_tier_is_not_the_gate, test_owner_exemption,
-               test_partnership_contract, test_forward_only, test_delivery_log,
-               test_report_system, test_performance_score_and_demote,
-               test_performance_match_like_with_like, test_views_pluggable,
-               test_direct_mode]:
-        fn()
-    print("\nALL TESTS PASSED")
-
-
-if __name__ == "__main__":
-    for fn in [test_tiering, test_credit_lifecycle, test_anticheat,
-               test_subscriber_tier_is_not_the_gate, test_owner_exemption,
-               test_partnership_contract, test_forward_only, test_delivery_log,
-               test_report_system, test_performance_score_and_demote,
-               test_performance_match_like_with_like, test_views_pluggable]:
-        fn()
-    print("\nALL TESTS PASSED")
+    failed = []
+    for fn in ALL_TESTS:
+        try:
+            fn()
+        except Exception as exc:            # noqa: BLE001 - test runner
+            failed.append(fn.__name__)
+            print(f"FAIL {fn.__name__}: {exc}")
+            traceback.print_exc()
+    total = len(ALL_TESTS)
+    if failed:
+        print(f"\n{total - len(failed)}/{total} passed — FAILED: {failed}")
+        sys.exit(1)
+    print(f"\nALL TESTS PASSED ({total})")

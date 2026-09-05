@@ -1,6 +1,15 @@
 # CLICKMINT Partner Bots
 
-Two SEPARATE bots that share the same verified engine (`core.py`).
+Three bots (reward · partnership · owner admin panel) sharing one verified engine
+(`core.py` + `governance.py`). Zero budget, free hosting, JSON store.
+
+**Status:** `python3 test_core.py` 28/28 · `python3 test_governance.py` 33/33 ·
+`python3 test_bots.py` 26/26 (bot wiring) · `python3 simulate.py` clean dry run.
+See `docs/AUDIT_REPORT.md` and the readable transcript in `docs/DRY_RUN.md`.
+
+**New here / not comfortable with the terminal?** Read **[START_HERE.md](START_HERE.md)** —
+it walks the whole setup in plain language. Short version: `bash setup.sh` asks for your
+three bot tokens and your Telegram id, then `bash run_bots.sh start` turns the bots on.
 
 ## 0. Important reality check (read first)
 - **A bot can only post into a channel where it is an ADMIN with "Post Messages."**
@@ -17,11 +26,17 @@ Tiered network, strict 1:1 credits, accept/reject chain.
 - **Earn** = share another's post (+1 credit). **Spend** = have yours spread.
 - **Earn-first:** must share ≥1 before your posts are spread.
 - **Anti-cheat:** 1 credit = 1 (post → channel) pair. Sending ONE post to 5 channels = 5 credits.
-- **Strict same-tier:** only same-size channels share with each other (700–1k / 2k–3k / 4k–5k / 5k+).
+- **Quality over size:** targets are matched **like-with-like by performance band**
+  (A/B/C), and only to channels whose contract accepts that category. Subscriber size is
+  only a tiebreaker. Size tiers still exist (`tier_for_size`) but are *not* the match key.
+- **Daily post cap = size × performance**, charged to the **sender**, reset at 00:00 UTC.
 - **+2 onboarding seed** on join.
-- **Owner (CLICKMINT) is exempt** — can route anywhere freely, no earn/spend.
+- **Owner (CLICKMINT) is exempt** — no funnel, no credits, no cap; can route anywhere.
 
-Commands: `/start @chan 1200` · `/ledger` · `/agree` · forward a post to distribute.
+Commands: `/start @chan 1200` · `/register @chan 1200` · `/balance` · `/rank` · `/audit` ·
+`/reports` · `/schedule` · `/adminlogin <CODE>` · or just **forward a post** to distribute.
+(There is no `/agree` command — agreeing happens on the offer's buttons, so the credit
+goes to the channel that actually shares someone else's post.)
 
 ## 2. The partnership bot (`partnership_bot.py`)
 For the curated MAIN partners you agreed terms with.
@@ -43,10 +58,31 @@ All secrets are read from env vars (`config.py`; `.env` auto-loaded, git-ignored
 `DEPLOY_FROM_GITHUB.md` to host this repo on GitHub and deploy from there (CI tests +
 auto-deploy).
 
-## 4. Verify the engine (no Telegram needed)
+## 4. Verify everything (no Telegram, no network)
 ```bash
-python test_core.py   # ALL TESTS PASSED
+python3 -m py_compile *.py     # compile check
+python3 test_core.py           # ALL TESTS PASSED (28)  — engine
+python3 test_governance.py     # 33/33 governance tests passed — rules & roles
+python3 test_bots.py           # ALL BOT WIRING TESTS PASSED (26) — handlers/menus/funnel
+python3 simulate.py            # scripted dry run: prints every screen, asserts every rule
 ```
+Or just `./run_tests.sh`, which runs all of the above plus `python3 branding.py --check`.
+
+`simulate.py` is the human-readable counterpart: same machinery, but it prints each screen and
+clicks buttons **by their label**, so a dead button or a missing menu entry fails the run.
+`test_bots.py` drives real Telegram Update objects through each bot's dispatcher against a
+mocked session, so a dead handler, an unrenderable menu or a broken funnel is caught before
+deploy.
+
+> **CI note:** `.github/workflows/tests.yml` in this working tree already runs all four
+> checks, but that file is **not pushed** — GitHub refuses workflow edits from the
+> assistant's app ("without `workflows` permission"). Commit it yourself:
+> ```bash
+> git add .github/workflows/tests.yml
+> git commit -m "CI: run the bot wiring suite + branding check"
+> git push
+> ```
+> (Or paste the same two steps into the file via GitHub's web editor.)
 
 ## 5. Files
 | File | Purpose |
@@ -55,19 +91,32 @@ python test_core.py   # ALL TESTS PASSED
 | `store.py` | JSON persistence (swap for SQLite/Supabase later). |
 | `reward_bot.py` | aiogram wiring for reward bot. |
 | `partnership_bot.py` | aiogram wiring for partnership bot. |
+| `governance.py` | Rules layer: daily cap, submission gate, review queue, partner contracts, roles. |
+| `admin_bot.py` | aiogram wiring for the owner's admin panel. |
+| `scheduler.py` | Agreed-time delivery queue (UTC), with retries. |
+| `ui.py` | Shared button menus + role routing. |
+| `branding.py` | The approved branding copy (`docs/BOT_BRANDING.md`) + a pusher for the Bot API. |
 | `views_provider.py` | **Optional** MTProto observer — the only way to read live channel views. |
-| `test_core.py` | Offline unit tests (12 scenarios, all pass). |
+| `test_core.py` | Engine tests (28). |
+| `test_governance.py` | Rules/roles/branding tests (33). |
+| `test_bots.py` | Bot wiring tests (26) — handlers, menus, funnel, roles, owner bypass. |
+| `simulate.py` | Offline dry run: plays a 19-step multi-user session and prints the whole conversation. |
+| `preflight.py` | Checks your tokens/owner id/store before launch, and confirms each token with Telegram. |
+| `setup.sh` | Guided first-time setup: asks four questions, writes `.env`, installs deps, verifies. |
+| `run_bots.sh` | start / stop / status / logs for all three bots at once. |
+| `START_HERE.md` | Beginner-friendly setup guide (no terminal experience assumed). |
 
 ## 6. Report system & performance engine (added)
 - **Report button** on every offered post: receiver flags scam/fraud. The bot never auto-bans —
-  admin reviews with `/reports`, then `/ok` (clear), `/warn`, `/restrict`, or `/remove`.
+  the report is filed as `pending` and a human decides in the owner/admin panel
+  (🚩 Pending reports → Dismiss / Warn / Restrict / Remove). `/reports` lists them.
 - **Performance engine** replaces subscriber-size matching. Score = reach ratio + engagement +
   reliability + reputation. Bands A/B/C; match **like-with-like**; promote/demote as scores change;
   subscriber size is only a tiebreaker. Real views need `views_provider.py` (MTProto); without it
   the engine uses the reliability proxy (no fake views).
 - **`/rank`** shows the live score/band/status per channel.
 
-## 7. Governance features (governance.py — added, 21 tests)
+## 7. Governance features (governance.py — 33 tests)
 The terms & limits + roles you asked for. Pure logic in `governance.py`, tested by `test_governance.py`.
 - **Post limit scales with size × performance.** `daily_post_cap(size, band, status, is_owner)`:
   size base (1–4 slots) × performance multiplier (A=1.0, B=0.75, C=0.5). Floor of 1 for any
@@ -89,7 +138,8 @@ The terms & limits + roles you asked for. Pure logic in `governance.py`, tested 
   contact you, you **generate a one-time invite code**, they `/adminlogin <CODE>` to unlock a
   **scoped** admin menu (reward / partnership / both). Owner is the only one who grants codes.
 
-Commands kept for power users: `/rank`, `/audit`, `/reports`, `/agree`, `/schedule`, `/adminlogin`.
+Commands kept for power users: `/rank`, `/audit`, `/reports`, `/balance`, `/schedule`,
+`/adminlogin`.
 
 ## 8. Admin panel bot (`admin_bot.py`) + review notifications (added)
 A **third bot** that is NOT extra hosting — it reads the *same* JSON store files the reward
@@ -118,7 +168,7 @@ The full project documentation lives in `docs/` — read this before changing co
 - `docs/PARTNERSHIP_RESEARCH.md` — growth/partner research (quality filter, 2:1 offer, terms, paid-ads)
 - `docs/BOT_BRANDING.md` — bot names, usernames, About, Description, and images (in `docs/`)
 - `docs/GITHUB_PUSH.md` — step-by-step Git Bash push guide
-- `docs/DEPLOY_FREE.md` — run everything for $0 (free hosting, SQLite vs Postgres)
+- `DEPLOY_FREE.md` (repo root) — run everything for $0 (free hosting, SQLite vs Postgres)
 
 ## 9. Before you run live
 - Replace `YOUR_BOT_TOKEN` with your real tokens, and set `OWNER_USER_ID` (your numeric Telegram id)

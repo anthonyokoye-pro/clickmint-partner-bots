@@ -1,0 +1,23 @@
+# CLICKMINT Admin Bot — systemd service (same host, same repo).
+# The third bot: the owner's private dashboard. Same setup as clickmint.service.
+#
+#   sudo cp clickmint-admin.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now clickmint-admin
+
+[Unit]
+Description=CLICKMINT Admin Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=clickmint
+WorkingDirectory=/opt/clickmint
+EnvironmentFile=/opt/clickmint/.env
+ExecStart=/usr/bin/python3 /opt/clickmint/admin_bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -19,10 +19,11 @@ from reward_ledger.json + partnership_state.json (the same files the other bots 
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from store import JsonStore
-from core import CreditLedger, PerformanceEngine
+from core import CreditLedger, PerformanceEngine, ReportRegistry
 from governance import ReviewQueue, RoleRegistry, daily_post_cap
 import config
 
@@ -44,7 +45,7 @@ def _kb(rows):
 
 
 def _back(cb, label="⬅️ Back"):
-    return InlineKeyboardButton(label, callback_data=cb)
+    return InlineKeyboardButton(text=label, callback_data=cb)
 
 
 bot = Bot(token=BOT_TOKEN)
@@ -52,14 +53,32 @@ dp = Dispatcher()
 
 
 def is_owner(uid) -> bool:
-    return int(uid) == OWNER_USER_ID
+    """Owner by numeric id. An unset OWNER_USER_ID (0) must match NOBODY, or an
+    unconfigured deployment would hand the panel to the first user with id 0."""
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return False
+    return bool(OWNER_USER_ID) and uid == OWNER_USER_ID
 
 
 # ---------------------------------------------------------------------------
 # /start -> dashboard (owner only)
 # ---------------------------------------------------------------------------
-@dp.message(types.Message)
+# `@dp.message(types.Message)` (the old filter) passed the Message *class* as a
+# filter. aiogram calls a filter with the event, so every incoming message tried
+# to build a Message out of a Message and the dashboard never opened.
+@dp.message(Command("start"))
 async def start(msg: types.Message):
+    if not is_owner(msg.from_user.id):
+        await msg.answer("🔒 This is the owner's admin panel.")
+        return
+    await show_dashboard(msg)
+
+
+@dp.message()
+async def any_message(msg: types.Message):
+    """Owner-only panel: any other message just re-opens the dashboard."""
     if not is_owner(msg.from_user.id):
         await msg.answer("🔒 This is the owner's admin panel.")
         return
@@ -69,7 +88,6 @@ async def start(msg: types.Message):
 def _dashboard_text():
     rstore, pstore = load_stores()
     rledger = CreditLedger(rstore)
-    rperf = PerformanceEngine(rledger, rstore, None)
     rrev = ReviewQueue(rstore)
     prev = ReviewQueue(pstore)
     ledger_members = len(rledger.ledger)
@@ -78,17 +96,20 @@ def _dashboard_text():
     # open contracts (ACTIVE / RENEWED / CLOSE_REQUESTED) in partnership store
     contracts = pstore.get("partner_contracts", [])
     open_c = [c for c in contracts if c.get("status") in ("ACTIVE", "RENEWED", "CLOSE_REQUESTED")]
+    # pending reports live in the reward store and need a HUMAN decision
+    pending_reports = len(ReportRegistry(rstore).pending()) + len(ReportRegistry(pstore).pending())
     # admin logins across both stores
     admins = {}
     for st in (rstore, pstore):
         for uid, u in (st.get("roles_users", {}) or {}).items():
-            if u.get("role") == "admin":
+            if u.get("role") == "admin" and u.get("active") is not False:
                 admins[uid] = u
     lines = [
         "🛠 CLICKMINT ADMIN DASHBOARD",
         f"  • Registered channels: {ledger_members}",
         f"  • Review queue: reward {pending_reward} · partnership {pending_partner}",
         f"  • Open partnership contracts: {len(open_c)}",
+        f"  • Pending reports awaiting a human: {pending_reports}",
         f"  • Active admins: {len(admins)}",
         "",
         "Tap below to drill into any panel.",
@@ -98,11 +119,11 @@ def _dashboard_text():
 
 def _dashboard_kb():
     return _kb([
-        [InlineKeyboardButton("📊 Daily caps (size x performance)", callback_data="dash:cap")],
-        [InlineKeyboardButton("🧾 Review queue — reward", callback_data="dash:rev:reward"),
-         InlineKeyboardButton("🧾 Review queue — partner", callback_data="dash:rev:partnership")],
-        [InlineKeyboardButton("🤝 Partnership contracts", callback_data="dash:contracts")],
-        [InlineKeyboardButton("👤 Admin logins", callback_data="dash:admins")],
+        [InlineKeyboardButton(text="📊 Daily caps (size x performance)", callback_data="dash:cap")],
+        [InlineKeyboardButton(text="🧾 Review queue — reward", callback_data="dash:rev:reward"),
+         InlineKeyboardButton(text="🧾 Review queue — partner", callback_data="dash:rev:partnership")],
+        [InlineKeyboardButton(text="🤝 Partnership contracts", callback_data="dash:contracts")],
+        [InlineKeyboardButton(text="👤 Admin logins", callback_data="dash:admins")],
     ])
 
 
@@ -117,10 +138,15 @@ async def dash(cb: types.CallbackQuery):
         return
     parts = cb.data.split(":")
     which = parts[1]
-    if which == "cap":
+    if which == "back":
+        # `dash:back` also starts with "dash:", so this handler matched it first
+        # and the dedicated back handler below never ran — the Back button was
+        # a no-op on every panel.
+        await _safe_edit(cb, _dashboard_text(), _dashboard_kb())
+    elif which == "cap":
         await show_caps(cb)
     elif which == "rev":
-        await show_review(cb, parts[2])
+        await show_review(cb, parts[2] if len(parts) > 2 else "reward")
     elif which == "contracts":
         await show_contracts(cb)
     elif which == "admins":
@@ -141,8 +167,7 @@ async def show_caps(cb):
         cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"))
         cap_txt = "unlimited" if cap == -1 else str(cap)
         lines.append(f"{username:<22} {s['band']}  {s['status']}  cap={cap_txt}  ({m.get('size',0)} sub)")
-    await cb.message.edit_text("\n".join(lines[:50]),
-                               reply_markup=_kb([[_back("dash:back")]]))
+    await _safe_edit(cb, "\n".join(lines[:50]), _kb([[_back("dash:back")]]))
 
 
 # --- review queue ---
@@ -151,17 +176,17 @@ async def show_review(cb, scope):
     rq = ReviewQueue(st)
     pending = rq.pending()
     if not pending:
-        await cb.message.edit_text("✅ No posts awaiting review.",
-                                   reply_markup=_kb([[_back("dash:back")]]))
+        await _safe_edit(cb, "✅ No posts awaiting review.",
+                         _kb([[_back("dash:back")]]))
         return
     lines = [f"🧾 {scope} review queue — {len(pending)} item(s):", ""]
     rows = []
     for it in pending[:8]:
         lines.append(f"#{it['id']} | {it.get('category')} | by {it.get('sender')}\n  {it.get('text','')[:70]}")
-        rows.append([InlineKeyboardButton(f"✅ Approve #{it['id']}", callback_data=f"rv:approve:{scope}:{it['id']}"),
-                     InlineKeyboardButton(f"❌ Reject #{it['id']}", callback_data=f"rv:reject:{scope}:{it['id']}")])
+        rows.append([InlineKeyboardButton(text=f"✅ Approve #{it['id']}", callback_data=f"rv:approve:{scope}:{it['id']}"),
+                     InlineKeyboardButton(text=f"❌ Reject #{it['id']}", callback_data=f"rv:reject:{scope}:{it['id']}")])
     rows.append([_back("dash:back")])
-    await cb.message.edit_text("\n".join(lines[:40]), reply_markup=_kb(rows))
+    await _safe_edit(cb, "\n".join(lines[:40]), _kb(rows))
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("rv:"))
@@ -170,13 +195,20 @@ async def review_decision(cb: types.CallbackQuery):
         await cb.answer("Owner only.", show_alert=True)
         return
     _, action, scope, rid = cb.data.split(":")
+    if scope not in ("reward", "partnership"):
+        await cb.answer("Unknown queue.", show_alert=True)
+        return
     st = JsonStore(REWARD_STORE_PATH if scope == "reward" else PARTNER_STORE_PATH)
     rq = ReviewQueue(st)
-    rq.decide(int(rid), approve=(action == "approve"), note=f"{action} by owner-admin")
+    if not rq.decide(int(rid), approve=(action == "approve"),
+                     note=f"{action} by owner-admin"):
+        await cb.answer("That queue item no longer exists.", show_alert=True)
+        await show_review(cb, scope)
+        return
     # Hand the outcome to the network bot (which owns the sender's chat) to DM sender.
     rq.mark_notify(int(rid), via=scope)
     await cb.answer(f"#{rid} {action}d. Sender will be notified by the network bot.")
-    await show_review(cb, scope if scope else "reward")
+    await show_review(cb, scope)
 
 
 # --- contracts ---
@@ -184,14 +216,14 @@ async def show_contracts(cb):
     _, pstore = load_stores()
     contracts = pstore.get("partner_contracts", [])
     if not contracts:
-        await cb.message.edit_text("No partnership contracts yet.",
-                                   reply_markup=_kb([[_back("dash:back")]]))
+        await _safe_edit(cb, "No partnership contracts yet.",
+                         _kb([[_back("dash:back")]]))
         return
     lines = ["🤝 PARTNERSHIP CONTRACTS", ""]
     for c in contracts[-15:]:
         lines.append(f"[{c.get('status')}] {c.get('a')} <-> {c.get('b')}  (opened {c.get('opened')})\n"
                      f"    {c.get('contract', {})}")
-    await cb.message.edit_text("\n".join(lines[:40]), reply_markup=_kb([[_back("dash:back")]]))
+    await _safe_edit(cb, "\n".join(lines[:40]), _kb([[_back("dash:back")]]))
 
 
 # --- admin logins (generate invite codes by button) ---
@@ -211,12 +243,12 @@ async def show_admins(cb):
         for uid, u in all_admins.items():
             lines.append(f"  • id {uid}  scope {u.get('scope')}  active={u.get('active')}")
     rows = [
-        [InlineKeyboardButton("🔑 Invite code — reward", callback_data="inv:reward")],
-        [InlineKeyboardButton("🔑 Invite code — partnership", callback_data="inv:partnership")],
-        [InlineKeyboardButton("🔑 Invite code — both", callback_data="inv:both")],
+        [InlineKeyboardButton(text="🔑 Invite code — reward", callback_data="inv:reward")],
+        [InlineKeyboardButton(text="🔑 Invite code — partnership", callback_data="inv:partnership")],
+        [InlineKeyboardButton(text="🔑 Invite code — both", callback_data="inv:both")],
         [_back("dash:back")],
     ]
-    await cb.message.edit_text("\n".join(lines), reply_markup=_kb(rows))
+    await _safe_edit(cb, "\n".join(lines), _kb(rows))
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("inv:"))
@@ -242,14 +274,17 @@ async def gen_invite(cb: types.CallbackQuery):
         lines.append(f"• {sc}:  {code}")
     lines += ["", "Send the code(s) to the trusted person. They run:",
               "   /adminlogin <CODE>", "in that bot. Each code is single-use."]
-    await cb.message.edit_text("\n".join(lines), reply_markup=_kb([[_back("dash:admins")]]))
+    await _safe_edit(cb, "\n".join(lines), _kb([[_back("dash:admins")]]))
 
 
-# --- back button ---
-@dp.callback_query(lambda c: c.data == "dash:back")
-async def dash_back(cb: types.CallbackQuery):
-    await cb.message.edit_text(_dashboard_text(), reply_markup=_dashboard_kb())
-    await cb.answer()
+async def _safe_edit(cb, text, kb):
+    """Edit a panel, tolerating Telegram's "message is not modified" error —
+    re-rendering an unchanged screen must not raise at the user."""
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except Exception as e:
+        if "not modified" not in str(e).lower():
+            logging.warning("panel edit failed: %s", e)
 
 
 async def main():

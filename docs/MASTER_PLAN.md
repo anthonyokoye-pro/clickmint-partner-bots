@@ -93,8 +93,13 @@ partner_bots/                     <- the repo root (push this to GitHub as the r
 ├── admin_bot.py                  <- ADMIN PANEL (aiogram): owner dashboard, caps, review queue,
 │                                     contracts, invite-code generator (reuses the same store files)
 │
-├── test_core.py                  <- ENGINE tests (14)
-├── test_governance.py            <- RULES tests (23)
+├── branding.py                   <- the approved BOT_BRANDING copy + a Bot API pusher
+│                                     (setMyName / Description / ShortDescription / Commands)
+│
+├── test_core.py                  <- ENGINE tests (23)
+├── test_governance.py            <- RULES + roles + branding tests (33)
+├── test_bots.py                  <- BOT WIRING tests (24): real Update objects through each
+│                                     dispatcher against a mocked Telegram session
 ├── requirements.txt              <- aiogram, python-dotenv
 ├── .env.example                  <- copy to .env (git-ignored) for secrets template
 ├── .gitignore                    <- keeps secrets + runtime JSON + caches out of git
@@ -102,7 +107,7 @@ partner_bots/                     <- the repo root (push this to GitHub as the r
 ├── clickmint.service             <- reward bot auto-start service
 ├── clickmint-partner.service     <- partnership bot auto-start service
 └── .github/workflows/
-    ├── tests.yml                 <- runs all tests on every push (CI safety net)
+    ├── tests.yml                 <- runs all THREE suites on every push (CI safety net)
     └── deploy.yml                <- optional auto-deploy on push (SSH to your server)
 ```
 
@@ -121,7 +126,8 @@ partner_bots/                     <- the repo root (push this to GitHub as the r
   **All three bots read the same files** → the admin panel sees the network's live state.
 
 ### 2.4 How the flows work (so the next session can reason fast)
-- **Register:** `/start @chan <subs>` → tier + onboarding seed (+2 credits).
+- **Register:** `/start @chan <subs>` or `/register @chan <subs>` → tier + onboarding seed
+  (+2 credits). Funnel state is per Telegram user id (never global).
 - **Member submits:** accept terms → pick niche category → pick style (forward/direct/pin) +
   loud/silent → forward the post → gate check → daily-cap check → pick pair count → chain Agree/
   Skip/Report (or direct auto-post). Borderline posts → human Review queue.
@@ -130,7 +136,9 @@ partner_bots/                     <- the repo root (push this to GitHub as the r
 - **Partnership:** partner menu → "New partnership" → enter other @username → both must have the
   bot admin → contract opens → owner notified → either side renews/requests close → owner gives
   the final close.
-- **Admin:** owner-only `/start` → dashboard → caps / review queue / contracts / invite codes.
+- **Admin:** owner-only `/start` → dashboard → caps / review queue / contracts / invite codes
+  / pending-report count. In the reward bot the owner panel also actions reports
+  (Dismiss / Warn / Restrict / Remove) — the human step that a report waits for.
 - **Roles:** owner (`OWNER_USER_ID`) / scoped-admin (reward/partnership/both via one-time code
   redeemed with `/adminlogin <CODE>`) / user.
 
@@ -146,23 +154,51 @@ partner_bots/                     <- the repo root (push this to GitHub as the r
 
 Runs: `python3 test_core.py` + `python3 test_governance.py` + `py_compile *.py` + handler wiring.
 
-### 3.1 Current status (verified this session)
+### 3.1 Current status (verified 2026-09-04, second pass)
 | Check | Result |
 |---|---|
-| Core engine tests | **14/14 PASS** |
-| Governance rules tests | **23/23 PASS** (was misreporting 21/21 — fixed) |
-| Compile all modules | PASS |
-| All 3 bots import + register handlers | PASS (reward 9, partner 5, admin wired) |
-| Secrets in env, not code | PASS (`config.py`, `.gitignore` protects `.env` + JSON) |
+| Compile all modules | **PASS** |
+| Core engine tests | **23/23** (`ALL TESTS PASSED (23)`) |
+| Governance + roles + branding tests | **33/33** |
+| Bot wiring tests (new) | **24/24** |
+| All 3 bots import + register handlers | PASS (reward 10 msg/13 cb, partner 5/7, admin 2/3) |
+| Secrets in env, not code | PASS (`config.py`, `.gitignore` protects `.env` + runtime JSON) |
 
-### 3.2 Bugs found & fixed this session
-| # | Issue | Severity | Fix |
-|---|---|---|---|
-| 1 | **Test runner misreported count.** The `__main__` runner sat mid-file, so the two owner-exemption tests defined after it never executed → printed "21/21" when 23 existed. | Medium (hidden blind spot) | Moved runner to the **end**; now **23/23** run + a FAILED list. |
-| 2 | **Dead / shadowed `menu:cap` handler.** `menu_nav` matches `startswith("menu:")` and already handles `which=="cap"`, so the separate `startswith("menu:cap")` handler never fired. | Low (redundant code) | Removed the shadowed handler; `show_cap` is now reached via `menu_nav`. |
-| 3 | **`*.json` in `.gitignore`** also ignores any JSON we might want to commit (e.g. a seed/config). | Low | Noted — keep optional seed/config JSON out, or narrow the ignore to the two runtime files if you add JSON config. |
-| 4 | **Owner detection was username-only** (fragile). | Medium | `_is_exempt` now also checks the stored `user_id == OWNER_USER_ID` (matches the role system). |
-| 5 | **`s:all` int-parsing hazard.** `pick_spend` parses `int(data.split(':')[1])`. | Prev. high | Now reads `raw` as a string and handles `"all"` before int-casting. |
+### 3.2 What the second pass found (full detail in `docs/AUDIT_REPORT.md`)
+The first audit tested the **engine** and never the **Telegram layer** — which is where the
+real defects were. Headlines:
+
+**Critical (the bots could not run):**
+1. Every inline button was built with a positional argument — aiogram 3 raises `TypeError`,
+   so every menu crashed. 82 call sites fixed.
+2. The `s:` callback decorator sat on a helper, so `pick_spend` was never registered:
+   tapping 1–5 distributed nothing.
+3. `/start @chan <subs>` was advertised but never parsed — nobody could register.
+4. `admin_bot` used `types.Message` as a filter, so the dashboard never opened.
+5. A catch-all message handler swallowed `/rank`, `/audit`, `/reports`, `/schedule`.
+
+**High (economy / caps / moderation):**
+6. "Agree" credited the **sender** instead of the sharer — broadcasting your own post minted
+   credits. `/agree` was an open credit printer; removed.
+7. The daily cap was charged to receivers and never to the sender → the size × performance
+   cap applied to nobody. Cap accounting moved into `CreditLedger` (UTC, atomic).
+8. Credits were charged before targets were known → members paid for undelivered pairs.
+9. A report's post-context overwrote the report's own `status`/`sender`/`id`, so reports
+   could vanish from the pending queue; and **no bot surface ever confirmed a report** —
+   the human step had no interface. Both fixed (🚩 panel with Dismiss/Warn/Restrict/Remove).
+10. Matching ignored the target's `receive_types` (off-niche offers).
+
+**Medium (state / storage / time / robustness):** global funnel state clobbered between
+concurrent members; `JsonStore` had no atomic write, no lock and no merge (three bots share
+those files); `/schedule` parsed "UTC" in server-local time; a transient delivery error
+dropped the slot; un-attributed placeholder posts violated forward-only; the gate ignored
+captions; substring matching hard-blocked innocent words; the partnership bot's report
+button filed nothing and its cap was never enforced; admin Back button shadowed; five panel
+buttons had no handler; branding copy exceeded Telegram's 512-char limit.
+
+**Test-suite defects:** `test_core.py` had three stacked runners (suite ran 3× with stale
+lists, printed no count, always exited 0); `test_governance.py` exited 0 even on failure;
+there were no tests for the bot layer at all. All three are fixed, and `test_bots.py` is new.
 
 ### 3.3 What's done well (don't touch / reuse)
 - Pure, offline-testable engine split from Telegram wiring (easy to test, no network).
@@ -180,12 +216,14 @@ Runs: `python3 test_core.py` + `python3 test_governance.py` + `py_compile *.py` 
 | **Human recruitment isn't automated** | The bots handle post-"yes" mechanics, not getting the yes. | That's your daily outreach (Part 1.4). |
 
 ### 3.5 Next-session testing checklist (so the new AI session doesn't waste limit)
-1. `cd partner_bots && pip install -r requirements.txt`
+1. `pip install -r requirements.txt`
 2. `python3 -m py_compile *.py`
-3. `python3 test_core.py`  → expect **14/14**
-4. `python3 test_governance.py`  → expect **23/23**
-5. Import check (patching token): all 3 bots register handlers without error.
-6. Set `OWNER_USER_ID` + tokens in `.env`; run one bot locally; confirm `/start` menu branches.
+3. `python3 test_core.py`  → expect **ALL TESTS PASSED (23)**
+4. `python3 test_governance.py`  → expect **33/33**
+5. `python3 test_bots.py`  → expect **ALL BOT WIRING TESTS PASSED (24)**
+6. `python3 branding.py --check`  → every field within Telegram's limits
+7. Import check (patching tokens): all 3 bots register handlers without error.
+8. Set `OWNER_USER_ID` + tokens in `.env`; run one bot locally; confirm `/start` menu branches.
 
 ---
 
@@ -211,13 +249,18 @@ git push -u origin main
 
 ### 4.3 What to paste into the next session (a short prompt)
 > "Audit this repo. It's CLICKMINT, a zero-budget Telegram partner/reward network at
-> `<repo>`. Read `CLICKMINT_Master_Plan.md` Parts 2 & 3 to understand the design and the
+> `<repo>`. Read `docs/MASTER_PLAN.md` Parts 2 & 3 to understand the design and the
 > current audited state. Run `python3 -m py_compile *.py`, `python3 test_core.py`
-> (expect 14/14), `python3 test_governance.py` (expect 23/23), and confirm all three bots
+> (expect ALL TESTS PASSED (23)), `python3 test_governance.py` (expect 33/33),
+> `python3 test_bots.py` (expect 24/24 bot wiring) and confirm all three bots
 > (reward_bot, partnership_bot, admin_bot) import and register handlers. Then find and fix
 > any remaining bugs, missing tests, and improve robustness — respecting: no auto-ban, no
 > fake views, forward-only, quality-over-size, owner exemption, scoped-admin least privilege,
-> zero budget, free hosting."
+> zero budget, free hosting, and the branding in `docs/BOT_BRANDING.md`."
+
+> **Note for the next session:** anything touching the Telegram layer must come with a
+> `test_bots.py` case. The first audit was green on the engine while every menu in every bot
+> raised `TypeError` — an engine-only suite cannot see that class of bug.
 
 ### 4.4 The "green of the channel" / paid-ads context to carry over
 This was covered in the session: quality-over-size outreach, the 3-tier ladder, the engagement
@@ -230,7 +273,8 @@ All saved in `CLICKMINT_Quality_Partnership_Research.md` and Part 1 above.
 ## Bottom line
 - **Growth plan** (Part 1): quality partners, engagement leverage, 3-tier ladder, 2:1 offers.
 - **Design** (Part 2): a clean, testable, 3-bot system on free hosting, all secrets in env.
-- **Audit** (Part 3): 14/14 + 23/23 green; 5 issues found & fixed (1 real test-runner blind spot,
-  1 dead handler, 3 robustness/tooling).
+- **Audit** (Part 3): 23/23 + 33/33 + 24/24 green. The second pass found 5 critical
+  (bots literally could not render a menu or route a post), 7 high (credit economy, caps,
+  report loop) and 17 medium issues — all fixed, all covered by tests.
 - **Handoff** (Part 4): a ready repo to push + a ready prompt so the next session starts from
   verified state and doesn't burn its limit.

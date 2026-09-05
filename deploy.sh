@@ -37,16 +37,26 @@ if [ ! -f "$APP_DIR/.env" ]; then
   echo "!! Edit $APP_DIR/.env with your real bot tokens + OWNER_USER_ID."
 fi
 
-echo "==> Installing systemd services"
-sudo cp "$APP_DIR/clickmint.service" "$APP_DIR/clickmint-partner.service" /etc/systemd/system/
+echo "==> Preflight: are the secrets actually usable?"
+if ! sudo -u "$APP_USER" env -C "$APP_DIR" "$APP_DIR/.venv/bin/python3" preflight.py; then
+  echo "!! Preflight failed. Fix $APP_DIR/.env, then re-run this script."
+  echo "   (Nothing was started, so the bots are not running with a bad config.)"
+  exit 1
+fi
+
+echo "==> Installing systemd services (all THREE bots)"
+sudo cp "$APP_DIR/clickmint.service" "$APP_DIR/clickmint-partner.service" \
+        "$APP_DIR/clickmint-admin.service" /etc/systemd/system/
 # point at the venv python
-sudo sed -i "s#/usr/bin/python3#$APP_DIR/.venv/bin/python3#" /etc/systemd/system/clickmint.service /etc/systemd/system/clickmint-partner.service || true
+sudo sed -i "s#/usr/bin/python3#$APP_DIR/.venv/bin/python3#" \
+     /etc/systemd/system/clickmint.service \
+     /etc/systemd/system/clickmint-partner.service \
+     /etc/systemd/system/clickmint-admin.service || true
 sudo systemctl daemon-reload
-sudo systemctl enable clickmint-reward clickmint-partner 2>/dev/null || true
-sudo systemctl restart clickmint-reward clickmint-partner
+sudo systemctl enable clickmint-reward clickmint-partner clickmint-admin 2>/dev/null || true
+sudo systemctl restart clickmint-reward clickmint-partner clickmint-admin
 
 echo "==> Done. Check logs:"
-echo "    sudo journalctl -u clickmint-reward -f"
+echo "    sudo journalctl -u clickmint-reward  -f"
 echo "    sudo journalctl -u clickmint-partner -f"
-echo "Remember: the admin_bot.py also needs a third token; run it as its own service "
-echo "or add another .service file the same way."
+echo "    sudo journalctl -u clickmint-admin   -f"

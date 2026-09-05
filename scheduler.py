@@ -19,6 +19,7 @@ import uuid
 
 class Scheduler:
     def __init__(self, store, key="scheduled", tz_note="UTC"):
+        # Every timestamp here is UTC — `tz_note` only labels the display.
         self.store = store
         self.key = key
         self.tz_note = tz_note
@@ -40,7 +41,8 @@ class Scheduler:
             "from_message_id": from_message_id,
             "fire_once": True,
             "done": False,
-            "scheduled_ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "attempts": 0,
+            "scheduled_ts": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
         }
         items = self.store[self.key]
         items.append(rec)
@@ -69,12 +71,36 @@ class Scheduler:
     def done_count(self) -> int:
         return sum(1 for r in self.store.get(self.key, []) if r.get("done"))
 
+    def fail(self, rec_id: str, note: str = "", max_attempts: int = 3) -> bool:
+        """Record a failed delivery attempt.
+
+        A transient error (target briefly unreachable, rate limit) used to mark
+        the posting done and silently drop an agreed partner slot. Now it is
+        retried on the next loop and only given up after `max_attempts`.
+        Returns True when the record has been given up on.
+        """
+        items = self.store[self.key]
+        gave_up = False
+        for r in items:
+            if r.get("id") == rec_id:
+                r["attempts"] = int(r.get("attempts", 0)) + 1
+                r["last_error"] = note
+                if r["attempts"] >= max_attempts:
+                    r["done"] = True
+                    r["posted_ts"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+                    r["note"] = f"gave up after {r['attempts']} attempts: {note}"
+                    gave_up = True
+                break
+        self.store[self.key] = items
+        self.store.sync()
+        return gave_up
+
     def mark_done(self, rec_id: str, note: str = "") -> None:
         items = self.store[self.key]
         for r in items:
             if r.get("id") == rec_id:
                 r["done"] = True
-                r["posted_ts"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                r["posted_ts"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
                 r["note"] = note
                 break
         self.store[self.key] = items
@@ -95,7 +121,7 @@ class Scheduler:
             return "No scheduled posts."
         lines = [f"Scheduled direct posts ({len(f)}):", ""]
         for r in f:
-            lines.append(f"#{r['id']} @ {time.strftime('%Y-%m-%d %H:%M', time.localtime(r['at']))} "
+            lines.append(f"#{r['id']} @ {time.strftime('%Y-%m-%d %H:%M', time.gmtime(r['at']))} "
                          f"({self.tz_note}) -> {r['target']} from {r['sender']} type={r['post_type']}")
         return "\n".join(lines)
 
