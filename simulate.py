@@ -285,7 +285,7 @@ async def main() -> int:
     note("the audited build never parsed these args — everyone stayed at size 0")
 
     await sim.send(R, ALPHA, "/balance")
-    expect("balance 2" in sim.last_text(), "onboarding seed is 2 credits")
+    expect("🪙 2 MINT" in sim.last_text(), "onboarding seed is 2 MINT")
 
     # ---------------------------------------------------------------- 3
     head(3, "Alpha walks the submission funnel (buttons only)")
@@ -295,7 +295,8 @@ async def main() -> int:
     await sim.tap(R, ALPHA, "Accept")
     await sim.tap(R, ALPHA, "Airdrops")
     await sim.tap(R, ALPHA, "Forward")
-    await sim.tap(R, ALPHA, "Loud")
+    # Loud is group-only; the registered destinations here are channels.
+    await sim.tap(R, ALPHA, "Silent")
     await sim.tap(R, ALPHA, "Submit")
 
     # ---------------------------------------------------------------- 4
@@ -341,8 +342,8 @@ async def main() -> int:
         if who:
             await sim.tap(R, who, "Agree", screen=handle)
     await sim.send(R, ALPHA, "/balance")
-    expect("earned 1" in sim.last_text(),
-           "Alpha earned +1 for SHARING someone else's post (not for sending one)")
+    expect("Earned: 🪙 1 MINT" in sim.last_text(),
+           "Alpha earned 🪙 1 MINT for SHARING someone else's post (not for sending one)")
 
     # ---------------------------------------------------------------- 8
     head(8, "Now Alpha's own post can circulate")
@@ -356,7 +357,7 @@ async def main() -> int:
            "tapping the number actually distributes (pick_spend is registered)")
     bal_after = reward_bot.ledger.balance(ALPHA.handle)["balance"]
     expect(bal_after < bal_before,
-           f"credits were charged to the sender: {bal_before} → {bal_after}")
+           f"MINT was charged to the sender: {bal_before} → {bal_after}")
 
     # ---------------------------------------------------------------- 9
     head(9, "Self-dealing: can Alpha agree to Alpha's own post?")

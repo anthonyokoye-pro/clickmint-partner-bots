@@ -731,7 +731,7 @@ def _pending_from(msg, u: str, cat: str, sess: dict, owner_exempt: bool = False)
         "user": u, "tier": ledger.balance(u)["tier"], "post_type": cat,
         "source": forward_source(msg),
         "style": sess.get("style", "fwd"),
-        "ntf": sess.get("ntf", "loud"),
+        "ntf": sess.get("ntf", "silent"),
         "from_chat_id": msg.chat.id,
         "from_message_id": msg.message_id,
         "owner_exempt": owner_exempt,
