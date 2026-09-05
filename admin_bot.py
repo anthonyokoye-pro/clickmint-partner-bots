@@ -25,6 +25,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from store import JsonStore
 from core import CreditLedger, PerformanceEngine, ReportRegistry
 from governance import ReviewQueue, RoleRegistry, daily_post_cap
+from features import category_counts
 import config
 
 logging.basicConfig(level=logging.INFO)
@@ -98,6 +99,10 @@ def _dashboard_text():
     open_c = [c for c in contracts if c.get("status") in ("ACTIVE", "RENEWED", "CLOSE_REQUESTED")]
     # pending reports live in the reward store and need a HUMAN decision
     pending_reports = len(ReportRegistry(rstore).pending()) + len(ReportRegistry(pstore).pending())
+    # Category counts are privileged dashboard data; ordinary users never see it.
+    category_rows = list((rstore.get("managed_channels", {}) or {}).values())
+    category_summary = category_counts(category_rows)
+    category_text = ", ".join(f"{k}: {v}" for k, v in sorted(category_summary.items())) or "none"
     # admin logins across both stores
     admins = {}
     for st in (rstore, pstore):
@@ -106,7 +111,8 @@ def _dashboard_text():
                 admins[uid] = u
     lines = [
         "🛠 CLICKMINT ADMIN DASHBOARD",
-        f"  • Registered channels: {ledger_members}",
+        f"  • Registered channels/groups: {ledger_members}",
+        f"  • Categories (privileged): {category_text}",
         f"  • Review queue: reward {pending_reward} · partnership {pending_partner}",
         f"  • Open partnership contracts: {len(open_c)}",
         f"  • Pending reports awaiting a human: {pending_reports}",

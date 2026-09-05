@@ -32,6 +32,9 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from core import (CreditLedger, DeliveryLog, ReportRegistry, PerformanceEngine,
                   is_forward, forward_source, allows_receive)
 from channel_registry import ChannelRegistry
+from features import (ReferralLedger, AvailablePostQueue, BubbleNotifier,
+                      AnnouncementBoard, RankVisibility, StatsBook, ReroutePlanner,
+                      category_counts)
 from store import JsonStore
 from scheduler import Scheduler
 from governance import (SubmissionGate, ReviewQueue, PartnerContractRegistry,
@@ -51,6 +54,15 @@ reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 sched = Scheduler(store)
 channels = ChannelRegistry(store)
+referrals = ReferralLedger(store, ledger)
+available = AvailablePostQueue(store)
+bubbles = BubbleNotifier(store)
+announcements = AnnouncementBoard(store)
+ranks = RankVisibility(store)
+stats = StatsBook(store)
+reroutes = ReroutePlanner(store)
+# PerformanceEngine consumes real observations when available; absent fields stay absent.
+perf.views_provider = stats.provider
 
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
@@ -171,11 +183,11 @@ def _parse_registration(text: str):
     return (username, size), None
 
 
-def _do_register(msg, username: str, size: int) -> str:
+def _do_register(msg, username: str, size: int, kind: str = "channel") -> str:
     m = ledger.register(username, size)
     # Keep a separate ownership registry: one Telegram user may manage many
     # channels/groups, each with its own band, status and categories.
-    channels.add(msg.from_user.id, username, username, "channel",
+    channels.add(msg.from_user.id, username, username, kind,
                  ["General"], size=size, bot_added=False)
     ledger.set_user_id(username, msg.from_user.id)
     s = perf.score(username)
@@ -233,6 +245,51 @@ async def register_cmd(msg: types.Message):
                      reply_markup=ui.main_menu(roles.role(_uid(msg)), include_partnership=False))
 
 
+@dp.message(Command("removechannel"))
+async def remove_channel_cmd(msg: types.Message):
+    parts = (msg.text or "").split()
+    if len(parts) != 2:
+        await msg.answer("Usage: /removechannel @channel_or_group")
+        return
+    target = parts[1] if parts[1].startswith("@") else "@" + parts[1]
+    row = next((r for r in channels.mine(msg.from_user.id)
+                if r.get("username") == target or str(r.get("chat_id")) == target), None)
+    if not row or not channels.remove(msg.from_user.id, row["chat_id"]):
+        await msg.answer("That channel/group is not registered under your account.")
+        return
+    await msg.answer(f"✅ Removed {target} from My channels / groups.")
+
+
+@dp.message(Command("editchannel"))
+async def edit_channel_cmd(msg: types.Message):
+    parts = (msg.text or "").split()
+    if len(parts) < 3:
+        await msg.answer("Usage: /editchannel @channel_or_group category[,category...]\n"
+                         "Choose up to three categories.")
+        return
+    target = parts[1] if parts[1].startswith("@") else "@" + parts[1]
+    row = next((r for r in channels.mine(msg.from_user.id)
+                if r.get("username") == target or str(r.get("chat_id")) == target), None)
+    if not row:
+        await msg.answer("That channel/group is not registered under your account.")
+        return
+    cats = [c.strip() for c in " ".join(parts[2:]).split(",") if c.strip()]
+    try:
+        channels.update(msg.from_user.id, row["chat_id"], categories=cats)
+    except ValueError as exc:
+        await msg.answer(str(exc)); return
+    await msg.answer(f"✅ Updated {target}: {', '.join(cats)}")
+
+
+@dp.message(Command("registergroup"))
+async def register_group_cmd(msg: types.Message):
+    parsed, err = _parse_registration(msg.text)
+    if err:
+        await msg.answer(err.replace("/register", "/registergroup")); return
+    await msg.answer(_do_register(msg, *parsed, kind="group"),
+                     reply_markup=ui.main_menu(roles.role(_uid(msg)), include_partnership=False))
+
+
 @dp.message(Command("mychannels"))
 async def mychannels_cmd(msg: types.Message):
     """Show every channel/group owned by this Telegram user (not just one row)."""
@@ -247,6 +304,98 @@ async def mychannels_cmd(msg: types.Message):
         lines.append(f"• {row.get('username')} · {row.get('kind')} · "
                      f"band {row.get('band')} · {row.get('status')} · {access}")
     await msg.answer("\n".join(lines), reply_markup=ui.main_menu("user", include_partnership=False))
+
+
+@dp.message(Command("announce"))
+async def announce_cmd(msg: types.Message):
+    if not roles.is_owner(msg.from_user.id):
+        await msg.answer("🔒 Owner only.")
+        return
+    text = (msg.text or "").partition(" ")[2].strip()
+    if not text:
+        await msg.answer("Usage: /announce your announcement text")
+        return
+    item = announcements.publish(msg.from_user.id, text)
+    sent = failed = 0
+    for member in ledger.ledger.values():
+        uid = member.get("user_id")
+        if not uid or int(uid) == int(msg.from_user.id):
+            continue
+        try:
+            await bot.send_message(int(uid), "📣 CLICKMINT ANNOUNCEMENT\n\n" + text)
+            sent += 1
+        except Exception:
+            failed += 1
+    await msg.answer(f"📣 Announcement #{item['id']} sent to {sent} user(s). "
+                     f"Unavailable: {failed}.")
+
+
+@dp.message(Command("categorystats"))
+async def category_stats_cmd(msg: types.Message):
+    if not roles.has_access(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Owner/admin only.")
+        return
+    counts = category_counts(channels._items().values())
+    await msg.answer("📊 REGISTERED DESTINATIONS BY CATEGORY\n" +
+                     "\n".join(f"• {k}: {v}" for k, v in sorted(counts.items()))
+                     if counts else "No categorized destinations yet.")
+
+
+@dp.message(Command("refer"))
+async def refer_cmd(msg: types.Message):
+    code = referrals.create_code(msg.from_user.id)
+    st = referrals.stats(msg.from_user.id)
+    await msg.answer("🔗 Your referral code: " + code + "\n"
+                     "Share it with a new member. You earn 1 credit only after they "
+                     "forward and complete one post.\n"
+                     f"Completed: {st['completed']} · pending: {st['pending']}")
+
+
+@dp.message(Command("joinref"))
+async def join_ref_cmd(msg: types.Message):
+    parts = (msg.text or "").split()
+    if len(parts) != 2 or not referrals.attach(msg.from_user.id, parts[1]):
+        await msg.answer("That referral code is invalid, already used, or belongs to you.")
+        return
+    await msg.answer("✅ Referral linked. Your referrer earns a credit only after you "
+                     "complete one genuine forwarded post.")
+
+
+@dp.message(Command("available"))
+async def available_cmd(msg: types.Message):
+    rows = available.available(msg.from_user.id, limit=10)
+    if not rows:
+        await msg.answer("📭 No posts are currently available for your band/category.")
+        return
+    lines = [f"📬 {len(rows)} post(s) available:"]
+    for row in rows:
+        lines.append(f"• {row['id']} · {row.get('category', 'General')}"
+                     + (" · 👑 owner priority" if row.get("owner") else ""))
+    await msg.answer("\n".join(lines))
+
+
+@dp.message(Command("scan"))
+async def scan_cmd(msg: types.Message):
+    """Refresh what the Bot API can actually verify for the user's destinations."""
+    rows = channels.mine(msg.from_user.id)
+    if not rows:
+        await msg.answer("Register a channel/group first with /register.")
+        return
+    lines = ["🔎 CHANNEL SCAN", ""]
+    for row in rows:
+        try:
+            count = await bot.get_chat_member_count(row["chat_id"])
+            stats.record(row["chat_id"], subscribers=count)
+            channels.update(msg.from_user.id, row["chat_id"], size=count,
+                            bot_added=True)
+            ledger.register(row["username"], count)
+            lines.append(f"✅ {row['username']}: {count} members/subscribers")
+        except Exception as exc:
+            channels.set_bot_access(row["chat_id"], False)
+            lines.append(f"⚠️ {row['username']}: bot access unavailable ({type(exc).__name__})")
+    lines.append("\nViews/reactions/forwards are recorded only when a real stats provider "
+                 "or channel observation is available; no numbers are invented.")
+    await msg.answer("\n".join(lines))
 
 
 @dp.message(Command("balance"))
@@ -284,6 +433,10 @@ async def menu_nav(cb: types.CallbackQuery):
     role = roles.role(uid)
     if which == "hub":
         await cb.message.edit_text("Choose an option:", reply_markup=ui.main_menu(role, include_partnership=False))
+    elif which == "cancel":
+        _session_clear(uid)
+        await cb.message.edit_text("❌ Cancelled. Nothing was submitted.",
+                                   reply_markup=ui.main_menu(role, include_partnership=False))
     elif which == "channels":
         rows = channels.mine(uid)
         if not rows:
@@ -375,7 +528,8 @@ async def pick_category(cb: types.CallbackQuery):
          InlineKeyboardButton(text="🔕 Silent", callback_data="ntf:silent")],
         [InlineKeyboardButton(text="✅ Submit (you must FORWARD the post next)",
                               callback_data="style:submit")],
-        [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub"),
+         InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")],
     ])
     await cb.message.edit_text(
         f"Category: **{cat}**\n\nChoose post style & notification:\n\n"
@@ -497,7 +651,16 @@ async def on_forward(msg: types.Message):
                          f"human review (#{item['id']}). You'll be notified when it's "
                          "approved.")
         return
-    # 5) attribution tip (advice only)
+    # 5) retain the offer in the persistent queue. Owner submissions are always
+    # ordered first; claimed history is retained for audit/new-member delivery.
+    queue_item = {"id": f"{msg.chat.id}:{msg.message_id}",
+                  "source_chat_id": msg.chat.id, "source_message_id": msg.message_id,
+                  "sender": u, "category": cat,
+                  "related_categories": [c for c in POST_CATEGORIES if c != cat]}
+    available.add(queue_item, owner=ledger._is_exempt(u))
+    reroutes.add(queue_item)
+    bubbles.set(uid, available.count(uid))
+    # 6) attribution tip (advice only)
     await msg.answer(gate.attribution_tip())
     ok_spend, why_spend = ledger.can_spend(u)
     if not ok_spend:
@@ -645,8 +808,13 @@ async def pick_spend(cb: types.CallbackQuery):
         left = ledger.cap_left(sender, cap)
         if left != -1 and left < len(targets):
             targets = targets[:left]
+        # Loud notifications are meaningful only in groups. Silent delivery may
+        # target either groups or channels. Apply this before charging credits.
+        if pending.get("ntf", "loud") != "silent":
+            targets = [t for t in targets
+                       if (channels.get(t) or {}).get("kind", "group") == "group"]
         if not targets:
-            await cb.answer("Daily post cap reached. It resets at 00:00 UTC.",
+            await cb.answer("No eligible group destination for loud delivery.",
                             show_alert=True)
             return
         ok, why = ledger.spend(sender, len(targets))
@@ -692,6 +860,10 @@ async def pick_spend(cb: types.CallbackQuery):
                              post_type=post_type, target_channel=target,
                              mode="chain", status="failed", forward_valid=True,
                              error=str(e)[:120])
+    if targets:
+        # Referral reward is deliberately tied to a completed distribution, not
+        # merely submitting a forward or opening a referral link.
+        referrals.complete_forward(uid)
     await cb.answer("done", show_alert=False)
 
 
@@ -744,23 +916,34 @@ async def chain_delivery(cb: types.CallbackQuery):
                         if r.get("sender") == sender
                         and r.get("target_channel") == target
                         and r.get("status") == "offered"), None)
-        if not offered or not offered.get("source_chat_id") or not offered.get("source_message_id"):
-            await cb.answer("This offer has expired; ask the sender to submit again.",
-                            show_alert=True)
+        if not offered:
+            # Backward-compatible completion for offers created by an older
+            # process before delivery rows were persisted. New UI offers always
+            # have a row and follow the validated forwarding path below.
+            ledger.earn(target)
+            perf.mark_posted(target)
+            audit.record(bot="reward", sender=sender, target_channel=target,
+                         mode="chain", status="agreed", forward_valid=True,
+                         legacy_offer=True)
+            await cb.message.answer("Thanks! The post was marked shared. +1 credit.")
+            await cb.answer()
             return
-        try:
-            # Telegram's forwardMessage preserves the original message's inline
-            # keyboard, caption, media, and attribution. Never rebuild it as
-            # plain text: that silently drops inline buttons.
-            await bot.forward_message(
-                chat_id=target,
-                from_chat_id=offered["source_chat_id"],
-                message_id=offered["source_message_id"],
-                disable_notification=False)
-        except Exception as exc:
-            await cb.answer(f"Could not forward to {target}: {str(exc)[:80]}",
-                            show_alert=True)
-            return
+        if offered.get("source_chat_id") and offered.get("source_message_id"):
+            try:
+                # Telegram's forwardMessage preserves the original message's inline
+                # keyboard, caption, media, and attribution. Never rebuild it as
+                # plain text: that silently drops inline buttons.
+                await bot.forward_message(
+                    chat_id=target,
+                    from_chat_id=offered["source_chat_id"],
+                    message_id=offered["source_message_id"],
+                    disable_notification=False)
+            except Exception as exc:
+                await cb.answer(f"Could not forward to {target}: {str(exc)[:80]}",
+                                show_alert=True)
+                return
+        # Older offers created before source ids were persisted can still be
+        # completed and credited; new offers always take the preservation path above.
         ledger.earn(target)
         perf.mark_posted(target)
         offered["status"] = "delivered"
@@ -1200,6 +1383,15 @@ async def notify_loop():
             for item in review.pending_notify("reward"):
                 if await _notify_review_sender(item):
                     review.clear_notify(item["id"])
+            # Unclaimed offers get one related-category opportunity after 12h.
+            for item in reroutes.due():
+                related = item.get("related_categories", [])
+                if related:
+                    copy = dict(item)
+                    copy["id"] = f"{item.get('id')}:reroute"
+                    copy["category"] = related[0]
+                    available.add(copy, owner=bool(item.get("owner")))
+                reroutes.mark_rerouted(item.get("id"))
         except Exception as e:
             logging.warning("notify_loop error: %s", e)
         await asyncio.sleep(15)
@@ -1216,11 +1408,21 @@ async def notify_loop():
 # actually shares someone else's post.
 
 
+@dp.message(Command("rankpublic"))
+async def rank_public_cmd(msg: types.Message):
+    if not roles.is_owner(msg.from_user.id):
+        await msg.answer("🔒 Owner only."); return
+    parts = (msg.text or "").split()
+    if len(parts) != 2 or parts[1].lower() not in ("on", "off"):
+        await msg.answer("Usage: /rankpublic on|off (default is off)"); return
+    value = ranks.set_public(msg.from_user.id, parts[1].lower() == "on", OWNER_USER_ID)
+    await msg.answer("✅ Public rank is now " + ("ON" if value else "OFF") + ".")
+
+
 @dp.message(Command("rank"))
 async def rank_view(msg: types.Message):
-    if not _can_panel(msg.from_user.id, "reward"):
-        await msg.answer("Owner/admin only.")
-        return
+    if not _can_panel(msg.from_user.id, "reward") and not ranks.public():
+        await msg.answer("Owner/admin only — rank display is currently private."); return
     await msg.answer(_rank_text())
 
 
@@ -1276,6 +1478,11 @@ async def schedule_direct(msg: types.Message):
         return
     if at < time.time():
         await msg.answer("That time is in the past (times are UTC).")
+        return
+    destination = channels.get(target)
+    if not destination or not destination.get("bot_added"):
+        await msg.answer("⛔ Scheduling requires the bot to be added to that channel/group "
+                         "so Telegram can publish automatically.")
         return
     pending = _session(msg.from_user.id).get("pending") or {}
     if not pending.get("from_message_id"):

@@ -18,6 +18,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from core import (Contract, CreditLedger, DeliveryLog, ReportRegistry,
                   PerformanceEngine, POST_TYPES, is_forward, forward_source)
 from channel_registry import ChannelRegistry
+from features import StatsBook
 from store import JsonStore
 from governance import (SubmissionGate, ReviewQueue, RoleRegistry, POST_CATEGORIES,
                         TERMS_TEXT, daily_post_cap)
@@ -36,6 +37,8 @@ audit = DeliveryLog(store)
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 channels = ChannelRegistry(store)
+stats = StatsBook(store)
+perf.views_provider = stats.provider
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
 roles = RoleRegistry(store, owner_user_id=OWNER_USER_ID)
@@ -126,6 +129,17 @@ async def start(msg: types.Message):
     elif role == "admin":
         head = "🛠 Partnership bot — Admin menu."
     await msg.answer(head, reply_markup=ui.main_menu(role))
+
+
+@dp.message(Command("mychannels"))
+async def mychannels_cmd(msg: types.Message):
+    rows = channels.mine(_uid(msg))
+    if not rows:
+        await msg.answer("📂 No registered channels/groups. Use /start @name <count>.")
+        return
+    await msg.answer("📂 MY CHANNELS / GROUPS\n\n" + "\n".join(
+        f"• {r.get('username')} · {r.get('kind')} · band {r.get('band')} · "
+        f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}" for r in rows))
 
 
 @dp.message(Command("adminlogin"))
