@@ -62,7 +62,16 @@ ask_token() {
     say "${D}  In Telegram, open @BotFather → /newbot → copy the long token it gives you."
     say "  It looks like:  8123456789:AAF9xQ2mKp7vLzR3tYuIoP1aSdFgHjKlZxC"
     say "  (this one runs $script)${N}"
-    read -r -p "  Paste the token here: " value
+    # Never echo bot tokens into the terminal or a captured shell transcript.
+    # Bash's -s works in Git Bash as well as native Unix shells.
+    if [ -t 0 ] && [ -t 1 ]; then
+      read -r -s -p "  Paste the token here: " value
+      printf '\n'
+    else
+      # Keep setup usable from automation/non-interactive wrappers. The caller
+      # is responsible for protecting stdin in that case.
+      read -r value
+    fi
     value="$(printf '%s' "$value" | tr -d '[:space:]')"
     if [ -z "$value" ]; then
       err "Nothing entered — try again."

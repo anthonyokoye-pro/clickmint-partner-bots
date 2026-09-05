@@ -19,6 +19,11 @@ import re
 import sys
 
 import config
+from console import configure as configure_console
+
+# Windows consoles may default to a legacy code page that cannot print the
+# status symbols below. Configure streams before emitting any diagnostics.
+configure_console()
 
 TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{30,}$")
 PLACEHOLDERS = {"", "YOUR_REWARD_BOT_TOKEN", "YOUR_PARTNER_BOT_TOKEN",
