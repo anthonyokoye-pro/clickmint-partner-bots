@@ -35,6 +35,7 @@ from channel_registry import ChannelRegistry
 from features import (ReferralLedger, AvailablePostQueue, BubbleNotifier,
                       AnnouncementBoard, RankVisibility, StatsBook, ReroutePlanner,
                       category_counts)
+from currency import MINT_ICON, MINT_NAME, amount, amount_short, balance_line
 from store import JsonStore
 from scheduler import Scheduler
 from governance import (SubmissionGate, ReviewQueue, PartnerContractRegistry,
@@ -193,12 +194,14 @@ def _do_register(msg, username: str, size: int, kind: str = "channel") -> str:
     s = perf.score(username)
     cap = daily_post_cap(size, s["band"], m.get("status", "ACTIVE"),
                          m.get("is_owner", False))
-    return (f"✅ Registered {username} — {size} subs, tier {m['tier']}, "
-            f"band {s['band']}.\n"
-            f"Daily post cap: {'unlimited (owner)' if cap == -1 else cap} "
-            "(size × performance, not size alone).\n"
-            f"Credits: {m['balance']} (onboarding seed). Earn more by sharing "
-            "other members' posts.")
+    cap_text = "UNLIMITED" if cap == -1 else str(cap)
+    return (f"✅ <b>DESTINATION REGISTERED</b> — Registered {username}\n\n"
+            f"📌 <b>Name:</b> {username}\n"
+            f"👥 <b>Audience:</b> {size:,}\n"
+            f"📈 <b>Band:</b> {s['band']} · <b>Status:</b> {m.get('status', 'ACTIVE')}\n"
+            f"📤 <b>Daily delivery limit:</b> {cap_text}\n"
+            f"{MINT_ICON} <b>Wallet:</b> {amount(m['balance'])}\n\n"
+            f"💡 Earn more {MINT_NAME} by sharing another member's post.")
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +219,7 @@ async def start(msg: types.Message):
         if err:
             await msg.answer(err, reply_markup=ui.main_menu(role, include_partnership=False))
             return
-        await msg.answer(_do_register(msg, *parsed), reply_markup=ui.main_menu(role, include_partnership=False))
+        await msg.answer(_do_register(msg, *parsed), parse_mode="HTML", reply_markup=ui.main_menu(role, include_partnership=False))
         return
     if role == "owner":
         await msg.answer(
@@ -241,7 +244,7 @@ async def register_cmd(msg: types.Message):
     if err:
         await msg.answer(err)
         return
-    await msg.answer(_do_register(msg, *parsed),
+    await msg.answer(_do_register(msg, *parsed), parse_mode="HTML",
                      reply_markup=ui.main_menu(roles.role(_uid(msg)), include_partnership=False))
 
 
@@ -286,7 +289,7 @@ async def register_group_cmd(msg: types.Message):
     parsed, err = _parse_registration(msg.text)
     if err:
         await msg.answer(err.replace("/register", "/registergroup")); return
-    await msg.answer(_do_register(msg, *parsed, kind="group"),
+    await msg.answer(_do_register(msg, *parsed, kind="group"), parse_mode="HTML",
                      reply_markup=ui.main_menu(roles.role(_uid(msg)), include_partnership=False))
 
 
@@ -345,10 +348,11 @@ async def category_stats_cmd(msg: types.Message):
 async def refer_cmd(msg: types.Message):
     code = referrals.create_code(msg.from_user.id)
     st = referrals.stats(msg.from_user.id)
-    await msg.answer("🔗 Your referral code: " + code + "\n"
-                     "Share it with a new member. You earn 1 credit only after they "
-                     "forward and complete one post.\n"
-                     f"Completed: {st['completed']} · pending: {st['pending']}")
+    await msg.answer("🔗 <b>YOUR REFERRAL CODE</b>\n\n" + code + "\n\n"
+                     f"Share it with a new member. You earn {amount(1)} only after they "
+                     "forward and complete one post.\n\n"
+                     f"✅ Completed: {st['completed']}\n⏳ Pending: {st['pending']}",
+                     parse_mode="HTML")
 
 
 @dp.message(Command("joinref"))
@@ -357,8 +361,8 @@ async def join_ref_cmd(msg: types.Message):
     if len(parts) != 2 or not referrals.attach(msg.from_user.id, parts[1]):
         await msg.answer("That referral code is invalid, already used, or belongs to you.")
         return
-    await msg.answer("✅ Referral linked. Your referrer earns a credit only after you "
-                     "complete one genuine forwarded post.")
+    await msg.answer(f"✅ <b>REFERRAL LINKED</b>\n\nYour referrer earns {amount(1)} only after you "
+                     "complete one genuine forwarded post.", parse_mode="HTML")
 
 
 @dp.message(Command("available"))
@@ -403,12 +407,17 @@ async def balance_cmd(msg: types.Message):
     u = _uname(msg)
     b = ledger.balance(u)
     if ledger._is_exempt(u):
-        await msg.answer("👑 Owner — exempt from credits, caps and funnels.")
+        await msg.answer(f"👑 <b>OWNER WALLET</b>\n\n"
+                         f"You are exempt from {MINT_NAME} costs, daily caps, and submission funnels.",
+                         parse_mode="HTML")
         return
     await msg.answer(
-        f"💳 {u}: balance {b['balance']} · earned {b['earned']} · spent {b['spent']}\n"
-        "You earn 1 credit each time you share another member's post, and spend "
-        "1 credit per (post → channel) pair.")
+        balance_line(b["balance"], b["earned"], b["spent"]) + "\n\n"
+        f"<b>How {MINT_NAME} works</b>\n"
+        f"• Earn {amount(1)} when you complete another member's post.\n"
+        f"• Spend {amount(1)} for each post → channel delivery.\n"
+        "• One post sent to five destinations costs five units.",
+        parse_mode="HTML")
 
 
 # admins log in via a one-time invite code (must have contacted the owner first)
@@ -437,6 +446,17 @@ async def menu_nav(cb: types.CallbackQuery):
         _session_clear(uid)
         await cb.message.edit_text("❌ Cancelled. Nothing was submitted.",
                                    reply_markup=ui.main_menu(role, include_partnership=False))
+    elif which == "wallet":
+        u = _uname(cb)
+        b = ledger.balance(u)
+        if ledger._is_exempt(u):
+            text = f"👑 <b>OWNER WALLET</b>\n\nExempt from {MINT_NAME} costs and limits."
+        else:
+            text = (balance_line(b['balance'], b['earned'], b['spent']) + "\n\n"
+                    f"Earn {amount(1)} by completing another member's post.\n"
+                    f"Spend {amount(1)} per post → channel delivery.")
+        await cb.message.edit_text(text, parse_mode="HTML",
+                                   reply_markup=back_btn_q("menu:hub"))
     elif which == "channels":
         rows = channels.mine(uid)
         if not rows:
@@ -491,6 +511,7 @@ async def submit_menu(cb: types.CallbackQuery):
     """Step 1 of submission: accept terms, then pick a category."""
     await cb.message.edit_text(
         TERMS_TEXT,
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Accept & continue", callback_data="terms:accept")],
             [InlineKeyboardButton(text="❌ Not now", callback_data="menu:hub")],
@@ -583,11 +604,14 @@ async def show_cap(cb: types.CallbackQuery):
     cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"),
                          m.get("is_owner", False))
     await cb.message.edit_text(
-        f"📊 Daily post cap for {u}:\n"
-        f"  Subscribers: {m.get('size',0)}   Band: {s['band']}   Status: {m.get('status','ACTIVE')}\n"
-        f"  → **{cap if cap!= -1 else 'unlimited'} post(s) per day**\n\n"
-        "The cap scales with channel size × performance. A bigger, better-performing "
-        "channel gets more slots; a small/underperforming one stays low so nobody spams.",
+        f"📊 <b>DAILY DELIVERY CAP</b>\n\n"
+        f"📌 <b>Destination:</b> {u}\n"
+        f"👥 <b>Audience:</b> {m.get('size',0):,}\n"
+        f"📈 <b>Performance:</b> Band {s['band']} · {m.get('status','ACTIVE')}\n"
+        f"📤 <b>Available today:</b> {cap if cap != -1 else 'UNLIMITED'} post(s)\n\n"
+        "Your limit reflects audience size and real performance.\n"
+        "Better delivery and engagement can improve your band.",
+        parse_mode="HTML",
         reply_markup=back_btn_q("menu:hub"))
     await cb.answer()
 
@@ -671,15 +695,19 @@ async def on_forward(msg: types.Message):
     balance = ledger.balance(u)["balance"]
     max_pairs = min(5, balance, left)
     if max_pairs < 1:
-        await msg.answer("You have no credits left today. Share another member's "
-                         "post to earn one.")
+        await msg.answer(f"{MINT_ICON} <b>NO MINT AVAILABLE TODAY</b>\n\n"
+                         f"Share another member's post to earn {amount(1)}.", parse_mode="HTML")
         return
     row = [InlineKeyboardButton(text=str(n), callback_data=f"s:{n}")
            for n in range(1, max_pairs + 1)]
     kb = InlineKeyboardMarkup(inline_keyboard=[row[i:i + 3] for i in range(0, len(row), 3)])
-    await msg.answer(f"How many (post→channel) pairs? 1 credit each "
-                     f"(balance {balance}, {left} cap slot(s) left today). "
-                     "Sending ONE post to 5 channels = 5 credits.",
+    await msg.answer(f"{MINT_ICON} <b>CHOOSE YOUR DELIVERY COUNT</b>\n"
+                     f"How many post → channel pairs do you want?\n\n"
+                     f"Price: {amount(1)} per post → channel pair.\n"
+                     f"Wallet: {amount(balance)}\n"
+                     f"Daily capacity remaining: {left} slot(s).\n\n"
+                     f"Example: one post → five channels costs {amount(5)}.",
+                     parse_mode="HTML",
                      reply_markup=kb)
     _session_set(uid, pending=_pending_from(msg, u, cat, sess))
 
@@ -925,7 +953,7 @@ async def chain_delivery(cb: types.CallbackQuery):
             audit.record(bot="reward", sender=sender, target_channel=target,
                          mode="chain", status="agreed", forward_valid=True,
                          legacy_offer=True)
-            await cb.message.answer("Thanks! The post was marked shared. +1 credit.")
+            await cb.message.answer(f"✅ <b>POST SHARED</b>\n\nYou earned {amount(1)}.", parse_mode="HTML")
             await cb.answer()
             return
         if offered.get("source_chat_id") and offered.get("source_message_id"):
@@ -950,8 +978,10 @@ async def chain_delivery(cb: types.CallbackQuery):
         audit.store[audit.key] = audit.all()
         audit.store.sync()
         bal = ledger.balance(target)["balance"]
-        await cb.message.answer("✅ Posted with the original inline buttons and attribution. "
-                                f"+1 credit — balance {bal}.")
+        await cb.message.answer("✅ <b>POST SHARED</b>\n\n"
+                                "The original buttons and attribution were preserved.\n"
+                                f"Earned: {amount(1)}\nWallet: {amount(bal)}",
+                                parse_mode="HTML")
     else:
         audit.record(bot="reward", sender=sender, target_channel=target,
                      mode="chain", status="skipped", forward_valid=True)
@@ -1226,7 +1256,7 @@ async def panel(cb: types.CallbackQuery):
         await cb.answer()
         return
     if which == "terms":
-        await cb.message.edit_text(TERMS_TEXT, reply_markup=back_btn_q("menu:owner"))
+        await cb.message.edit_text(TERMS_TEXT, parse_mode="HTML", reply_markup=back_btn_q("menu:owner"))
         await cb.answer()
         return
     await cb.answer()

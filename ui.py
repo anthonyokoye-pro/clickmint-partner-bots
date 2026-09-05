@@ -34,6 +34,7 @@ def main_menu(role: str, include_partnership: bool = True) -> InlineKeyboardMark
         row([InlineKeyboardButton(text="📤 Submit a post", callback_data="menu:submit"),
              InlineKeyboardButton(text="📊 My post limit", callback_data="menu:cap")]),
         row([InlineKeyboardButton(text="📂 My channels / groups", callback_data="menu:channels")]),
+        row([InlineKeyboardButton(text="🪙 MINT wallet", callback_data="menu:wallet")]),
     ]
     if include_partnership:
         kb.append(row([InlineKeyboardButton(text="🤝 Partnerships", callback_data="menu:partners"),

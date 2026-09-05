@@ -117,20 +117,22 @@ SOFT_REVIEW_PATTERNS = [
 ]
 # Terms & regulations text shown to every sender BEFORE they can submit a post.
 TERMS_TEXT = (
-    "📜 MINT POST EXCHANGE POSTING TERMS — you agree to all of these before you submit:\n\n"
-    "1) NICHE-RELATED: your post must be in a valid category, and it must match the "
-    "category the receiving channel has agreed to accept. No off-niche content (no "
-    "cooking posts in a crypto channel).\n"
-    "2) NO SPAM / NO MONEY-ASKING / NO SCAM: no asking people for money, no 'free "
-    "stuff / free airdrop / pay us to claim,' no guaranteed-returns, no fraud, no "
-    "phishing, no seed-phrase tricks.\n"
-    "3) NO THIRD-PARTY AD POSTS: you may NOT share an ad-service / paid-promotion "
-    "post to push a third-party network. It destroys trust and credibility.\n"
-    "4) ATTRIBUTION ADVICE (optional, not required): add your @username to the bottom "
-    "of your post so people who like it can find & join you.\n"
-    "5) VIOLATIONS: obvious breaks are blocked automatically; ambiguous ones are sent "
-    "to a human review queue. Repeat violations lower your performance band / status.\n\n"
-    "Tap ✅ to accept these terms and continue."
+    "📜 <b>MINT POST EXCHANGE POSTING TERMS</b>\n\n"
+    "You must accept every rule before submitting a post.\n\n"
+    "1️⃣ <b>NICHE-RELATED</b>\n"
+    "Your post must use a valid category and match what the receiving destination "
+    "accepts. No off-niche content.\n\n"
+    "2️⃣ <b>NO SPAM · NO MONEY-ASKING · NO SCAMS</b>\n"
+    "No requests for money, free-stuff or airdrop bait, guaranteed returns, fraud, "
+    "phishing, or seed-phrase tricks.\n\n"
+    "3️⃣ <b>NO THIRD-PARTY AD POSTS</b>\n"
+    "Do not share ad-service or paid-promotion posts for another network.\n\n"
+    "4️⃣ <b>ATTRIBUTION ADVICE</b> <i>(optional)</i>\n"
+    "Adding your @username can help people find you. It is never required.\n\n"
+    "5️⃣ <b>VIOLATIONS</b>\n"
+    "Obvious violations are blocked. Ambiguous cases go to human review. Repeated "
+    "violations can lower a destination's performance band or status.\n\n"
+    "Tap ✅ <b>Accept &amp; Continue</b> to proceed."
 )
 
 

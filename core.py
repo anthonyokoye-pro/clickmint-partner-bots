@@ -23,6 +23,7 @@ Design decisions (from the agreed plan):
 """
 from __future__ import annotations
 import time
+from currency import MINT_ICON, MINT_NAME
 
 # ---------------------------------------------------------------------------
 # CONFIG
@@ -244,7 +245,7 @@ class CreditLedger:
         if m["earned"] < EARN_MIN_BEFORE_SPEND:
             return False, "earn-first: share at least one of others' posts before yours are spread."
         if m["balance"] <= 0:
-            return False, "no credit balance. Share others' posts to earn credits."
+            return False, f"no {MINT_NAME} balance. Share others' posts to earn {MINT_ICON} {MINT_NAME}."
         return True, "ok"
 
     def spend(self, username: str, n_pairs: int) -> tuple[bool, str]:
@@ -261,11 +262,11 @@ class CreditLedger:
         if n_pairs < 1:
             return False, "must request at least one (post, channel) pair."
         if m["balance"] < n_pairs:
-            return False, f"need {n_pairs} credits, have {m['balance']}."
+            return False, f"need {n_pairs} {MINT_NAME}, have {m['balance']} {MINT_NAME}."
         m["balance"] -= n_pairs
         m["spent"] += n_pairs
         self.save()
-        return True, f"spent {n_pairs} credits. Balance now {m['balance']}."
+        return True, f"spent {n_pairs} {MINT_NAME}. Balance now {m['balance']} {MINT_NAME}."
 
     # --- refunds ---
     def refund(self, username: str, n_pairs: int) -> dict:
@@ -753,6 +754,11 @@ class PerformanceEngine:
     def _blocked(self, username: str) -> bool:
         return self.status(username) in ("RESTRICTED", "REMOVED")
 
+
+
+# Public product name for the wallet. ``CreditLedger`` remains as a compatibility
+# class name for existing stores and imports.
+MintLedger = CreditLedger
 
 
 # ---------------------------------------------------------------------------

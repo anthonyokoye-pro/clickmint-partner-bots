@@ -210,6 +210,7 @@ async def menu_nav(cb: types.CallbackQuery):
     if which == "submit":
         await cb.message.edit_text(
             TERMS_TEXT,
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ Accept & continue", callback_data="terms:accept")],
                 [InlineKeyboardButton(text="❌ Not now", callback_data="menu:hub")]]))
