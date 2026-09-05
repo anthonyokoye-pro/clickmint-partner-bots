@@ -18,8 +18,13 @@ def back_btn(cb: str, label: str = "⬅️ Back") -> list[InlineKeyboardButton]:
     return [InlineKeyboardButton(text=label, callback_data=cb)]
 
 
-def main_menu(role: str) -> InlineKeyboardMarkup:
-    """The hub menu. Owner/Admin get extra panels; users get the normal menu."""
+def main_menu(role: str, include_partnership: bool = True) -> InlineKeyboardMarkup:
+    """The hub menu.
+
+    ``include_partnership=False`` is used by the reward/exchange bot: reward
+    exchange and partnership contracts are separate products and must not leak
+    into one another's menus.
+    """
     kb = []
     if role == "owner":
         kb += [[InlineKeyboardButton(text="🛠 Owner Panel (controls everyone)", callback_data="menu:owner")]]
@@ -28,11 +33,13 @@ def main_menu(role: str) -> InlineKeyboardMarkup:
     kb += [
         row([InlineKeyboardButton(text="📤 Submit a post", callback_data="menu:submit"),
              InlineKeyboardButton(text="📊 My post limit", callback_data="menu:cap")]),
-        row([InlineKeyboardButton(text="🤝 Partnerships", callback_data="menu:partners"),
-             InlineKeyboardButton(text="📜 My contract", callback_data="menu:contract")]),
-        row([InlineKeyboardButton(text="📁 Audit / Reports", callback_data="menu:audit"),
-             InlineKeyboardButton(text="🏆 Rank / leaderboard", callback_data="menu:rank")]),
+        row([InlineKeyboardButton(text="📂 My channels / groups", callback_data="menu:channels")]),
     ]
+    if include_partnership:
+        kb.append(row([InlineKeyboardButton(text="🤝 Partnerships", callback_data="menu:partners"),
+                       InlineKeyboardButton(text="📜 My contract", callback_data="menu:contract")]))
+    kb.append(row([InlineKeyboardButton(text="📁 Audit / Reports", callback_data="menu:audit"),
+                   InlineKeyboardButton(text="🏆 Rank / leaderboard", callback_data="menu:rank")]))
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 

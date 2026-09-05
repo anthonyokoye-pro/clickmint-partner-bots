@@ -17,6 +17,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from core import (Contract, CreditLedger, DeliveryLog, ReportRegistry,
                   PerformanceEngine, POST_TYPES, is_forward, forward_source)
+from channel_registry import ChannelRegistry
 from store import JsonStore
 from governance import (SubmissionGate, ReviewQueue, RoleRegistry, POST_CATEGORIES,
                         TERMS_TEXT, daily_post_cap)
@@ -34,6 +35,7 @@ contract = Contract()
 audit = DeliveryLog(store)
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
+channels = ChannelRegistry(store)
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
 roles = RoleRegistry(store, owner_user_id=OWNER_USER_ID)
@@ -110,6 +112,8 @@ async def start(msg: types.Message):
             await msg.answer("That subscriber count isn't plausible.")
             return
         m = ledger.register(username, size, is_partner=True)
+        channels.add(_uid(msg), username, username, "channel",
+                     ["General"], size=size, bot_added=False)
         ledger.set_user_id(username, _uid(msg))
         await msg.answer(f"Partner {username} registered ({m['tier']}, {size} subs).",
                          reply_markup=ui.main_menu(roles.role(_uid(msg))))

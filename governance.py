@@ -117,7 +117,7 @@ SOFT_REVIEW_PATTERNS = [
 ]
 # Terms & regulations text shown to every sender BEFORE they can submit a post.
 TERMS_TEXT = (
-    "📜 CLICKMINT POSTING TERMS — you agree to all of these before you submit:\n\n"
+    "📜 MINT POST EXCHANGE POSTING TERMS — you agree to all of these before you submit:\n\n"
     "1) NICHE-RELATED: your post must be in a valid category, and it must match the "
     "category the receiving channel has agreed to accept. No off-niche content (no "
     "cooking posts in a crypto channel).\n"

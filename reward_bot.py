@@ -15,7 +15,7 @@ NEW FEATURES (governance.py):
   • Attribution @username tip (advice only, never required).
   • Peer-to-peer PARTNER exchange with the owner as mediator / registrar (notified
     on open, renew, close; owner gives the final close).
-  • Post STYLE: forward / direct / pin + loud / silent notifications.
+  • Post STYLE: forward/direct delivery + loud/silent notifications (pinning is disabled).
   • Button menus everywhere (commands still work as a fallback).
   • ADMIN invite-code login: an admin must contact you first; you issue a one-time
     code; they redeem it to unlock a SCOPED admin menu (reward / partnership / both).
@@ -31,6 +31,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from core import (CreditLedger, DeliveryLog, ReportRegistry, PerformanceEngine,
                   is_forward, forward_source, allows_receive)
+from channel_registry import ChannelRegistry
 from store import JsonStore
 from scheduler import Scheduler
 from governance import (SubmissionGate, ReviewQueue, PartnerContractRegistry,
@@ -49,6 +50,7 @@ audit = DeliveryLog(store)
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 sched = Scheduler(store)
+channels = ChannelRegistry(store)
 
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
@@ -171,6 +173,10 @@ def _parse_registration(text: str):
 
 def _do_register(msg, username: str, size: int) -> str:
     m = ledger.register(username, size)
+    # Keep a separate ownership registry: one Telegram user may manage many
+    # channels/groups, each with its own band, status and categories.
+    channels.add(msg.from_user.id, username, username, "channel",
+                 ["General"], size=size, bot_added=False)
     ledger.set_user_id(username, msg.from_user.id)
     s = perf.score(username)
     cap = daily_post_cap(size, s["band"], m.get("status", "ACTIVE"),
@@ -196,25 +202,25 @@ async def start(msg: types.Message):
     if len((msg.text or "").split()) >= 3:
         parsed, err = _parse_registration(msg.text)
         if err:
-            await msg.answer(err, reply_markup=ui.main_menu(role))
+            await msg.answer(err, reply_markup=ui.main_menu(role, include_partnership=False))
             return
-        await msg.answer(_do_register(msg, *parsed), reply_markup=ui.main_menu(role))
+        await msg.answer(_do_register(msg, *parsed), reply_markup=ui.main_menu(role, include_partnership=False))
         return
     if role == "owner":
         await msg.answer(
             "🛠 Welcome, Owner. Your menu controls everyone — users, admins, "
             "contracts, and the reward/partnership networks.",
-            reply_markup=ui.main_menu("owner"))
+            reply_markup=ui.main_menu("owner", include_partnership=False))
     elif role == "admin":
         await msg.answer("🛠 Admin menu. Use it to moderate the network you're scoped to.",
-                         reply_markup=ui.main_menu("admin"))
+                         reply_markup=ui.main_menu("admin", include_partnership=False))
     else:
         head = ("Welcome to CLICKMINT.\n"
                 "To use the network, register your channel first:\n"
                 "Send: /register @yourchannel <subscriber_count>\n"
                 "e.g.  /register @MyChan 1200")
         await msg.answer(head,
-                         reply_markup=ui.main_menu("user"))
+                         reply_markup=ui.main_menu("user", include_partnership=False))
 
 
 @dp.message(Command("register"))
@@ -224,7 +230,23 @@ async def register_cmd(msg: types.Message):
         await msg.answer(err)
         return
     await msg.answer(_do_register(msg, *parsed),
-                     reply_markup=ui.main_menu(roles.role(_uid(msg))))
+                     reply_markup=ui.main_menu(roles.role(_uid(msg)), include_partnership=False))
+
+
+@dp.message(Command("mychannels"))
+async def mychannels_cmd(msg: types.Message):
+    """Show every channel/group owned by this Telegram user (not just one row)."""
+    rows = channels.mine(msg.from_user.id)
+    if not rows:
+        await msg.answer("📂 You have no registered channels or groups yet.\n"
+                         "Use /register @name <subscriber_count> to add one.")
+        return
+    lines = ["📂 MY CHANNELS / GROUPS", ""]
+    for row in rows:
+        access = "✅ bot added" if row.get("bot_added") else "⚠️ add bot for accurate stats"
+        lines.append(f"• {row.get('username')} · {row.get('kind')} · "
+                     f"band {row.get('band')} · {row.get('status')} · {access}")
+    await msg.answer("\n".join(lines), reply_markup=ui.main_menu("user", include_partnership=False))
 
 
 @dp.message(Command("balance"))
@@ -261,7 +283,17 @@ async def menu_nav(cb: types.CallbackQuery):
     uid = cb.from_user.id
     role = roles.role(uid)
     if which == "hub":
-        await cb.message.edit_text("Choose an option:", reply_markup=ui.main_menu(role))
+        await cb.message.edit_text("Choose an option:", reply_markup=ui.main_menu(role, include_partnership=False))
+    elif which == "channels":
+        rows = channels.mine(uid)
+        if not rows:
+            text = "📂 No channels/groups registered yet.\nUse /register @name <subscriber_count>."
+        else:
+            text = "📂 MY CHANNELS / GROUPS\n\n" + "\n".join(
+                f"• {r.get('username')} · {r.get('kind')} · band {r.get('band')} · "
+                f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}"
+                for r in rows)
+        await cb.message.edit_text(text, reply_markup=ui.main_menu(role, include_partnership=False))
     elif which == "owner":
         # A normal member could open the owner panel screen just by sending the
         # callback data — the panels themselves were guarded, but the menu wasn't.
@@ -324,7 +356,7 @@ async def accept_terms(cb: types.CallbackQuery):
             "channel has agreed to receive):", reply_markup=kb)
     else:
         await cb.message.edit_text("No problem. Send a command or use the menu.",
-                                   reply_markup=ui.main_menu(roles.role(cb.from_user.id)))
+                                   reply_markup=ui.main_menu(roles.role(cb.from_user.id), include_partnership=False))
     await cb.answer()
 
 
@@ -335,11 +367,10 @@ async def pick_category(cb: types.CallbackQuery):
         await cb.answer("Unknown category.", show_alert=True)
         return
     _session_set(cb.from_user.id, cat=cat)
-    # Ask post style (forward / direct / pin) + notification (loud / silent).
+    # Pinning forwarded posts is intentionally unavailable to both owners and users.
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔁 Forward", callback_data="style:fwd"),
-         InlineKeyboardButton(text="⚡ Direct", callback_data="style:direct"),
-         InlineKeyboardButton(text="📌 Pin", callback_data="style:pin")],
+         InlineKeyboardButton(text="⚡ Direct", callback_data="style:direct")],
         [InlineKeyboardButton(text="🔔 Loud", callback_data="ntf:loud"),
          InlineKeyboardButton(text="🔕 Silent", callback_data="ntf:silent")],
         [InlineKeyboardButton(text="✅ Submit (you must FORWARD the post next)",
@@ -348,8 +379,7 @@ async def pick_category(cb: types.CallbackQuery):
     ])
     await cb.message.edit_text(
         f"Category: **{cat}**\n\nChoose post style & notification:\n\n"
-        "📌 Note: a 'Loud' pin is only possible in a GROUP; in a CHANNEL, Telegram "
-        "always pins silently. Loud/silent fully works for posting.",
+        "Loud delivery is for groups. Silent delivery can target either a group or a channel.",
         reply_markup=kb)
     await cb.answer()
 
@@ -364,8 +394,8 @@ async def pick_style(cb: types.CallbackQuery):
             "attribution stays intact).\n\n" + gate.attribution_tip())
         await cb.answer()
         return
-    if style not in ("fwd", "direct", "pin"):
-        await cb.answer("Unknown style.", show_alert=True)
+    if style not in ("fwd", "direct"):
+        await cb.answer("Only forward or direct delivery is available; pinning is disabled.", show_alert=True)
         return
     _session_set(cb.from_user.id, style=style)
     await cb.answer(f"Style: {style}")
@@ -433,7 +463,7 @@ async def on_forward(msg: types.Message):
     # 1) terms accepted? (per user — never a single global flag)
     if not sess.get("accepted_terms"):
         await msg.answer("First accept the posting terms: /start → Submit a post.",
-                         reply_markup=ui.main_menu(roles.role(uid)))
+                         reply_markup=ui.main_menu(roles.role(uid), include_partnership=False))
         return
     # 2) category declared?
     cat = sess.get("cat")
@@ -527,7 +557,7 @@ async def owner_forward(msg: types.Message, u: str):
     await msg.answer(
         "👑 **Owner mode** — you're exempt: no terms, no category check, no cap, "
         "no credit cost.\n\nSend the post style too if you want one: use the Submit menu "
-        "to pre-pick forward/direct/pin + loud/silent, or it defaults to **Forward+loud**.\n\n"
+        "to pre-pick forward/direct + loud/silent, or it defaults to **Forward+loud**.\n\n"
         "How many (post→channel) pairs to route? (Free — you're exempt.)",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="1", callback_data="s:1"), InlineKeyboardButton(text="2", callback_data="s:2")],
@@ -642,7 +672,9 @@ async def pick_spend(cb: types.CallbackQuery):
             audit.record(bot="reward", sender=sender, source=source,
                          post_type=post_type,
                          target_channel=target, mode="chain", status="offered",
-                         forward_valid=True, style=style)
+                         forward_valid=True, style=style,
+                         source_chat_id=pending.get("from_chat_id"),
+                         source_message_id=pending.get("from_message_id"))
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ Agree (forward it)", callback_data=f"chain:agree:{sender}"),
                  InlineKeyboardButton(text="❌ Disagree (skip)", callback_data=f"chain:dis:{sender}")],
@@ -664,8 +696,8 @@ async def pick_spend(cb: types.CallbackQuery):
 
 
 async def direct_deliver(cb, sender, target, pending, style="fwd", silent=False):
-    """Direct delivery to a channel where the bot is admin. forwardMessage keeps
-    attribution. If style == 'pin', also pin after posting (channel pin = silent)."""
+    """Direct delivery where the bot is an administrator. forwardMessage keeps
+    the original post and its inline keyboard; forwarded posts are never pinned."""
     f_chat_id = pending.get("from_chat_id", pending.get("forward_from_chat_id"))
     f_msg_id = pending.get("from_message_id", pending.get("forward_from_message_id"))
     if f_chat_id is None or f_msg_id is None:
@@ -683,11 +715,6 @@ async def direct_deliver(cb, sender, target, pending, style="fwd", silent=False)
                                          message_id=f_msg_id,
                                          disable_notification=silent)
         perf.mark_posted(target)
-        if style == "pin":
-            try:
-                await bot.pin_chat_message(chat_id=target, message_id=sent.message_id)
-            except Exception as e:
-                logging.warning("pin failed on %s: %s", target, e)
         audit.record(bot="reward", sender=sender, target_channel=target,
                      mode="direct", status="delivered", forward_valid=True, style=style)
         await cb.message.answer(f"⚡ Auto-posted to {target} (direct, {style}).")
@@ -711,16 +738,37 @@ async def chain_delivery(cb: types.CallbackQuery):
         return
     if decision == "agree":
         # The credit goes to the channel that SHARES someone else's post — i.e.
-        # the target that just agreed. Crediting the sender (as the old build
-        # did) let anyone mint credits simply by broadcasting their own posts.
+        # the target that just agreed. Crediting the sender would let anyone mint
+        # credits simply by broadcasting their own posts.
+        offered = next((r for r in reversed(audit.all())
+                        if r.get("sender") == sender
+                        and r.get("target_channel") == target
+                        and r.get("status") == "offered"), None)
+        if not offered or not offered.get("source_chat_id") or not offered.get("source_message_id"):
+            await cb.answer("This offer has expired; ask the sender to submit again.",
+                            show_alert=True)
+            return
+        try:
+            # Telegram's forwardMessage preserves the original message's inline
+            # keyboard, caption, media, and attribution. Never rebuild it as
+            # plain text: that silently drops inline buttons.
+            await bot.forward_message(
+                chat_id=target,
+                from_chat_id=offered["source_chat_id"],
+                message_id=offered["source_message_id"],
+                disable_notification=False)
+        except Exception as exc:
+            await cb.answer(f"Could not forward to {target}: {str(exc)[:80]}",
+                            show_alert=True)
+            return
         ledger.earn(target)
         perf.mark_posted(target)
-        audit.record(bot="reward", sender=sender, target_channel=target,
-                     mode="chain", status="agreed", forward_valid=True)
+        offered["status"] = "delivered"
+        audit.store[audit.key] = audit.all()
+        audit.store.sync()
         bal = ledger.balance(target)["balance"]
-        await cb.message.answer("Thanks! Forward the post to your channel to complete "
-                                "this (using forwardMessage keeps the original "
-                                f"attribution). +1 credit — balance {bal}.")
+        await cb.message.answer("✅ Posted with the original inline buttons and attribution. "
+                                f"+1 credit — balance {bal}.")
     else:
         audit.record(bot="reward", sender=sender, target_channel=target,
                      mode="chain", status="skipped", forward_valid=True)
