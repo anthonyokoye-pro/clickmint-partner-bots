@@ -5,7 +5,8 @@ story lives in the repo (and travels with the code). Read these to understand *w
 system is and *why* it was built the way it was, before you touch any code.
 
 ## Index
-| **`REWARD_SYSTEM.md`** | 🪙 MINT wallet rules, reward lifecycle, band matching, and the user-facing writing standard. | **Read before changing the reward bot.** |
+| **`MASTER_SYSTEM_DOCUMENTATION.md`** | Complete source-based architecture, data model, workflows, commands, functions, diagrams, security, deployment, and known unknowns. | **Read first for technical orientation.** |
+| **`REWARD_SYSTEM.md`** | 🪙 MINT wallet rules, reward lifecycle, band matching, and the user-facing writing standard. | Read before changing the reward bot. |
 | File | What it contains | When to read it |
 |---|---|---|
 | **`MASTER_PLAN.md`** | The single source of truth: growth plan, bot design/directory library, full audit results, and the **handoff prompt** for the next session. | **Read first.** |
