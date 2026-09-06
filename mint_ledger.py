@@ -126,6 +126,21 @@ CREATE TABLE IF NOT EXISTS audit_events (
     reason TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS outbox_events (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    recipient_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'sent', 'failed')),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at INTEGER NOT NULL,
+    last_error TEXT,
+    created_at INTEGER NOT NULL,
+    sent_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_ready ON outbox_events(status, available_at);
 """
 
 
@@ -208,7 +223,10 @@ class TransactionalMintLedger:
             return self._entry_by_key(conn, key) is not None
 
     def _balance_tx(self, conn, uid: str, *, include_pending: bool = False) -> int:
-        states = ("confirmed", "pending") if include_pending else ("confirmed",)
+        # A reversed entry remains part of the accounting history; its
+        # compensating REVERSAL entry neutralizes it. Excluding the original
+        # would double-apply the correction and could create a false negative.
+        states = ("confirmed", "reversed", "pending") if include_pending else ("confirmed", "reversed")
         marks = ",".join("?" for _ in states)
         row = conn.execute(
             f"SELECT COALESCE(SUM(CASE WHEN direction='credit' THEN amount ELSE -amount END),0) AS balance "
@@ -435,6 +453,11 @@ class TransactionalMintLedger:
             )
             return order_id
 
+    def post_order_by_key(self, idempotency_key: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM post_orders WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            return dict(row) if row else None
+
     def complete_post_order(self, order_id: str) -> bool:
         with self._tx() as conn:
             cur = conn.execute("UPDATE post_orders SET status='completed', completed_at=? WHERE order_id=? AND status='reserved'", (self._now(), order_id))
@@ -453,6 +476,99 @@ class TransactionalMintLedger:
             )
             conn.execute("UPDATE post_orders SET status='refunded', completed_at=? WHERE order_id=?", (self._now(), order_id))
             return entry_id
+
+    def referral_stats(self, owner_id) -> dict:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM referrals WHERE referrer_id=? GROUP BY status",
+                (str(owner_id),),
+            ).fetchall()
+            counts = {row["status"]: int(row["n"]) for row in rows}
+            return {
+                "referred": sum(counts.values()),
+                "attributed": counts.get("attributed", 0),
+                "pending": counts.get("pending", 0),
+                "qualified": counts.get("qualified", 0),
+                "rejected": counts.get("rejected", 0),
+                "reversed": counts.get("reversed", 0),
+            }
+
+    def referral_history(self, owner_id, limit: int = 50) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM referrals WHERE referrer_id=? ORDER BY first_touch_at DESC LIMIT ?",
+                (str(owner_id), int(limit)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def ledger_summary(self, limit: int = 100) -> dict:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT entry_type, direction, state, COUNT(*) AS n, COALESCE(SUM(amount),0) AS amount "
+                "FROM mint_ledger_entries GROUP BY entry_type, direction, state ORDER BY entry_type"
+            ).fetchall()
+            return {"entries": [dict(row) for row in rows],
+                    "accounts": int(conn.execute("SELECT COUNT(*) FROM mint_accounts").fetchone()[0]),
+                    "recent": [dict(row) for row in conn.execute(
+                        "SELECT * FROM mint_ledger_entries ORDER BY created_at DESC LIMIT ?", (int(limit),)
+                    ).fetchall()]}
+
+    def enqueue_outbox(self, *, event_type: str, recipient_id, payload: str,
+                       idempotency_key: str, available_at: int | None = None) -> str:
+        with self._tx() as conn:
+            existing = conn.execute("SELECT event_id FROM outbox_events WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            if existing:
+                return existing["event_id"]
+            event_id = self._id("outbox")
+            now = self._now()
+            conn.execute(
+                "INSERT INTO outbox_events(event_id,event_type,recipient_id,payload,status,idempotency_key,available_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (event_id, event_type, str(recipient_id), payload, "pending", idempotency_key,
+                 int(available_at if available_at is not None else now), now),
+            )
+            return event_id
+
+    def recover_outbox(self, *, stale_after: int = 300) -> int:
+        """Return abandoned processing events to the retry queue after a worker crash."""
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE outbox_events SET status='failed', last_error='worker lease expired', available_at=? "
+                "WHERE status='processing' AND created_at<=?",
+                (self._now(), self._now() - max(1, int(stale_after))),
+            )
+            return cur.rowcount
+
+    def claim_outbox(self, limit: int = 20) -> list[dict]:
+        """Atomically claim ready events for one worker process."""
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT event_id FROM outbox_events WHERE status IN ('pending','failed') AND available_at<=? "
+                "ORDER BY created_at LIMIT ?", (self._now(), int(limit)),
+            ).fetchall()
+            claimed = []
+            for row in rows:
+                conn.execute(
+                    "UPDATE outbox_events SET status='processing', attempts=attempts+1 WHERE event_id=?",
+                    (row["event_id"],),
+                )
+                item = conn.execute("SELECT * FROM outbox_events WHERE event_id=?", (row["event_id"],)).fetchone()
+                claimed.append(dict(item))
+            return claimed
+
+    def complete_outbox(self, event_id: str) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute("UPDATE outbox_events SET status='sent', sent_at=? WHERE event_id=? AND status='processing'",
+                               (self._now(), event_id))
+            return cur.rowcount == 1
+
+    def fail_outbox(self, event_id: str, error: str, *, retry_delay: int = 60,
+                    permanent: bool = False) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE outbox_events SET status=?, last_error=?, available_at=? WHERE event_id=? AND status='processing'",
+                ("failed", str(error)[:500], self._now() + (0 if permanent else max(0, int(retry_delay))), event_id),
+            )
+            return cur.rowcount == 1
 
     def add_audit_event(self, *, actor_type: str, actor_id: str, action: str,
                         object_type: str, object_id: str, reason: str) -> str:

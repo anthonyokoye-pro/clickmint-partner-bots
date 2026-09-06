@@ -87,6 +87,32 @@ def test_pending_credit_is_not_spendable_until_confirmed():
         assert db.balance("100") == 4
 
 
+def test_outbox_is_idempotent_and_retryable():
+    with fresh() as db:
+        first = db.enqueue_outbox(event_type="MINT_REWARD", recipient_id=100, payload="hello", idempotency_key="notice:1")
+        assert db.enqueue_outbox(event_type="MINT_REWARD", recipient_id=100, payload="hello", idempotency_key="notice:1") == first
+        claimed = db.claim_outbox()
+        assert len(claimed) == 1 and claimed[0]["status"] == "processing"
+        assert db.fail_outbox(first, "temporary", retry_delay=0)
+        claimed_again = db.claim_outbox()
+        assert len(claimed_again) == 1 and claimed_again[0]["attempts"] == 2
+        assert db.complete_outbox(first)
+        assert db.claim_outbox() == []
+
+
+def test_referral_history_and_reversal_are_auditable():
+    with fresh() as db:
+        code = db.create_referral_code("referrer")
+        assert db.attach_referral("new", code)
+        assert db.qualify_referral("new", activity_id="activity")
+        entry = db.confirm_referral_reward("new", activity_id="activity")
+        assert db.referral_stats("referrer")["qualified"] == 1
+        assert len(db.referral_history("referrer")) == 1
+        reverse = db.reverse(entry, idempotency_key="reverse:1", reason="fraud review")
+        assert reverse and db.balance("referrer") == 0
+        assert db.entries("referrer")[0]["entry_type"] == "REVERSAL"
+
+
 if __name__ == "__main__":
     tests = [value for name, value in globals().items() if name.startswith("test_")]
     for test in tests:

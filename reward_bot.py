@@ -21,6 +21,7 @@ NEW FEATURES (governance.py):
     code; they redeem it to unlock a SCOPED admin menu (reward / partnership / both).
 """
 import asyncio
+import hashlib
 import logging
 import time
 import datetime as dt
@@ -378,6 +379,26 @@ async def refer_cmd(msg: types.Message):
                      "forward and complete one post.\n\n"
                      f"✅ Completed: {st['completed']}\n⏳ Pending: {st['pending']}",
                      parse_mode="HTML")
+
+
+@dp.message(Command("referrals"))
+async def referrals_cmd(msg: types.Message):
+    uid = msg.from_user.id
+    if hasattr(ledger, "tx"):
+        st = ledger.tx.referral_stats(uid)
+        history = ledger.tx.referral_history(uid, limit=8)
+        lines = ["🔗 <b>REFERRAL HISTORY</b>", "",
+                 f"Referred: {st['referred']}",
+                 f"Qualified: {st['qualified']}",
+                 f"Pending: {st['pending']}",
+                 f"Reversed: {st['reversed']}" ]
+        if history:
+            lines += ["", "Recent referrals:"]
+            lines += [f"• {row['referred_id']} · {row['status']}" for row in history]
+        await msg.answer("\n".join(lines), parse_mode="HTML")
+        return
+    st = referrals.stats(uid)
+    await msg.answer(f"🔗 Referrals: {st['referred']} · qualified {st['completed']} · pending {st['pending']}")
 
 
 @dp.message(Command("joinref"))
@@ -914,12 +935,13 @@ async def pick_spend(cb: types.CallbackQuery):
         if hasattr(ledger, "tx"):
             spend_key = (f"post:{sender}:{pending.get('from_chat_id')}:{pending.get('from_message_id')}"
                          f":{','.join(targets)}")
-        if spend_key and ledger.tx.has_operation(spend_key):
+        if spend_key and ledger.tx.post_order_by_key(spend_key):
             _session_clear(uid, "pending")
             await cb.answer("This posting request was already processed.", show_alert=True)
             return
         if spend_key:
-            ok, why = ledger.spend(sender, len(targets), idempotency_key=spend_key)
+            ok, why = ledger.spend(sender, len(targets), idempotency_key=spend_key,
+                         source_id=f"{pending.get('from_chat_id')}:{pending.get('from_message_id')}")
         else:
             ok, why = ledger.spend(sender, len(targets))
         if not ok:
@@ -1282,10 +1304,34 @@ async def partner_username_capture(msg: types.Message):
 
 
 def owner_notify(text: str):
-    """Best-effort DM to the owner (and any scoped admins) about contract events."""
+    """Queue owner notifications transactionally when the Mint backend is active.
+
+    The legacy mode retains the previous best-effort behavior until activation;
+    transactional mode makes notification delivery durable and retryable.
+    """
     if not roles.owner_user_id or roles.owner_user_id == "0":
         return
+    if hasattr(ledger, "tx"):
+        ledger.tx.enqueue_outbox(
+            event_type="OWNER_NOTIFICATION", recipient_id=roles.owner_user_id,
+            payload=text, idempotency_key=f"owner-notify:{hashlib.sha256(text.encode('utf-8')).hexdigest()}",
+        )
+        return
     asyncio.ensure_future(_notify_owner(text))
+
+
+async def _process_mint_outbox():
+    if not hasattr(ledger, "tx"):
+        return
+    tx = ledger.tx
+    tx.recover_outbox()
+    for event in tx.claim_outbox(limit=20):
+        try:
+            await bot.send_message(int(event["recipient_id"]), event["payload"])
+            tx.complete_outbox(event["event_id"])
+        except Exception as exc:
+            delay = min(3600, 30 * (2 ** min(int(event.get("attempts", 1)), 6)))
+            tx.fail_outbox(event["event_id"], str(exc), retry_delay=delay)
 
 
 async def _notify_owner(text: str):
@@ -1527,7 +1573,8 @@ async def notify_loop():
     """Background: hand out queued review outcomes to the senders (reward scope)."""
     while True:
         try:
-            for item in review.pending_notify("reward"):
+            await _process_mint_outbox()
+            for item in review.pending_notify("reward"): 
                 if await _notify_review_sender(item):
                     review.clear_notify(item["id"])
             # Keep one replaceable availability bubble per known member.

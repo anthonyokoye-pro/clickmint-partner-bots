@@ -24,6 +24,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from store import JsonStore
 from core import CreditLedger, PerformanceEngine, ReportRegistry
+from mint_ledger import TransactionalMintLedger
 from governance import ReviewQueue, RoleRegistry, daily_post_cap
 from features import category_counts
 from channel_registry import ChannelRegistry
@@ -127,6 +128,7 @@ def _dashboard_text():
 def _dashboard_kb():
     return _kb([
         [InlineKeyboardButton(text="📊 Daily caps (size x performance)", callback_data="dash:cap")],
+        [InlineKeyboardButton(text="🪙 Mint ledger / referrals", callback_data="dash:mint")],
         [InlineKeyboardButton(text="🧾 Review queue — reward", callback_data="dash:rev:reward"),
          InlineKeyboardButton(text="🧾 Review queue — partner", callback_data="dash:rev:partnership")],
         [InlineKeyboardButton(text="🤝 Partnership contracts", callback_data="dash:contracts")],
@@ -152,7 +154,9 @@ async def dash(cb: types.CallbackQuery):
         await _safe_edit(cb, _dashboard_text(), _dashboard_kb())
     elif which == "cap":
         await show_caps(cb)
-    elif which == "rev":
+    elif which == "mint":
+        await show_mint(cb)
+    elif which == "rev": 
         await show_review(cb, parts[2] if len(parts) > 2 else "reward")
     elif which == "contracts":
         await show_contracts(cb)
@@ -178,6 +182,56 @@ async def show_caps(cb):
         cap_txt = "unlimited" if cap == -1 else str(cap)
         lines.append(f"{username:<22} {s['band']}  {s['status']}  cap={cap_txt}  ({m.get('size',0)} sub)")
     await _safe_edit(cb, "\n".join(lines[:50]), _kb([[_back("dash:back")]]))
+
+
+# --- transactional Mint and referral review ---
+async def show_mint(cb):
+    tx = TransactionalMintLedger(config.MINT_DB_PATH)
+    summary = tx.ledger_summary(limit=12)
+    lines = ["🪙 MINT LEDGER / REFERRALS", "", f"Accounts: {summary['accounts']}"]
+    for row in summary["entries"][:12]:
+        lines.append(f"• {row['entry_type']} · {row['direction']} · {row['state']} · "
+                     f"{row['amount']} ({row['n']} entry/entries)")
+    recent = summary["recent"]
+    rows = []
+    if recent:
+        lines += ["", "Recent entries:"]
+        for entry in recent[:8]:
+            lines.append(f"{entry['entry_id']} · user {entry['user_id']} · "
+                         f"{entry['direction']} {entry['amount']} · {entry['entry_type']} · {entry['state']}")
+            if entry["state"] == "confirmed":
+                rows.append([InlineKeyboardButton(
+                    text=f"↩️ Reverse {entry['entry_id'][-6:]}",
+                    callback_data=f"mint:reverse:{entry['entry_id']}")])
+    rows.append([_back("dash:back")])
+    await _safe_edit(cb, "\n".join(lines[:45]), _kb(rows))
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("mint:"))
+async def mint_action(cb: types.CallbackQuery):
+    if not is_owner(cb.from_user.id):
+        await cb.answer("Owner only.", show_alert=True)
+        return
+    parts = cb.data.split(":", 2)
+    if len(parts) != 3 or parts[1] != "reverse":
+        await cb.answer("Unknown Mint action.", show_alert=True)
+        return
+    entry_id = parts[2]
+    tx = TransactionalMintLedger(config.MINT_DB_PATH)
+    try:
+        reverse_id = tx.reverse(entry_id, idempotency_key=f"admin-reversal:{entry_id}",
+                                reason=f"owner {cb.from_user.id} reversed from admin panel")
+        tx.add_audit_event(actor_type="telegram_owner", actor_id=str(cb.from_user.id),
+                           action="reverse_mint_entry", object_type="mint_entry",
+                           object_id=entry_id, reason="owner admin panel action")
+    except Exception as exc:
+        # Protect the admin panel from a stale button or a balance/race error;
+        # the detailed reason stays in server logs.
+        logging.warning("Mint reversal failed for %s: %s", entry_id, exc)
+        await cb.answer("That Mint entry could not be reversed.", show_alert=True)
+        return
+    await cb.answer(f"Reversed: {reverse_id}")
+    await show_mint(cb)
 
 
 # --- review queue ---

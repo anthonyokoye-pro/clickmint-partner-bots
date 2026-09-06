@@ -827,7 +827,8 @@ class TransactionalCreditLedger(CreditLedger):
             return False, f"no {MINT_NAME} balance. Share others' posts to earn {MINT_ICON} {MINT_NAME}."
         return True, "ok"
 
-    def spend(self, username: str, n_pairs: int, *, idempotency_key: str | None = None) -> tuple[bool, str]:
+    def spend(self, username: str, n_pairs: int, *, idempotency_key: str | None = None,
+              source_id: str | None = None) -> tuple[bool, str]:
         ok, why = self.can_spend(username)
         if not ok:
             return False, why
@@ -836,17 +837,22 @@ class TransactionalCreditLedger(CreditLedger):
         if n_pairs < 1:
             return False, "must request at least one (post, channel) pair."
         key = idempotency_key or f"spend:{self._account_id(username)}:{time.time_ns()}"
-        already_applied = self.tx.has_operation(key)
+        existing_order = self.tx.post_order_by_key(key)
+        already_applied = existing_order is not None
         try:
-            self.tx.debit(self._account_id(username), n_pairs, entry_type="POSTING_SPEND",
-                          idempotency_key=key, reference_type="posting", reference_id=key)
+            self.tx.create_post_order(
+                self._account_id(username), amount=n_pairs,
+                source_id=source_id or key, idempotency_key=key)
         except Exception as exc:
             from mint_ledger import InsufficientMint
             if isinstance(exc, InsufficientMint):
                 return False, f"need {n_pairs} {MINT_NAME}, have {self.tx.balance(self._account_id(username))} {MINT_NAME}."
             raise
+        order = self.tx.post_order_by_key(key)
         m = self._m(username)
         m["balance"] = self.tx.balance(self._account_id(username))
+        if order:
+            m["last_post_order_id"] = order["order_id"]
         if not already_applied:
             m["spent"] = m.get("spent", 0) + n_pairs
             self.save()
