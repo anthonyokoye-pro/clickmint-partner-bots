@@ -90,6 +90,7 @@ deploy.
 | `core.py` | The engine: tiering, credit ledger, earn/spend, anti-cheat, **report system**, **performance engine**, contract, distribution. Verified. |
 | `store.py` | Legacy JSON persistence for existing network state. |
 | `mint_ledger.py` | Transactional Mint/referral/posting foundation backed by SQLite; migrate to PostgreSQL before scale. |
+| `migrate_mint.py` | Additive migration and balance verification from the legacy JSON ledger. |
 | `reward_bot.py` | aiogram wiring for reward bot. |
 | `partnership_bot.py` | aiogram wiring for partnership bot. |
 | `governance.py` | Rules layer: daily cap, submission gate, review queue, partner contracts, roles. |

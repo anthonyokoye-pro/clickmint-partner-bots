@@ -17,14 +17,21 @@ def now() -> str:
 
 class ReferralLedger:
     """A referral earns only after the referred member completes a real share."""
-    def __init__(self, store, ledger):
+    def __init__(self, store, ledger, transactional=None):
         self.store, self.ledger = store, ledger
+        self.transactional = transactional or getattr(ledger, "tx", None)
         self.key = "referrals"
         if not isinstance(store.get(self.key), dict):
             store[self.key] = {"codes": {}, "by_user": {}}
             store.sync()
 
     def create_code(self, owner_id) -> str:
+        if self.transactional is not None:
+            code = self.transactional.create_referral_code(owner_id)
+            data = self.store[self.key]
+            data.setdefault("codes", {})[code] = {"owner_id": int(owner_id), "uses": 0}
+            self.store[self.key] = data; self.store.sync()
+            return code
         code = secrets.token_urlsafe(6)
         data = self.store[self.key]
         data.setdefault("codes", {})[code] = {"owner_id": int(owner_id), "uses": 0}
@@ -32,6 +39,20 @@ class ReferralLedger:
         return code
 
     def attach(self, referred_id, code: str) -> bool:
+        if self.transactional is not None:
+            attached = self.transactional.attach_referral(referred_id, code)
+            if not attached:
+                return False
+            data = self.store[self.key]
+            row = data.setdefault("codes", {}).setdefault(code, {"uses": 0})
+            ref = self.transactional.referral(code) if hasattr(self.transactional, "referral") else None
+            row["uses"] = int(row.get("uses", 0)) + 1
+            data.setdefault("by_user", {})[str(referred_id)] = {
+                "referrer_id": int(ref["referrer_id"]) if ref and str(ref["referrer_id"]).isdigit() else (ref["referrer_id"] if ref else row.get("owner_id")),
+                "completed": False,
+            }
+            self.store[self.key] = data; self.store.sync()
+            return True
         data = self.store[self.key]; row = data.setdefault("codes", {}).get(code)
         key = str(referred_id)
         if not row or key in data.setdefault("by_user", {}):
@@ -47,7 +68,16 @@ class ReferralLedger:
         if not row or row.get("completed"):
             return False
         # A referral bonus is minted only at this point, never at link creation.
-        self.ledger.earn("@" + str(row["referrer_id"]), 1)
+        if self.transactional is not None:
+            activity_id = f"forward:{referred_id}"
+            if not self.transactional.qualify_referral(referred_id, activity_id=activity_id, reward_amount=1):
+                return False
+            if not self.transactional.confirm_referral_reward(referred_id, activity_id=activity_id):
+                return False
+            ref = self.transactional.attached_referral(referred_id)
+            row["referrer_id"] = ref["referrer_id"] if ref else row.get("referrer_id")
+        else:
+            self.ledger.earn("@" + str(row["referrer_id"]), 1)
         row["completed"] = True; row["completed_at"] = now()
         self.store[self.key] = data; self.store.sync(); return True
 

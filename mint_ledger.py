@@ -203,6 +203,10 @@ class TransactionalMintLedger:
     def _entry_by_key(self, conn, key: str):
         return conn.execute("SELECT * FROM mint_ledger_entries WHERE idempotency_key=?", (key,)).fetchone()
 
+    def has_operation(self, key: str) -> bool:
+        with self._connect() as conn:
+            return self._entry_by_key(conn, key) is not None
+
     def _balance_tx(self, conn, uid: str, *, include_pending: bool = False) -> int:
         states = ("confirmed", "pending") if include_pending else ("confirmed",)
         marks = ",".join("?" for _ in states)
@@ -318,6 +322,16 @@ class TransactionalMintLedger:
                 except sqlite3.IntegrityError:
                     continue
             raise RuntimeError("could not create unique referral code")
+
+    def referral(self, code: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM referral_codes WHERE code=?", (code,)).fetchone()
+            return dict(row) if row else None
+
+    def attached_referral(self, referred_id) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM referrals WHERE referred_id=?", (str(referred_id),)).fetchone()
+            return dict(row) if row else None
 
     def attach_referral(self, referred_id, code: str) -> bool:
         with self._tx() as conn:

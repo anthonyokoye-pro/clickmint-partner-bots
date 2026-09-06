@@ -29,8 +29,8 @@ from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-from core import (CreditLedger, DeliveryLog, ReportRegistry, PerformanceEngine,
-                  is_forward, forward_source, allows_receive)
+from core import (CreditLedger, TransactionalCreditLedger, DeliveryLog, ReportRegistry,
+                  PerformanceEngine, is_forward, forward_source, allows_receive)
 from channel_registry import ChannelRegistry
 from features import (ReferralLedger, AvailablePostQueue, BubbleNotifier,
                       AnnouncementBoard, RankVisibility, StatsBook, ReroutePlanner,
@@ -48,7 +48,10 @@ BOT_TOKEN = config.REWARD_BOT_TOKEN          # from @BotFather, via env var
 OWNER_USER_ID = config.OWNER_USER_ID         # your numeric Telegram user id (owner)
 
 store = JsonStore(config.REWARD_STORE_PATH)
-ledger = CreditLedger(store)
+if config.MINT_LEDGER_MODE == "transactional":
+    ledger = TransactionalCreditLedger(store, config.MINT_DB_PATH)
+else:
+    ledger = CreditLedger(store)
 ledger.owner_user_id = config.OWNER_USER_ID      # owner recognised by numeric id too
 audit = DeliveryLog(store)
 reports = ReportRegistry(store)
@@ -907,13 +910,27 @@ async def pick_spend(cb: types.CallbackQuery):
             await cb.answer("No eligible group destination for loud delivery.",
                             show_alert=True)
             return
-        ok, why = ledger.spend(sender, len(targets))
+        spend_key = None
+        if hasattr(ledger, "tx"):
+            spend_key = (f"post:{sender}:{pending.get('from_chat_id')}:{pending.get('from_message_id')}"
+                         f":{','.join(targets)}")
+        if spend_key and ledger.tx.has_operation(spend_key):
+            _session_clear(uid, "pending")
+            await cb.answer("This posting request was already processed.", show_alert=True)
+            return
+        if spend_key:
+            ok, why = ledger.spend(sender, len(targets), idempotency_key=spend_key)
+        else:
+            ok, why = ledger.spend(sender, len(targets))
         if not ok:
             await cb.answer(why, show_alert=True)
             return
         ok_cap, why_cap = ledger.consume_cap(sender, cap, len(targets))
         if not ok_cap:                      # cap was eaten between the two checks
-            ledger.refund(sender, len(targets))  # give back what we just charged
+            if hasattr(ledger, "tx") and spend_key:
+                ledger.refund(sender, len(targets), idempotency_key=f"{spend_key}:refund")
+            else:
+                ledger.refund(sender, len(targets))  # give back what we just charged
             await cb.answer(why_cap, show_alert=True)
             return
 

@@ -5,6 +5,7 @@ set -euo pipefail
 
 echo "== compile =="            && python3 -m py_compile *.py
 echo "== transactional Mint ledger ==" && python3 test_mint_ledger.py
+echo "== transactional integration ==" && python3 test_mint_integration.py
 echo "== engine =="             && python3 test_core.py
 echo "== governance/roles =="   && python3 test_governance.py
 echo "== bot wiring =="         && python3 test_bots.py

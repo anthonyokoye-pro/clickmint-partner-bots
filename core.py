@@ -756,6 +756,115 @@ class PerformanceEngine:
 
 
 
+class TransactionalCreditLedger(CreditLedger):
+    """Compatibility facade that keeps channel metadata in the legacy store but
+    makes Mint balances transactional and append-only.
+
+    The facade lets the existing performance/matching code continue to consume
+    ``ledger`` metadata while all balance-changing operations are committed to
+    the SQLite ledger. It is enabled explicitly with MINT_LEDGER_MODE=transactional
+    after the migration tool has been run and staging has been verified.
+    """
+
+    def __init__(self, store, db_path):
+        from mint_ledger import TransactionalMintLedger
+        super().__init__(store)
+        self.tx = TransactionalMintLedger(db_path)
+
+    def register(self, username: str, size: int, is_owner: bool = False,
+                 is_partner: bool = False) -> dict:
+        m = super().register(username, size, is_owner=is_owner, is_partner=is_partner)
+        uid = m.get("user_id")
+        if uid is not None:
+            self._ensure_transactional_account(uid)
+        return m
+
+    def _ensure_transactional_account(self, uid) -> None:
+        uid = str(uid)
+        self.tx.ensure_account(uid)
+        # New users receive the existing onboarding seed exactly once. Existing
+        # migrated accounts already have a seed entry with this idempotency key.
+        self.tx.credit(uid, ONBOARDING_SEED, entry_type="ONBOARDING_SEED",
+                       idempotency_key=f"onboarding:{uid}")
+
+    def set_user_id(self, username: str, uid) -> dict:
+        m = super().set_user_id(username, uid)
+        self._ensure_transactional_account(uid)
+        return m
+
+    def _account_id(self, username: str) -> str:
+        return str(self._m(username).get("user_id") or username)
+
+    def balance(self, username: str) -> dict:
+        m = self._m(username)
+        uid = self._account_id(username)
+        available = self.tx.balance(uid)
+        return {"balance": available, "earned": m.get("earned", 0),
+                "spent": m.get("spent", 0), "times_shared": m.get("times_shared", 0),
+                "tier": m.get("tier", "T1"), "is_owner": m.get("is_owner", False)}
+
+    def earn(self, username: str, amount: int = 1, *, idempotency_key: str | None = None) -> dict:
+        if self._is_exempt(username):
+            return self._m(username)
+        m = self._m(username)
+        next_number = int(m.get("times_shared", 0)) + int(amount)
+        key = idempotency_key or f"share:{self._account_id(username)}:{next_number}"
+        self.tx.credit(self._account_id(username), amount, entry_type="POSTING_REWARD",
+                       idempotency_key=key, reference_type="share", reference_id=key)
+        m["balance"] = self.tx.balance(self._account_id(username))
+        m["earned"] = m.get("earned", 0) + amount
+        m["times_shared"] = m.get("times_shared", 0) + amount
+        self.save()
+        return m
+
+    def can_spend(self, username: str) -> tuple[bool, str]:
+        if self._is_exempt(username):
+            return True, "owner is exempt"
+        m = self._m(username)
+        if m.get("earned", 0) < EARN_MIN_BEFORE_SPEND:
+            return False, "earn-first: share at least one of others' posts before yours are spread."
+        if self.tx.balance(self._account_id(username)) <= 0:
+            return False, f"no {MINT_NAME} balance. Share others' posts to earn {MINT_ICON} {MINT_NAME}."
+        return True, "ok"
+
+    def spend(self, username: str, n_pairs: int, *, idempotency_key: str | None = None) -> tuple[bool, str]:
+        ok, why = self.can_spend(username)
+        if not ok:
+            return False, why
+        if self._is_exempt(username):
+            return True, "owner exempt — routed freely."
+        if n_pairs < 1:
+            return False, "must request at least one (post, channel) pair."
+        key = idempotency_key or f"spend:{self._account_id(username)}:{time.time_ns()}"
+        already_applied = self.tx.has_operation(key)
+        try:
+            self.tx.debit(self._account_id(username), n_pairs, entry_type="POSTING_SPEND",
+                          idempotency_key=key, reference_type="posting", reference_id=key)
+        except Exception as exc:
+            from mint_ledger import InsufficientMint
+            if isinstance(exc, InsufficientMint):
+                return False, f"need {n_pairs} {MINT_NAME}, have {self.tx.balance(self._account_id(username))} {MINT_NAME}."
+            raise
+        m = self._m(username)
+        m["balance"] = self.tx.balance(self._account_id(username))
+        if not already_applied:
+            m["spent"] = m.get("spent", 0) + n_pairs
+            self.save()
+        return True, f"spent {n_pairs} {MINT_NAME}. Balance now {m['balance']} {MINT_NAME}."
+
+    def refund(self, username: str, n_pairs: int, *, idempotency_key: str | None = None) -> dict:
+        m = self._m(username)
+        if self._is_exempt(username) or n_pairs < 1:
+            return m
+        key = idempotency_key or f"refund:{self._account_id(username)}:{time.time_ns()}"
+        self.tx.credit(self._account_id(username), n_pairs, entry_type="POSTING_REFUND",
+                       idempotency_key=key, reference_type="posting", reference_id=key)
+        m["balance"] = self.tx.balance(self._account_id(username))
+        m["spent"] = max(0, m.get("spent", 0) - n_pairs)
+        self.save()
+        return m
+
+
 # Public product name for the wallet. ``CreditLedger`` remains as a compatibility
 # class name for existing stores and imports.
 MintLedger = CreditLedger
