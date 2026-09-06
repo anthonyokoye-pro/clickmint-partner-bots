@@ -7,6 +7,9 @@ env
 #  and so they survive deploys as persistent files)
 reward_ledger.json
 partnership_state.json
+mint.sqlite3
+mint.sqlite3-shm
+mint.sqlite3-wal
 *.lock
 # NOTE: deliberately NOT a blanket `*.json` — that also swallowed any config or
 # seed file we might legitimately want to commit. Add new runtime files by name.
