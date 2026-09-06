@@ -26,6 +26,7 @@ from store import JsonStore
 from core import CreditLedger, PerformanceEngine, ReportRegistry
 from governance import ReviewQueue, RoleRegistry, daily_post_cap
 from features import category_counts
+from channel_registry import ChannelRegistry
 import config
 
 logging.basicConfig(level=logging.INFO)
@@ -170,7 +171,10 @@ async def show_caps(cb):
         if m.get("is_owner"):
             continue
         s = rperf.score(username)
-        cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"))
+        row = (rstore.get("managed_channels", {}) or {}).get(username)
+        connected = True if row is None else bool(row.get("bot_added"))
+        cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"),
+                             connected=connected)
         cap_txt = "unlimited" if cap == -1 else str(cap)
         lines.append(f"{username:<22} {s['band']}  {s['status']}  cap={cap_txt}  ({m.get('size',0)} sub)")
     await _safe_edit(cb, "\n".join(lines[:50]), _kb([[_back("dash:back")]]))

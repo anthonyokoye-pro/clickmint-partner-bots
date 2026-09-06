@@ -58,13 +58,14 @@ def base_cap_for_size(size: int) -> int:
 
 
 def daily_post_cap(size: int, band: str, status: str = "ACTIVE",
-                   is_owner: bool = False) -> int:
+                   is_owner: bool = False, connected: bool = True) -> int:
     """Daily slot cap = size base x performance multiplier.
 
     Rules:
       • owner is UNLIMITED (returns a large sentinel, -1 = unlimited).
       • non-active channels (RESTRICTED / REMOVED) get 0.
-      • every ACTIVE channel gets a hard floor of 1, so a good/new performer is
+      • unconnected destinations receive exactly 3 starter slots.
+      • connected channels use size + performance and get a hard floor of 1, so a good/new performer is
         never zeroed out — but it can never spam (cap stays proportional to size
         and how well the channel actually performs).
     """
@@ -72,6 +73,10 @@ def daily_post_cap(size: int, band: str, status: str = "ACTIVE",
         return -1                       # unlimited
     if status in ("RESTRICTED", "REMOVED"):
         return 0
+    # Unconnected destinations receive a safe fixed starter allowance. Once the
+    # bot is connected and can process real metrics, band/tier limits apply.
+    if not connected:
+        return 3
     base = base_cap_for_size(size)
     n = int(base * CAP_BAND_MULT.get(band, 0.5))
     return max(1, n)

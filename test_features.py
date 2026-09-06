@@ -7,6 +7,8 @@ from channel_registry import ChannelRegistry
 from core import CreditLedger
 from features import (ReferralLedger, AvailablePostQueue, BubbleNotifier,
                       AnnouncementBoard, RankVisibility, StatsBook, category_counts)
+from governance import daily_post_cap
+import ui
 
 
 def fresh():
@@ -45,6 +47,17 @@ def test_bubble_is_single_replaceable_record():
     s = fresh(); n = BubbleNotifier(s)
     n.set(4, 1, 20); n.set(4, 3, 21)
     assert n.get(4) == {"count": 3, "message_id": 21, "updated_at": n.get(4)["updated_at"]}
+
+
+def test_role_counters_and_unconnected_limit():
+    assert daily_post_cap(5000, "A", connected=False) == 3
+    assert daily_post_cap(5000, "A", connected=True) == 4
+    user_labels = [b.text for row in ui.main_menu("user", include_partnership=False).inline_keyboard for b in row]
+    assert not any("Audit" in text for text in user_labels)
+    counts = {"Review Queue": 2, "Pending Posts": 120, "Scheduled Posts": 0, "Direct Delivery": 1}
+    labels = [b.text for row in ui.audit_menu(counts).inline_keyboard for b in row]
+    assert any("Review Queue · 2" in text for text in labels)
+    assert any("Pending Posts · 99+" in text for text in labels)
 
 
 def test_announcements_stats_and_visibility():

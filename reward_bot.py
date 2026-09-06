@@ -65,6 +65,28 @@ reroutes = ReroutePlanner(store)
 # PerformanceEngine consumes real observations when available; absent fields stay absent.
 perf.views_provider = stats.provider
 
+
+def _menu(role: str, uid: int | None = None):
+    """Reward-bot hub with the live available-post counter."""
+    return ui.main_menu(role, include_partnership=False,
+                        available_count=available.count(uid) if uid is not None else 0)
+
+
+def _is_connected(username: str) -> bool:
+    row = channels.get(username)
+    # Legacy ledger-only rows predate ChannelRegistry; preserve their behavior.
+    return True if row is None else bool(row.get("bot_added"))
+
+
+def _audit_counts() -> dict[str, int]:
+    return {
+        "Review Queue": len(review.pending()),
+        "Pending Posts": available.count(),
+        "Scheduled Posts": sched.pending_count(),
+        "Direct Delivery": sum(1 for m in ledger.ledger.values() if m.get("direct_mode")),
+    }
+
+
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
 contracts = PartnerContractRegistry(store)
@@ -193,7 +215,7 @@ def _do_register(msg, username: str, size: int, kind: str = "channel") -> str:
     ledger.set_user_id(username, msg.from_user.id)
     s = perf.score(username)
     cap = daily_post_cap(size, s["band"], m.get("status", "ACTIVE"),
-                         m.get("is_owner", False))
+                         m.get("is_owner", False), connected=_is_connected(username))
     cap_text = "UNLIMITED" if cap == -1 else str(cap)
     return (f"✅ <b>DESTINATION REGISTERED</b> — Registered {username}\n\n"
             f"📌 <b>Name:</b> {username}\n"
@@ -217,25 +239,25 @@ async def start(msg: types.Message):
     if len((msg.text or "").split()) >= 3:
         parsed, err = _parse_registration(msg.text)
         if err:
-            await msg.answer(err, reply_markup=ui.main_menu(role, include_partnership=False))
+            await msg.answer(err, reply_markup=_menu(role, uid))
             return
-        await msg.answer(_do_register(msg, *parsed), parse_mode="HTML", reply_markup=ui.main_menu(role, include_partnership=False))
+        await msg.answer(_do_register(msg, *parsed), parse_mode="HTML", reply_markup=_menu(role, uid))
         return
     if role == "owner":
         await msg.answer(
             "🛠 Welcome, Owner. Your menu controls everyone — users, admins, "
             "contracts, and the reward/partnership networks.",
-            reply_markup=ui.main_menu("owner", include_partnership=False))
+            reply_markup=_menu("owner", msg.from_user.id))
     elif role == "admin":
         await msg.answer("🛠 Admin menu. Use it to moderate the network you're scoped to.",
-                         reply_markup=ui.main_menu("admin", include_partnership=False))
+                         reply_markup=_menu("admin", msg.from_user.id))
     else:
         head = ("Welcome to CLICKMINT.\n"
                 "To use the network, register your channel first:\n"
                 "Send: /register @yourchannel <subscriber_count>\n"
                 "e.g.  /register @MyChan 1200")
         await msg.answer(head,
-                         reply_markup=ui.main_menu("user", include_partnership=False))
+                         reply_markup=_menu("user", msg.from_user.id))
 
 
 @dp.message(Command("register"))
@@ -245,7 +267,7 @@ async def register_cmd(msg: types.Message):
         await msg.answer(err)
         return
     await msg.answer(_do_register(msg, *parsed), parse_mode="HTML",
-                     reply_markup=ui.main_menu(roles.role(_uid(msg)), include_partnership=False))
+                     reply_markup=_menu(roles.role(_uid(msg)), _uid(msg)))
 
 
 @dp.message(Command("removechannel"))
@@ -290,7 +312,7 @@ async def register_group_cmd(msg: types.Message):
     if err:
         await msg.answer(err.replace("/register", "/registergroup")); return
     await msg.answer(_do_register(msg, *parsed, kind="group"), parse_mode="HTML",
-                     reply_markup=ui.main_menu(roles.role(_uid(msg)), include_partnership=False))
+                     reply_markup=_menu(roles.role(_uid(msg)), _uid(msg)))
 
 
 @dp.message(Command("mychannels"))
@@ -306,7 +328,7 @@ async def mychannels_cmd(msg: types.Message):
         access = "✅ bot added" if row.get("bot_added") else "⚠️ add bot for accurate stats"
         lines.append(f"• {row.get('username')} · {row.get('kind')} · "
                      f"band {row.get('band')} · {row.get('status')} · {access}")
-    await msg.answer("\n".join(lines), reply_markup=ui.main_menu("user", include_partnership=False))
+    await msg.answer("\n".join(lines), reply_markup=_menu("user", msg.from_user.id))
 
 
 @dp.message(Command("announce"))
@@ -441,11 +463,24 @@ async def menu_nav(cb: types.CallbackQuery):
     uid = cb.from_user.id
     role = roles.role(uid)
     if which == "hub":
-        await cb.message.edit_text("Choose an option:", reply_markup=ui.main_menu(role, include_partnership=False))
+        await cb.message.edit_text("Choose an option:", reply_markup=_menu(role, uid))
     elif which == "cancel":
         _session_clear(uid)
         await cb.message.edit_text("❌ Cancelled. Nothing was submitted.",
-                                   reply_markup=ui.main_menu(role, include_partnership=False))
+                                   reply_markup=_menu(role, uid))
+    elif which == "available":
+        rows = available.available(uid, limit=10)
+        count = available.count(uid)
+        if not rows:
+            text = "📭 <b>NO POSTS AVAILABLE</b>\n\nCheck back when a matching post enters your queue."
+        else:
+            shown = "\n".join(f"• {r['id']} · {r.get('category', 'General')}" +
+                              (" · 👑 owner priority" if r.get('owner') else "") for r in rows)
+            text = (f"📬 <b>POSTS AVAILABLE: {('99+' if count > 99 else count)}</b>\n\n" + shown)
+        await cb.message.edit_text(text, parse_mode="HTML",
+                                   reply_markup=_menu(role, uid))
+        await cb.answer()
+        return
     elif which == "wallet":
         u = _uname(cb)
         b = ledger.balance(u)
@@ -514,13 +549,21 @@ async def menu_nav(cb: types.CallbackQuery):
             f"  Accept: {m.get('accept_types') or 'not set'}\n"
             f"  Receive: {m.get('receive_types') or 'not set'}\n"
             f"  Size: {m.get('size',0)}  Band: {perf.score(_uname(cb))['band']}\n"
-            f"  Daily cap: {daily_post_cap(m.get('size',0), perf.score(_uname(cb))['band'], m.get('status','ACTIVE'), m.get('is_owner',False))}")
+            f"  Daily cap: {daily_post_cap(m.get('size',0), perf.score(_uname(cb))['band'], m.get('status','ACTIVE'), m.get('is_owner',False), connected=_is_connected(_uname(cb)))}")
         return
-    elif which == "audit" or which == "rank":
+    elif which == "audit":
         if not _can_panel(uid, "reward"):
             await cb.answer("Owner/admin only.", show_alert=True)
             return
-        await cb.message.edit_text("Use your Admin panel to view the audit log & rank.",
+        await cb.message.edit_text("📁 <b>AUDIT &amp; REPORTS</b>\n\nSelect a queue to inspect.",
+                                   parse_mode="HTML", reply_markup=ui.audit_menu(_audit_counts()))
+        await cb.answer()
+        return
+    elif which == "rank":
+        if not _can_panel(uid, "reward"):
+            await cb.answer("Owner/admin only.", show_alert=True)
+            return
+        await cb.message.edit_text("Use your Admin panel to view the rank.",
                                    reply_markup=ui.role_menu(role))
         return
     await cb.answer()
@@ -549,7 +592,7 @@ async def accept_terms(cb: types.CallbackQuery):
             "channel has agreed to receive):", reply_markup=kb)
     else:
         await cb.message.edit_text("No problem. Send a command or use the menu.",
-                                   reply_markup=ui.main_menu(roles.role(cb.from_user.id), include_partnership=False))
+                                   reply_markup=_menu(roles.role(cb.from_user.id), cb.from_user.id))
     await cb.answer()
 
 
@@ -621,7 +664,7 @@ async def show_cap(cb: types.CallbackQuery):
     m = ledger._m(u)
     s = perf.score(u)
     cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"),
-                         m.get("is_owner", False))
+                         m.get("is_owner", False), connected=_is_connected(u))
     await cb.message.edit_text(
         f"📊 <b>DAILY DELIVERY CAP</b>\n\n"
         f"📌 <b>Destination:</b> {u}\n"
@@ -660,7 +703,7 @@ async def on_forward(msg: types.Message):
     # 1) terms accepted? (per user — never a single global flag)
     if not sess.get("accepted_terms"):
         await msg.answer("First accept the posting terms: /start → Submit a post.",
-                         reply_markup=ui.main_menu(roles.role(uid), include_partnership=False))
+                         reply_markup=_menu(roles.role(uid), uid))
         return
     # 2) category declared?
     cat = sess.get("cat")
@@ -672,7 +715,7 @@ async def on_forward(msg: types.Message):
     m = ledger._m(u)
     s = perf.score(u)
     cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"),
-                         m.get("is_owner", False))
+                         m.get("is_owner", False), connected=_is_connected(u))
     left = ledger.cap_left(u, cap)
     if left == 0:
         await msg.answer(f"⛔ Daily post cap reached ({cap}). "
@@ -851,7 +894,7 @@ async def pick_spend(cb: types.CallbackQuery):
         # cap to each RECEIVER instead, so the sender's cap never applied at all.
         m = ledger._m(sender)
         cap = daily_post_cap(m.get("size", 0), perf.score(sender)["band"],
-                             m.get("status", "ACTIVE"), m.get("is_owner", False))
+                             m.get("status", "ACTIVE"), m.get("is_owner", False), connected=_is_connected(sender))
         left = ledger.cap_left(sender, cap)
         if left != -1 and left < len(targets):
             targets = targets[:left]
@@ -1162,7 +1205,7 @@ async def destination_capture(msg: types.Message):
         kind = sess.get("destination_kind", "channel")
         _session_clear(uid)
         await msg.answer(_do_register(msg, name, size, kind=kind), parse_mode="HTML",
-                         reply_markup=ui.main_menu(roles.role(uid), include_partnership=False))
+                         reply_markup=_menu(roles.role(uid), uid))
         return
 
 
@@ -1334,7 +1377,7 @@ def _rank_text() -> str:
         if m.get("is_owner"):
             continue
         s = perf.score(username)
-        cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"))
+        cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"), connected=_is_connected(username))
         lines.append(f"{username:<22} {s['band']}  {s['score']:.2f}  {s['status']}  "
                      f"direct={'✔' if ledger.is_direct(username) else '—'}  "
                      f"cap={cap}  ({m.get('size', 0)})")

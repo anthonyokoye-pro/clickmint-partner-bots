@@ -444,7 +444,7 @@ async def main() -> int:
     await sim.tap(R, DELTA, "Guides")
     await sim.tap(R, DELTA, "Submit")
     cap = reward_bot.daily_post_cap(300, reward_bot.perf.score(DELTA.handle)["band"],
-                                    "ACTIVE", False)
+                                    "ACTIVE", False, connected=False)
     note(f"computed cap for a 300-sub channel: {cap} post(s)/day")
     note("(the cap is consumed when a post is DISTRIBUTED, not when it is submitted)")
     blocked = False

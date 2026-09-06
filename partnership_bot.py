@@ -38,6 +38,11 @@ reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 channels = ChannelRegistry(store)
 stats = StatsBook(store)
+
+
+def _is_connected(username: str) -> bool:
+    row = channels.get(username)
+    return True if row is None else bool(row.get("bot_added"))
 perf.views_provider = stats.provider
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
@@ -302,7 +307,7 @@ async def on_partner_forward(msg: types.Message):
     m = ledger._m(username)
     band = perf.score(username)["band"]
     cap = daily_post_cap(m.get("size", 0), band, m.get("status", "ACTIVE"),
-                         m.get("is_owner", False))
+                         m.get("is_owner", False), connected=_is_connected(username))
     if cap == 0:
         await msg.answer("⛔ Your channel is not currently active in the network.")
         return
