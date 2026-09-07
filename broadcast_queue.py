@@ -40,6 +40,14 @@ ON broadcast_recipients(status, next_attempt_at);
 """
 
 
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class BroadcastQueue:
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -49,7 +57,7 @@ class BroadcastQueue:
             conn.executescript(SCHEMA)
 
     def _connect(self):
-        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")

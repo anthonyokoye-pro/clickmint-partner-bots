@@ -53,6 +53,14 @@ CREATE INDEX IF NOT EXISTS idx_interventions_destination
 """
 
 
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class PerformanceSnapshotRepository:
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -62,7 +70,7 @@ class PerformanceSnapshotRepository:
             conn.executescript(SCHEMA)
 
     def _connect(self):
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 

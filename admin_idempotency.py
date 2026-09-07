@@ -7,6 +7,14 @@ import time
 from pathlib import Path
 
 
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class IdempotencyStore:
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -16,7 +24,7 @@ class IdempotencyStore:
             conn.execute("CREATE TABLE IF NOT EXISTS admin_idempotency (key TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL)")
 
     def _connect(self):
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 

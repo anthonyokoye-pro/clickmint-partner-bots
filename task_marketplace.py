@@ -85,6 +85,14 @@ class DuplicateTaskCompletion(TaskError):
     pass
 
 
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class TaskMarketplace:
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -107,7 +115,7 @@ class TaskMarketplace:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {definition}")
 
     def _connect(self):
-        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=30000")
