@@ -100,7 +100,13 @@ class AdminWSGI:
     def _allowed(self, environ) -> bool:
         if self.allowed_origins is None:
             return True
-        return environ.get("HTTP_ORIGIN", "") in self.allowed_origins
+        origin = environ.get("HTTP_ORIGIN", "")
+        if origin not in self.allowed_origins:
+            # Keep the response deliberately generic, but expose the rejected
+            # origin to the local server operator for deployment diagnosis.
+            print(f"Admin origin rejected: {origin!r}", flush=True)
+            return False
+        return True
 
     def _rate_allowed(self, environ) -> bool:
         key = environ.get("REMOTE_ADDR", "unknown")
