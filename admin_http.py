@@ -101,6 +101,13 @@ class AdminWSGI:
         if self.allowed_origins is None:
             return True
         origin = environ.get("HTTP_ORIGIN", "")
+        if not origin:
+            # Same-origin GET/fetch requests and Telegram WebViews may omit
+            # Origin. Reconstruct the public origin from the proxy headers
+            # instead of treating a missing header as an allowed origin.
+            scheme = environ.get("HTTP_X_FORWARDED_PROTO", "http").split(",", 1)[0].strip()
+            host = environ.get("HTTP_HOST", "")
+            origin = f"{scheme}://{host}" if host else ""
         if origin not in self.allowed_origins:
             # Keep the response deliberately generic, but expose the rejected
             # origin to the local server operator for deployment diagnosis.
