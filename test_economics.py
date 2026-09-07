@@ -34,7 +34,9 @@ def test_allocation_policy_cannot_overpromise():
     assert unit.channel_reward == Decimal("4.00")
     assert unit.refund_reserve == Decimal("1.50")
     assert unit.fraud_reserve == Decimal("1.00")
-    assert unit.platform_surplus == Decimal("1.50")
+    # The configured percentages consume 90% of gross revenue and payment
+    # cost consumes the remaining 10%; there is no unallocated surplus.
+    assert unit.platform_surplus == Decimal("0.00")
 
     try:
         AllocationPolicy("0.60", "0.20", "0.20", "0.10", "0.01")
@@ -89,3 +91,17 @@ def test_owner_surplus_protects_required_reserve():
     assert summary.operating_surplus == Decimal("150.00")
     assert summary.owner_distributable_surplus == Decimal("50.00")
     validate_launch_economics(summary, minimum_margin="0.20")
+
+
+if __name__ == "__main__":
+    tests = [
+        test_unit_economics_reports_positive_surplus_and_margin,
+        test_allocation_policy_cannot_overpromise,
+        test_break_even_uses_ceiling_not_float_rounding,
+        test_stars_value_is_explicit_and_configurable,
+        test_launch_validation_fails_without_profit_or_reserve,
+        test_owner_surplus_protects_required_reserve,
+    ]
+    for test_case in tests:
+        test_case()
+        print(f"PASS {test_case.__name__}")

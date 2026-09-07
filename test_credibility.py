@@ -68,3 +68,17 @@ def test_boost_only_expands_existing_access_radius():
     assert distribution_radius(20, 0) == 0
     assert distribution_radius(60, 0) == 1
     assert distribution_radius(60, 2) == 2
+
+
+if __name__ == "__main__":
+    tests = [
+        test_small_samples_are_smoothed,
+        test_cohort_percentile_and_decay,
+        test_new_user_gets_provisional_evidence_based_profile,
+        test_consistent_user_outscores_weak_user_without_using_subscribers,
+        test_post_score_uses_relative_baseline,
+        test_boost_only_expands_existing_access_radius,
+    ]
+    for test_case in tests:
+        test_case()
+        print(f"PASS {test_case.__name__}")

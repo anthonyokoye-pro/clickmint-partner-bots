@@ -115,8 +115,10 @@ class AllocationPolicy:
             "operating_pct": self.operating_pct,
             "tax_pct": self.tax_pct,
         }
-        for name, value in values.items():
-            object.__setattr__(self, name, ratio(value))
+        for name, value in list(values.items()):
+            normalized = ratio(value)
+            object.__setattr__(self, name, normalized)
+            values[name] = normalized
         if sum(values.values(), ZERO) > ONE:
             raise EconomyPolicyError("allocation percentages cannot exceed 100%")
 
@@ -207,8 +209,11 @@ def stars_settlement_value(stars: int,
     """
     if int(stars) < 0:
         raise EconomyPolicyError("Stars cannot be negative")
-    value = money(value_per_star)
-    if value < ZERO:
+    try:
+        value = D(str(value_per_star))
+    except Exception as exc:
+        raise EconomyPolicyError("invalid value per Star") from exc
+    if not value.is_finite() or value < ZERO:
         raise EconomyPolicyError("value per Star cannot be negative")
     return money(int(stars) * value)
 
