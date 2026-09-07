@@ -68,3 +68,16 @@ def test_broadcast_queue_is_scoped_and_retryable():
         assert queue.queue_campaign(future, [12]) == 1
         assert queue.claim(bot_scope="reward", limit=10) == []
         assert queue.claim(bot_scope="partnership", limit=10) == []
+
+
+if __name__ == "__main__":
+    tests = [
+        test_channel_permissions_fail_closed,
+        test_verified_channel_can_execute,
+        test_eligibility_returns_explainable_reasons,
+        test_referral_ranking_excludes_low_quality_referrals,
+        test_broadcast_queue_is_scoped_and_retryable,
+    ]
+    for test_case in tests:
+        test_case()
+        print(f"PASS {test_case.__name__}")
