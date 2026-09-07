@@ -7,6 +7,14 @@ import time
 from pathlib import Path
 
 
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def backup_sqlite(source: str | Path, destination: str | Path) -> dict:
     source = str(source)
     destination = str(destination)
@@ -34,7 +42,7 @@ def verify_backup_set(manifest_path: str | Path) -> dict:
     verified = {}
     for name, record in manifest.get("databases", {}).items():
         backup = record["backup"]
-        with sqlite3.connect(backup) as conn:
+        with sqlite3.connect(backup, factory=_ClosingConnection) as conn:
             integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
             tables = [row[0] for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()]
