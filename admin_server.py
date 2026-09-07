@@ -28,7 +28,7 @@ class _LedgerFacade:
         self.ledger = {}
 
 
-def build_runtime_app():
+def build_runtime_app(*, dev: bool = False):
     shared_store = JsonStore(config.REWARD_STORE_PATH)
     roles = RoleRegistry(shared_store, config.OWNER_USER_ID)
     channels = ChannelRegistry(shared_store)
@@ -46,7 +46,7 @@ def build_runtime_app():
         broadcasts=broadcasts,
         ledger=ledger,
     )
-    return build_admin_app(
+    app = build_admin_app(
         api,
         root=Path(__file__).parent,
         bot_token=config.ADMIN_BOT_TOKEN,
@@ -54,14 +54,20 @@ def build_runtime_app():
         allowed_origins=config.ADMIN_ALLOWED_ORIGINS,
         idempotency_path=config.ADMIN_API_DB_PATH,
     )
+    if dev:
+        # Explicit local-only mode: production retains the HTTPS allowlist.
+        app.allowed_origins = None
+    return app
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the ClickMint Admin Mini App")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--dev", action="store_true",
+                        help="allow local HTTP origins; never use in production")
     args = parser.parse_args()
-    app = build_runtime_app()
+    app = build_runtime_app(dev=args.dev)
     with make_server(args.host, args.port, app) as server:
         print(f"ClickMint Admin listening on http://{args.host}:{args.port}")
         server.serve_forever()
