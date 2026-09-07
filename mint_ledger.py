@@ -159,6 +159,19 @@ CREATE INDEX IF NOT EXISTS idx_outbox_ready ON outbox_events(status, available_a
 """
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Close SQLite handles when a ``with connection`` block exits.
+
+    sqlite3's default context manager commits/rolls back but does not close the
+    file handle, which prevents TemporaryDirectory cleanup on Windows.
+    """
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class InsufficientMint(Exception):
     """Raised when an atomic Mint debit cannot be funded."""
 
@@ -184,7 +197,7 @@ class TransactionalMintLedger:
             conn.executescript(SCHEMA)
 
     def _connect(self):
-        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None, factory=_ClosingConnection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 30000")
