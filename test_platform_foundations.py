@@ -66,7 +66,10 @@ def test_broadcast_queue_is_scoped_and_retryable():
                                        payload={"text": "later"},
                                        scheduled_at=int(time.time()) + 3600)
         assert queue.queue_campaign(future, [12]) == 1
-        assert queue.claim(bot_scope="reward", limit=10) == []
+        # The earlier retryable Reward delivery may become claimable while this
+        # test is running; it must never be confused with the future campaign.
+        reward_claimed = queue.claim(bot_scope="reward", limit=10)
+        assert all(item["campaign_id"] != future for item in reward_claimed)
         assert queue.claim(bot_scope="partnership", limit=10) == []
 
 
