@@ -42,8 +42,10 @@ def main_menu(role: str, include_partnership: bool = True,
         row([InlineKeyboardButton(text="📤 Submit a post", callback_data="menu:submit"),
              InlineKeyboardButton(text="📊 My post limit", callback_data="menu:cap")]),
         row([InlineKeyboardButton(text="📂 My channels / groups", callback_data="menu:channels")]),
+        row([InlineKeyboardButton(text="📋 Task Marketplace", callback_data="menu:tasks")]),
+        row([InlineKeyboardButton(text="📈 Credibility", callback_data="menu:credibility")]),
         row([InlineKeyboardButton(
-            text=f"📬 Posts available{(' · ' + _badge(available_count)) if available_count is not None else ''}",
+            text=f"📬 Legacy posts available{(' · ' + _badge(available_count)) if available_count is not None else ''}",
             callback_data="menu:available")]),
         row([InlineKeyboardButton(text="🪙 MINT wallet", callback_data="menu:wallet")]),
     ]
@@ -74,9 +76,12 @@ def role_menu(role: str, scope: str | None = None,
     """Owner/admin command panel (the 'different from user' menu)."""
     kb = [
         row([InlineKeyboardButton(text="📁 Audit log", callback_data="panel:audit"),
-             InlineKeyboardButton(text="🚩 Pending reports", callback_data="panel:reports")]),
+             InlineKeyboardButton(text="📤 Outbox", callback_data="panel:outbox")]),
+        row([InlineKeyboardButton(text="📣 Broadcasts", callback_data="panel:broadcasts")]),
+        row([InlineKeyboardButton(text="🚩 Pending reports", callback_data="panel:reports")]),
         row([InlineKeyboardButton(text="🧾 Review queue", callback_data="panel:review"),
-             InlineKeyboardButton(text="🏆 Rank", callback_data="panel:rank")]),
+             InlineKeyboardButton(text="📈 Performance", callback_data="panel:performance")]),
+        row([InlineKeyboardButton(text="🏆 Rank", callback_data="panel:rank")]),
         row([InlineKeyboardButton(text="⚡ Direct delivery", callback_data="panel:direct"),
              InlineKeyboardButton(text="⏰ Scheduled", callback_data="panel:scheduled")]),
     ]

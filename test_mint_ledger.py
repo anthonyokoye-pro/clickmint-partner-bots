@@ -98,6 +98,54 @@ def test_outbox_is_idempotent_and_retryable():
         assert len(claimed_again) == 1 and claimed_again[0]["attempts"] == 2
         assert db.complete_outbox(first)
         assert db.claim_outbox() == []
+        performance = db.outbox_performance()
+        assert performance["total"] == 1
+        assert performance["retry_rate"] == 1.0
+
+
+def test_admin_can_pause_and_retry_failed_outbox_event():
+    with fresh() as db:
+        event = db.enqueue_outbox(event_type="TASK_MINT_REWARD", recipient_id=7,
+                                  payload="{}", idempotency_key="task:pause")
+        assert db.get_outbox_event(event)["event_type"] == "TASK_MINT_REWARD"
+        db.claim_outbox()
+        assert db.fail_outbox(event, "manual pause", permanent=True)
+        assert db.claim_outbox() == []
+        assert db.retry_outbox(event)
+        assert len(db.claim_outbox()) == 1
+
+
+def test_channel_permission_audit_is_queryable():
+    with fresh() as db:
+        db.add_audit_event(
+            actor_type="telegram", actor_id="42",
+            action="CHANNEL_STATUS_DEGRADED", object_type="channel",
+            object_id="-1001", reason="ACTIVE -> DEGRADED: cannot post",
+        )
+        db.add_audit_event(
+            actor_type="telegram", actor_id="42",
+            action="CHANNEL_STATUS_ACTIVE", object_type="channel",
+            object_id="-1001", reason="DEGRADED -> ACTIVE: verified",
+        )
+        events = db.recent_audit_events(object_type="channel", limit=10)
+        assert len(events) == 2
+        assert {event["action"] for event in events} == {
+            "CHANNEL_STATUS_ACTIVE", "CHANNEL_STATUS_DEGRADED"
+        }
+        assert all(event["object_id"] == "-1001" for event in events)
+        db.add_audit_event(actor_type="admin", actor_id="9",
+                           action="OUTBOX_RETRY", object_type="outbox",
+                           object_id="outbox-1", reason="manual retry")
+        outbox_events = db.recent_audit_events(object_type="outbox")
+        assert outbox_events[0]["actor_id"] == "9"
+        db.add_audit_event(actor_type="system", actor_id="health-monitor",
+                           action="OUTBOX_ALERT_RAISED", object_type="outbox_health",
+                           object_id="global", reason="failed events")
+        assert len(db.active_health_alerts()) == 1
+        db.add_audit_event(actor_type="system", actor_id="health-monitor",
+                           action="OUTBOX_ALERT_CLEARED", object_type="outbox_health",
+                           object_id="global", reason="failed events")
+        assert db.active_health_alerts() == []
 
 
 def test_referral_history_and_reversal_are_auditable():
@@ -108,6 +156,14 @@ def test_referral_history_and_reversal_are_auditable():
         entry = db.confirm_referral_reward("new", activity_id="activity")
         assert db.referral_stats("referrer")["qualified"] == 1
         assert len(db.referral_history("referrer")) == 1
+        snapshot = db.create_referral_ranking_snapshot(
+            period="2026-09", pool=10, winners=1,
+            ranking=[{"referrer_id": "referrer", "score": 80}],
+            allocation=[{"referrer_id": "referrer", "reward_amount": 10}],
+        )
+        assert snapshot["status"] == "preview"
+        assert db.approve_referral_ranking("2026-09", "admin-1")
+        assert db.referral_ranking_snapshot("2026-09")["status"] == "approved"
         reverse = db.reverse(entry, idempotency_key="reverse:1", reason="fraud review")
         assert reverse and db.balance("referrer") == 0
         assert db.entries("referrer")[0]["entry_type"] == "REVERSAL"

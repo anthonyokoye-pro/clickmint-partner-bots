@@ -1,0 +1,50 @@
+"""Offline production go-live checklist runner."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from admin_deploy import admin_preflight
+
+
+def run_go_live_check(root: str | Path, *, bot_token: str, owner_id: str,
+                      allowed_origins: list[str], database_paths: dict[str, str | Path]) -> dict:
+    root = Path(root)
+    checks = {}
+    errors = admin_preflight(root, bot_token=bot_token, owner_id=owner_id,
+                             allowed_origins=allowed_origins)
+    checks["admin_preflight"] = {"ok": not errors, "errors": errors}
+    checks["frontend"] = {"ok": all((root / item).is_file() for item in (
+        "admin_web/index.html", "admin_web/app.js", "admin_web/styles.css"))}
+    checks["database_paths"] = {
+        name: {"configured": bool(str(path)), "path": str(path)}
+        for name, path in database_paths.items()
+    }
+    checks["financial_features"] = {
+        "revenue": "disabled", "deposits": "disabled", "withdrawals": "disabled",
+        "external_payouts": "disabled",
+    }
+    return {"ok": checks["admin_preflight"]["ok"] and checks["frontend"]["ok"],
+            "checks": checks}
+
+
+def main() -> int:
+    import config
+    report = run_go_live_check(
+        Path(__file__).parent, bot_token=config.ADMIN_BOT_TOKEN,
+        owner_id=str(config.OWNER_USER_ID),
+        allowed_origins=config.ADMIN_ALLOWED_ORIGINS,
+        database_paths={
+            "mint": config.MINT_DB_PATH,
+            "tasks": config.TASK_DB_PATH,
+            "broadcast": config.BROADCAST_DB_PATH,
+            "credibility": config.CREDIBILITY_DB_PATH,
+            "admin_api": config.ADMIN_API_DB_PATH,
+        },
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

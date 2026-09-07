@@ -21,10 +21,15 @@ NEW FEATURES (governance.py):
     code; they redeem it to unlock a SCOPED admin menu (reward / partnership / both).
 """
 import asyncio
+import csv
 import hashlib
+import io
+import json
 import logging
+import os
 import time
 import datetime as dt
+from html import escape
 from aiogram import Bot, Dispatcher, types
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.filters import Command
@@ -36,6 +41,12 @@ from channel_registry import ChannelRegistry
 from features import (ReferralLedger, AvailablePostQueue, BubbleNotifier,
                       AnnouncementBoard, RankVisibility, StatsBook, ReroutePlanner,
                       category_counts)
+from task_marketplace import TaskMarketplace, TaskUnavailable, TaskNotFound
+from channel_connection import TelegramPermissionSnapshot, verify_permissions
+from credibility import tier_for_score
+from performance_snapshots import PerformanceSnapshotRepository
+from referral_ranking import ReferralRecord, rank_referrers, allocate_monthly_rewards
+from broadcast_queue import BroadcastQueue
 from currency import MINT_ICON, MINT_NAME, amount, amount_short, balance_line
 from store import JsonStore
 from scheduler import Scheduler
@@ -47,6 +58,8 @@ import ui
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = config.REWARD_BOT_TOKEN          # from @BotFather, via env var
 OWNER_USER_ID = config.OWNER_USER_ID         # your numeric Telegram user id (owner)
+_HEALTH_ALERT_LAST = 0
+_HEALTH_ALERTED = set()
 
 store = JsonStore(config.REWARD_STORE_PATH)
 if config.MINT_LEDGER_MODE == "transactional":
@@ -66,6 +79,11 @@ announcements = AnnouncementBoard(store)
 ranks = RankVisibility(store)
 stats = StatsBook(store)
 reroutes = ReroutePlanner(store)
+# New marketplace state is additive and isolated from the legacy available-post
+# queue until task creation/execution migration is complete.
+marketplace = TaskMarketplace(config.TASK_DB_PATH)
+credibility_snapshots = PerformanceSnapshotRepository(config.CREDIBILITY_DB_PATH)
+broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
 # PerformanceEngine consumes real observations when available; absent fields stay absent.
 perf.views_provider = stats.provider
 
@@ -401,6 +419,73 @@ async def referrals_cmd(msg: types.Message):
     await msg.answer(f"🔗 Referrals: {st['referred']} · qualified {st['completed']} · pending {st['pending']}")
 
 
+@dp.message(Command("referralrank"))
+async def referral_rank_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    if not hasattr(ledger, "tx"):
+        await msg.answer("Referral ranking preview requires transactional Mint mode.")
+        return
+    parts = (msg.text or "").split()
+    try:
+        pool = int(parts[1]) if len(parts) > 1 else 0
+        winners = int(parts[2]) if len(parts) > 2 else 10
+        if pool < 0 or winners < 0:
+            raise ValueError
+    except ValueError:
+        await msg.answer("Usage: /referralrank [pool] [winners]")
+        return
+    records = [ReferralRecord(
+        referrer_id=str(row["referrer_id"]),
+        referred_id=str(row["referred_id"]),
+        status=row["status"],
+        retained=row["status"] == "qualified",
+        qualified_activity_count=1 if row["status"] == "qualified" else 0,
+    ) for row in ledger.tx.all_referrals(limit=10000)]
+    ranking = rank_referrers(records)
+    allocation = allocate_monthly_rewards(ranking, pool=pool, winners=winners) if pool else []
+    period = dt.datetime.now().strftime("%Y-%m")
+    existing_snapshot = ledger.tx.referral_ranking_snapshot(period)
+    snapshot_note = ""
+    if not existing_snapshot and pool:
+        try:
+            ledger.tx.create_referral_ranking_snapshot(
+                period=period, pool=pool, winners=winners,
+                ranking=ranking, allocation=allocation)
+            snapshot_note = f"Snapshot created for {period}."
+        except Exception:
+            snapshot_note = f"A snapshot already exists for {period}."
+    elif existing_snapshot:
+        snapshot_note = f"Snapshot {period}: {existing_snapshot['status']}."
+    lines = ["🏆 <b>REFERRAL RANKING PREVIEW</b>", "", snapshot_note]
+    for index, row in enumerate(ranking[:10], 1):
+        reward = next((item["reward_amount"] for item in allocation if item["referrer_id"] == row["referrer_id"]), 0)
+        lines.append(f"{index}. {row['referrer_id']} · score {row['score']:.2f} · qualified {row['qualified_referrals']} · preview Mint {reward}")
+    lines.extend(["", "This is a preview only. No referral rewards are distributed automatically."])
+    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("approvereferral"))
+async def approve_referral_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    parts = (msg.text or "").split()
+    period = parts[1] if len(parts) > 1 else dt.datetime.now().strftime("%Y-%m")
+    if not hasattr(ledger, "tx"):
+        await msg.answer("Transactional referral snapshots are not enabled.")
+        return
+    ok = ledger.tx.approve_referral_ranking(period, msg.from_user.id)
+    if ok:
+        ledger.tx.add_audit_event(
+            actor_type="admin", actor_id=str(msg.from_user.id),
+            action="REFERRAL_RANKING_APPROVED", object_type="referral_snapshot",
+            object_id=period, reason="monthly ranking approval",
+        )
+    await msg.answer("✅ Referral ranking snapshot approved." if ok else "Snapshot not found or already finalized.")
+
+
 @dp.message(Command("joinref"))
 async def join_ref_cmd(msg: types.Message):
     parts = (msg.text or "").split()
@@ -424,6 +509,721 @@ async def available_cmd(msg: types.Message):
     await msg.answer("\n".join(lines))
 
 
+def _elapsed_seconds(timestamp) -> int:
+    if timestamp is None:
+        return 0
+    return max(0, int(time.time()) - int(timestamp))
+
+
+def _duration_label(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds}s"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h"
+
+
+def _elapsed_label(timestamp) -> str:
+    if timestamp is None:
+        return "none"
+    return _duration_label(_elapsed_seconds(timestamp))
+
+
+def _remaining_label(timestamp) -> str:
+    if timestamp is None:
+        return "none"
+    return _duration_label(max(0, int(timestamp) - int(time.time())))
+
+
+def _outbox_age_marker(event: dict) -> str:
+    threshold = int(os.getenv("OUTBOX_STALE_WARN_SECONDS", "3600"))
+    age = _elapsed_seconds(event.get("created_at"))
+    return "🚨 STALE" if age >= threshold else ""
+
+
+def _record_outbox_admin_action(actor_id, action: str, event_id: str, reason: str):
+    if hasattr(ledger, "tx"):
+        ledger.tx.add_audit_event(
+            actor_type="admin", actor_id=str(actor_id), action=action,
+            object_type="outbox", object_id=str(event_id), reason=reason,
+        )
+
+
+def _record_channel_state_change(row: dict, previous: str, current: str, reason: str):
+    """Persist permission-state transitions for audit and reconciliation review."""
+    chat_id = row.get("chat_id") or row.get("username")
+    owner_id = row.get("owner_id")
+    if hasattr(ledger, "tx"):
+        ledger.tx.add_audit_event(
+            actor_type="telegram",
+            actor_id=str(owner_id),
+            action=f"CHANNEL_STATUS_{current}",
+            object_type="channel",
+            object_id=str(chat_id),
+            reason=f"{previous} -> {current}: {reason}",
+        )
+    else:
+        audit.record(
+            bot="reward", sender=str(owner_id), target_channel=str(chat_id),
+            post_type="channel_permission_reconciliation",
+            decision=f"{previous}->{current}", reason=reason,
+        )
+
+
+def _task_categories(uid: int):
+    """Categories from the user's registered destinations."""
+    categories = []
+    for row in channels.mine(uid):
+        categories.extend(row.get("categories") or [])
+    return sorted(set(categories)) or ["General"]
+
+
+def _destination_daily_limit(destination_id) -> int:
+    snapshot = credibility_snapshots.current(destination_id)
+    if not snapshot:
+        return int(os.getenv("TASK_DAILY_LIMIT_PROVISIONAL", "3"))
+    limits = {
+        "PROVISIONAL": int(os.getenv("TASK_DAILY_LIMIT_PROVISIONAL", "3")),
+        "EMERGING": int(os.getenv("TASK_DAILY_LIMIT_EMERGING", "6")),
+        "ESTABLISHED": int(os.getenv("TASK_DAILY_LIMIT_ESTABLISHED", "10")),
+        "PROVEN": int(os.getenv("TASK_DAILY_LIMIT_PROVEN", "15")),
+        "PREMIER": int(os.getenv("TASK_DAILY_LIMIT_PREMIER", "20")),
+    }
+    limit = limits.get(snapshot["tier"], limits["PROVISIONAL"])
+    if float(snapshot.get("confidence", 0)) < 0.20:
+        limit = min(limit, int(os.getenv("TASK_DAILY_LIMIT_LOW_CONFIDENCE", "5")))
+    return limit
+
+
+def _eligible_marketplace_tasks(uid: int) -> list[dict]:
+    """Return tasks matching at least one active destination and its tier."""
+    destinations = [row for row in channels.mine(uid)
+                    if row.get("status", "ACTIVE") == "ACTIVE"]
+    if not destinations:
+        return []
+    tier_order = {"PROVISIONAL": 0, "EMERGING": 1, "ESTABLISHED": 2,
+                  "PROVEN": 3, "PREMIER": 4}
+    day_start = int(time.time()) - (int(time.time()) % 86400)
+    available_destinations = [destination for destination in destinations
+                              if marketplace.user_claim_count_since(
+                                  uid, day_start,
+                                  destination.get("chat_id") or destination.get("username"))
+                              < _destination_daily_limit(destination.get("chat_id") or destination.get("username"))]
+    if not available_destinations:
+        return []
+    tasks = marketplace.available_for(uid, categories=_task_categories(uid), limit=50)
+    eligible = []
+    for task in tasks:
+        required = task.get("minimum_tier", "PROVISIONAL")
+        for destination in available_destinations:
+            destination_id = destination.get("chat_id") or destination.get("username")
+            if credibility_snapshots.is_suspended(destination_id):
+                continue
+            snapshot = credibility_snapshots.current(destination_id)
+            if snapshot:
+                actual = snapshot["tier"]
+            else:
+                key = destination.get("username") or ("@" + str(uid))
+                score = float(perf.score(key).get("score", 0.5)) * 100
+                actual = tier_for_score(score)
+            if tier_order.get(actual, 0) >= tier_order.get(required, 0):
+                eligible.append(task)
+                break
+    # Recommend the most relevant work first: category match is already enforced,
+    # then higher reward and remaining capacity, with older tasks first as a tie-break.
+    eligible.sort(key=lambda task: (
+        -int(task.get("reward_amount", 1)),
+        -int(task.get("required_performers", 0)),
+        int(task.get("created_at", 0)),
+    ))
+    return eligible
+
+
+def _task_menu(tasks: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for task in tasks[:8]:
+        progress = marketplace.progress(task["task_id"])
+        rows.append([
+            InlineKeyboardButton(
+                text=f"📋 {task['title'][:24]} · {progress['completed']}/{progress['required']}",
+                callback_data=f"task:view:{task['task_id']}"),
+            InlineKeyboardButton(text="ℹ️", callback_data=f"task:why:{task['task_id']}")
+        ])
+    rows.append([InlineKeyboardButton(text="🔄 Refresh tasks", callback_data="menu:tasks")])
+    rows.append([InlineKeyboardButton(text="ℹ️ Why am I not eligible?", callback_data="task:eligibility")])
+    rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(lambda c: c.data == "task:eligibility")
+async def task_eligibility_explanation(cb: types.CallbackQuery):
+    uid = cb.from_user.id
+    destinations = channels.mine(uid)
+    active = [row for row in destinations if row.get("status", "ACTIVE") == "ACTIVE"]
+    categories = sorted({category for row in active for category in (row.get("categories") or [])})
+    if active:
+        tier_order = {"PROVISIONAL": 0, "EMERGING": 1, "ESTABLISHED": 2,
+                      "PROVEN": 3, "PREMIER": 4}
+        tiers = []
+        for row in active:
+            key = row.get("username") or ("@" + str(uid))
+            score = float(perf.score(key).get("score", 0.5)) * 100
+            tiers.append(tier_for_score(score))
+        current_tier = max(tiers, key=lambda tier: tier_order.get(tier, 0))
+    else:
+        current_tier = "None"
+    tasks = _eligible_marketplace_tasks(uid)
+    lines = [
+        "ℹ️ <b>TASK ELIGIBILITY</b>",
+        "",
+        f"Active destinations: {len(active)}",
+        f"Categories: {', '.join(categories) if categories else 'None registered'}",
+        f"Highest detected credibility: {current_tier}",
+        f"Currently eligible tasks: {len(tasks)}",
+        "Daily task limits: " + ", ".join(
+            f"{row.get('username') or row.get('chat_id')} "
+            f"{marketplace.user_claim_count_since(uid, int(time.time()) - (int(time.time()) % 86400), row.get('chat_id') or row.get('username'))}/{_destination_daily_limit(row.get('chat_id') or row.get('username'))}"
+            for row in active
+        ),
+        "",
+        "Tasks require an active connected destination, a compatible category, "
+        "sufficient credibility, available capacity, and no previous claim.",
+    ]
+    if not active:
+        lines.extend(["", "Next step: connect a Telegram channel and complete verification."])
+    elif not categories:
+        lines.extend(["", "Next step: add a compatible category to your channel profile."])
+    await cb.message.edit_text(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Refresh tasks", callback_data="menu:tasks")],
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")],
+        ]),
+    )
+    await cb.answer()
+
+
+async def show_tasks_message(target, uid: int, *, edit: bool = False):
+    rows = _eligible_marketplace_tasks(uid)[:8]
+    if not rows:
+        text = ("📋 <b>TASK MARKETPLACE</b>\n\n"
+                "No recommended tasks are currently available.\n\n"
+                "Connect and verify a channel to become eligible for channel-posting tasks.")
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📂 My channels", callback_data="menu:channels")],
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")],
+        ])
+    else:
+        text = ("📋 <b>TASK MARKETPLACE</b>\n\n"
+                "Tasks below are candidates for your registered categories.\n"
+                "Final eligibility is checked again before claiming.\n\n"
+                + "\n".join(
+                    f"• {r['title']} — {marketplace.progress(r['task_id'])['completed']}/{r['required_performers']} completed"
+                    for r in rows))
+        markup = _task_menu(rows)
+    if edit:
+        await target.edit_text(text, parse_mode="HTML", reply_markup=markup)
+    else:
+        await target.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@dp.message(Command("tasks"))
+async def tasks_cmd(msg: types.Message):
+    await show_tasks_message(msg, msg.from_user.id)
+
+
+@dp.message(Command("createtask"))
+async def create_task_cmd(msg: types.Message):
+    """Owner-only bootstrap for marketplace tasks.
+
+    This intentionally remains a small administrative fallback until the Admin
+    Bot/Mini App task composer is implemented.
+    """
+    if not roles.is_owner(msg.from_user.id):
+        await msg.answer("🔒 Owner only.")
+        return
+    parts = (msg.text or "").split(maxsplit=3)
+    if len(parts) < 4:
+        await msg.answer("Usage: /createtask <category> <performers> <title>")
+        return
+    category = parts[1]
+    try:
+        performers = int(parts[2])
+    except ValueError:
+        await msg.answer("The performer count must be a positive number.")
+        return
+    try:
+        task_id = marketplace.create_task(
+            creator_user_id=msg.from_user.id,
+            category=category,
+            title=parts[3],
+            required_performers=performers,
+            # Bootstrap command creates a platform-generated text task. Forwarded
+            # task creation will later store source_chat_id/source_message_id.
+            payload={"text": parts[3]},
+        )
+        marketplace.publish(task_id)
+    except ValueError as exc:
+        await msg.answer(str(exc))
+        return
+    await msg.answer(
+        f"✅ Task published: <code>{task_id}</code>\n"
+        f"Required performers: {performers}",
+        parse_mode="HTML", reply_markup=_menu("owner", msg.from_user.id))
+
+
+@dp.callback_query(lambda c: c.data == "task:create")
+async def begin_forwarded_task(cb: types.CallbackQuery):
+    if not roles.is_owner(cb.from_user.id):
+        await cb.answer("Owner only.", show_alert=True)
+        return
+    pending = _session(cb.from_user.id).get("pending") or {}
+    if not pending.get("from_chat_id") or not pending.get("from_message_id"):
+        await cb.answer("Forward the post first.", show_alert=True)
+        return
+    categories = [
+        [InlineKeyboardButton(text=category, callback_data=f"task:category:{category}")]
+        for category in POST_CATEGORIES
+    ]
+    categories.append([InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")])
+    await cb.message.edit_text(
+        "📋 <b>CREATE MARKETPLACE TASK</b>\n\n"
+        "The forwarded post is saved with its original Telegram source.\n"
+        "Choose its category:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=categories),
+    )
+    await cb.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("task:category:"))
+async def forwarded_task_category(cb: types.CallbackQuery):
+    if not roles.is_owner(cb.from_user.id):
+        await cb.answer("Owner only.", show_alert=True)
+        return
+    category = cb.data.split(":", 2)[2]
+    if category not in POST_CATEGORIES:
+        await cb.answer("Unknown category.", show_alert=True)
+        return
+    _session_set(cb.from_user.id, task_category=category)
+    buttons = [
+        [InlineKeyboardButton(text=str(count), callback_data=f"task:performers:{count}")]
+        for count in (1, 2, 3, 5, 10, 20)
+    ]
+    buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")])
+    await cb.message.edit_text(
+        f"📋 <b>TASK CATEGORY: {category}</b>\n\n"
+        "How many different eligible users must publish this post?",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await cb.answer()
+
+
+def _task_settings_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏱ 6 hours", callback_data="task:setting:expiry:21600"),
+         InlineKeyboardButton(text="⏱ 24 hours", callback_data="task:setting:expiry:86400")],
+        [InlineKeyboardButton(text="⏱ 72 hours", callback_data="task:setting:expiry:259200")],
+        [InlineKeyboardButton(text="🪙 1 Mint", callback_data="task:setting:reward:1"),
+         InlineKeyboardButton(text="🪙 2 Mint", callback_data="task:setting:reward:2"),
+         InlineKeyboardButton(text="🪙 5 Mint", callback_data="task:setting:reward:5")],
+        [InlineKeyboardButton(text="🌱 Provisional+", callback_data="task:setting:tier:PROVISIONAL"),
+         InlineKeyboardButton(text="🌿 Emerging+", callback_data="task:setting:tier:EMERGING")],
+        [InlineKeyboardButton(text="🌳 Established+", callback_data="task:setting:tier:ESTABLISHED")],
+        [InlineKeyboardButton(text="✅ Publish task", callback_data="task:publish")],
+        [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")],
+    ])
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("task:performers:"))
+async def forwarded_task_performers(cb: types.CallbackQuery):
+    if not roles.is_owner(cb.from_user.id):
+        await cb.answer("Owner only.", show_alert=True)
+        return
+    try:
+        performers = int(cb.data.split(":", 2)[2])
+    except ValueError:
+        await cb.answer("Invalid performer count.", show_alert=True)
+        return
+    if performers < 1:
+        await cb.answer("Performers must be positive.", show_alert=True)
+        return
+    _session_set(cb.from_user.id, task_performers=performers)
+    await cb.message.edit_text(
+        "📋 <b>TASK SETTINGS</b>\n\n"
+        f"Performers: {performers}\n\n"
+        "Choose expiry, reward, and minimum credibility tier.\n"
+        "You can change a setting by tapping another option, then publish.",
+        parse_mode="HTML", reply_markup=_task_settings_keyboard(),
+    )
+    await cb.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("task:setting:"))
+async def forwarded_task_setting(cb: types.CallbackQuery):
+    if not roles.is_owner(cb.from_user.id):
+        await cb.answer("Owner only.", show_alert=True)
+        return
+    parts = cb.data.split(":", 3)
+    if len(parts) != 4:
+        await cb.answer("Invalid task setting.", show_alert=True)
+        return
+    kind, value = parts[2], parts[3]
+    if kind == "expiry":
+        _session_set(cb.from_user.id, task_expiry_seconds=int(value))
+    elif kind == "reward":
+        _session_set(cb.from_user.id, task_reward=int(value))
+    elif kind == "tier":
+        _session_set(cb.from_user.id, task_minimum_tier=value)
+    else:
+        await cb.answer("Unknown task setting.", show_alert=True)
+        return
+    await cb.answer("Setting saved")
+
+
+@dp.callback_query(lambda c: c.data == "task:publish")
+async def create_forwarded_task(cb: types.CallbackQuery):
+    if not roles.is_owner(cb.from_user.id):
+        await cb.answer("Owner only.", show_alert=True)
+        return
+    session = _session(cb.from_user.id)
+    pending = session.get("pending") or {}
+    category = session.get("task_category")
+    performers = session.get("task_performers")
+    expiry_seconds = session.get("task_expiry_seconds", 86400)
+    reward_amount = session.get("task_reward", 1)
+    minimum_tier = session.get("task_minimum_tier", "PROVISIONAL")
+    if not category or not performers or not pending.get("from_chat_id") or not pending.get("from_message_id"):
+        await cb.answer("That forwarded task setup is incomplete.", show_alert=True)
+        return
+    title = pending.get("source_text") or f"Forwarded {category} post"
+    try:
+        task_id = marketplace.create_task(
+            creator_user_id=cb.from_user.id,
+            category=category,
+            title=title[:120],
+            required_performers=performers,
+            expires_at=int(time.time()) + int(expiry_seconds),
+            reward_amount=reward_amount,
+            minimum_tier=minimum_tier,
+            allowed_categories=[category],
+            payload={
+                "source_chat_id": pending["from_chat_id"],
+                "source_message_id": pending["from_message_id"],
+                "source": pending.get("source", "unknown"),
+                "silent": pending.get("ntf") == "silent",
+            },
+        )
+        marketplace.publish(task_id)
+    except (ValueError, TypeError) as exc:
+        await cb.answer(str(exc), show_alert=True)
+        return
+    _session_clear(cb.from_user.id)
+    await cb.message.edit_text(
+        "✅ <b>FORWARDED TASK PUBLISHED</b>\n\n"
+        f"Task: <code>{task_id}</code>\n"
+        f"Category: {escape(str(category))}\n"
+        f"Performers: {performers}\n"
+        f"Reward: 🪙 {reward_amount}\n"
+        f"Minimum tier: {minimum_tier}\n\n"
+        "The original post will be forwarded to each eligible connected channel.",
+        parse_mode="HTML", reply_markup=_menu("owner", cb.from_user.id),
+    )
+    await cb.answer("Task published")
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("task:why:"))
+async def task_recommendation_reason(cb: types.CallbackQuery):
+    task_id = cb.data.split(":", 2)[2]
+    task = marketplace.get_task(task_id)
+    if not task:
+        await cb.answer("That task is no longer available.", show_alert=True)
+        return
+    destinations = [row for row in channels.mine(cb.from_user.id)
+                    if row.get("status", "ACTIVE") == "ACTIVE"]
+    categories = _task_categories(cb.from_user.id)
+    matching = [row for row in destinations
+                if task.get("category") in (row.get("categories") or [])]
+    reasons = [f"Category match: {task.get('category')}",
+               f"Reward: {int(task.get('reward_amount', 1))} Mint",
+               f"Minimum tier: {task.get('minimum_tier', 'PROVISIONAL')}+",
+               f"Available capacity: {task.get('required_performers', 0)} performers"]
+    if matching:
+        reasons.append(f"Compatible destinations: {len(matching)}")
+    else:
+        reasons.append("This task is visible through your current marketplace category profile.")
+    await cb.answer("\n".join(reasons), show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("task:view:"))
+async def task_action(cb: types.CallbackQuery):
+    parts = cb.data.split(":", 2)
+    if len(parts) != 3 or parts[1] != "view":
+        await cb.answer("Unknown task action.", show_alert=True)
+        return
+    task_id = parts[2]
+    try:
+        rows = _eligible_marketplace_tasks(cb.from_user.id)
+        task = next((row for row in rows if row["task_id"] == task_id), None)
+        if not task:
+            await cb.answer("That task is no longer available.", show_alert=True)
+            return
+        progress = marketplace.progress(task_id)
+        text = (f"📋 <b>{escape(str(task['title']))}</b>\n\n"
+                f"Category: {escape(str(task['category']))}\n"
+                f"Progress: {progress['completed']} / {progress['required']} completed\n"
+                f"Claimed now: {progress['claimed']}\n"
+                f"Remaining: {progress['remaining']}\n"
+                f"Reward: 🪙 {int(task.get('reward_amount', 1))}\n"
+                f"Minimum credibility: {escape(str(task.get('minimum_tier', 'PROVISIONAL')))}+\n\n"
+                "A verified connected channel is required before claiming.")
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Choose channel", callback_data=f"task:choose:{task_id}")],
+            [InlineKeyboardButton(text="⬅️ Back to tasks", callback_data="menu:tasks")],
+        ]))
+        await cb.answer()
+    except TaskNotFound:
+        await cb.answer("That task no longer exists.", show_alert=True)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("task:choose:"))
+async def choose_task_channel(cb: types.CallbackQuery):
+    task_id = cb.data.split(":", 2)[2]
+    rows = channels.mine(cb.from_user.id)
+    candidates = [row for row in rows if row.get("status", "ACTIVE") == "ACTIVE"]
+    if not candidates:
+        await cb.answer("Register a channel first.", show_alert=True)
+        return
+    # Store the destination list in the user session; callback data contains only
+    # a short index so it remains within Telegram's callback-data limit.
+    _session_set(cb.from_user.id, task_id=task_id,
+                 task_destinations=[row.get("chat_id") or row.get("username") for row in candidates])
+    buttons = []
+    for index, row in enumerate(candidates):
+        buttons.append([InlineKeyboardButton(
+            text=f"📢 {row.get('username') or row.get('chat_id')}",
+            callback_data=f"task:claim:{task_id}:{index}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data=f"task:view:{task_id}")])
+    await cb.message.edit_text(
+        "📢 <b>CHOOSE EXECUTION CHANNEL</b>\n\n"
+        "Select the connected channel where the original post should be published.",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await cb.answer()
+
+
+async def _verify_task_channel(row: dict):
+    """Verify the bot's current Telegram administrator rights before execution."""
+    chat_id = row.get("chat_id") or row.get("username")
+    if not chat_id:
+        return None, "destination has no Telegram chat id"
+    try:
+        chat = await bot.get_chat(chat_id)
+        me = await bot.get_me()
+        member = await bot.get_chat_member(chat.id, me.id)
+        snapshot = TelegramPermissionSnapshot(
+            chat_id=str(chat.id),
+            chat_type=getattr(chat, "type", row.get("kind", "channel")),
+            member_status=getattr(member, "status", ""),
+            can_post_messages=bool(getattr(member, "can_post_messages", False)),
+            can_edit_messages=bool(getattr(member, "can_edit_messages", False)),
+            can_delete_messages=bool(getattr(member, "can_delete_messages", False)),
+            can_pin_messages=bool(getattr(member, "can_pin_messages", False)),
+            checked_at=int(time.time()),
+        )
+        result = verify_permissions(snapshot, require_post=True)
+        if not result.eligible:
+            return None, "; ".join(result.reasons)
+        return {"row": row, "chat_id": chat.id, "snapshot": snapshot}, None
+    except Exception as exc:
+        return None, f"Telegram verification failed: {type(exc).__name__}"
+
+
+async def _reconcile_registered_channels(uid: int) -> list[str]:
+    """Refresh Telegram permission state without trusting the local bot_added flag."""
+    changes = []
+    for row in channels.mine(uid):
+        before = row.get("status", "ACTIVE")
+        verified, reason = await _verify_task_channel(row)
+        after = "ACTIVE" if verified else "DEGRADED"
+        if before != after or bool(row.get("bot_added")) != bool(verified):
+            channels.update(uid, row["chat_id"],
+                            bot_added=bool(verified), status=after)
+            _record_channel_state_change(row, before, after,
+                                         reason or "permissions verified")
+            label = row.get("username") or row.get("chat_id")
+            changes.append(f"{label}: {after.lower()} ({reason or 'permissions verified'})")
+    return changes
+
+
+async def _execute_task_payload(task: dict, chat_id):
+    """Publish only content explicitly stored with the task.
+
+    Forwarded tasks require source_chat_id/source_message_id. Text tasks are
+    platform-generated tasks. A title alone is never fabricated into a post.
+    """
+    payload = task.get("payload") or {}
+    source_chat_id = payload.get("source_chat_id")
+    source_message_id = payload.get("source_message_id")
+    if source_chat_id is not None and source_message_id is not None:
+        return await bot.forward_message(
+            chat_id=chat_id,
+            from_chat_id=source_chat_id,
+            message_id=int(source_message_id),
+            disable_notification=bool(payload.get("silent", False)),
+        )
+    text = payload.get("text")
+    if text:
+        return await bot.send_message(chat_id, text, parse_mode="HTML")
+    raise ValueError("task has no executable Telegram payload")
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("task:claim:"))
+async def claim_task(cb: types.CallbackQuery):
+    parts = cb.data.split(":", 3)
+    if len(parts) != 4:
+        await cb.answer("Choose a channel before claiming.", show_alert=True)
+        return
+    task_id, destination_index = parts[2], parts[3]
+    session = _session(cb.from_user.id)
+    destinations = session.get("task_destinations") or []
+    try:
+        selected_chat_id = destinations[int(destination_index)]
+    except (ValueError, IndexError):
+        await cb.answer("That channel selection expired.", show_alert=True)
+        return
+    task = marketplace.get_task(task_id)
+    if not task:
+        await cb.answer("That task no longer exists.", show_alert=True)
+        return
+    rows = channels.mine(cb.from_user.id)
+    selected = next((row for row in rows
+                     if (row.get("chat_id") or row.get("username")) == selected_chat_id), None)
+    if not selected or selected.get("status", "ACTIVE") != "ACTIVE":
+        await cb.answer("That channel is no longer active.", show_alert=True)
+        return
+    ledger_key = selected.get("username") or ("@" + str(cb.from_user.id))
+    profile = perf.score(ledger_key)
+    actual_tier = tier_for_score(float(profile.get("score", 0.5)) * 100)
+    tier_order = {"PROVISIONAL": 0, "EMERGING": 1, "ESTABLISHED": 2, "PROVEN": 3, "PREMIER": 4}
+    required_tier = task.get("minimum_tier", "PROVISIONAL")
+    if tier_order.get(actual_tier, 0) < tier_order.get(required_tier, 0):
+        await cb.answer(f"This task requires {required_tier}+ credibility.", show_alert=True)
+        return
+    verified, verification_error = await _verify_task_channel(selected)
+    if not verified:
+        await cb.answer(f"Task execution blocked: {verification_error}", show_alert=True)
+        return
+    destination = verified["row"]
+    destination_id = destination.get("chat_id") or destination.get("username")
+    if credibility_snapshots.is_suspended(destination_id):
+        control = credibility_snapshots.control(destination_id)
+        await cb.answer(f"Channel temporarily suspended: {control.get('reason')}", show_alert=True)
+        return
+    day_start = int(time.time()) - (int(time.time()) % 86400)
+    daily_limit = _destination_daily_limit(destination_id)
+    if marketplace.user_claim_count_since(cb.from_user.id, day_start, destination_id) >= daily_limit:
+        await cb.answer(f"This channel reached its daily limit ({daily_limit}).", show_alert=True)
+        return
+    try:
+        claim = marketplace.claim(task_id, user_id=cb.from_user.id,
+                                  destination_id=destination_id)
+        sent = await _execute_task_payload(task, verified["chat_id"])
+        completion = marketplace.complete(
+            claim["claim_id"],
+            telegram_chat_id=verified["chat_id"],
+            telegram_message_id=sent.message_id,
+            reward_event_id=f"task:{claim['claim_id']}",
+        )
+        credibility_snapshots.record_task_outcome(
+            destination_id=destination_id, user_id=cb.from_user.id,
+            category=task["category"], success=True,
+        )
+        # Telegram completion and Mint live in separate stores. In transactional
+        # mode, enqueue the reward durably and let the outbox worker issue it.
+        # The idempotency key makes retries safe after worker or process failure.
+        username = "@" + (cb.from_user.username or str(cb.from_user.id))
+        reward_amount = int(task.get("reward_amount", 1))
+        reward_key = f"task:{completion['completion_id']}"
+        if hasattr(ledger, "tx"):
+            ledger.tx.enqueue_outbox(
+                event_type="TASK_MINT_REWARD",
+                recipient_id=cb.from_user.id,
+                payload=json.dumps({
+                    "username": username,
+                    "amount": reward_amount,
+                    "idempotency_key": reward_key,
+                    "task_id": task_id,
+                    "completion_id": completion["completion_id"],
+                }, separators=(",", ":")),
+                idempotency_key=reward_key,
+            )
+            await _process_mint_outbox()
+        else:
+            ledger.earn(username, reward_amount)
+    except (TaskUnavailable, TaskNotFound, ValueError) as exc:
+        await cb.answer(str(exc), show_alert=True)
+        return
+    except Exception as exc:
+        # A Telegram or persistence failure must not leave an active claim that
+        # looks completed. The lease can also expire naturally after a restart.
+        try:
+            if 'claim' in locals():
+                marketplace.release_claim(claim["claim_id"], reason=str(exc)[:120])
+                credibility_snapshots.record_task_outcome(
+                    destination_id=destination_id, user_id=cb.from_user.id,
+                    category=task.get("category", "unknown"), success=False,
+                )
+        except Exception:
+            logging.exception("could not release failed task claim")
+        logging.warning("task execution failed: %s", exc)
+        await cb.answer("Task execution failed; the claim was released.", show_alert=True)
+        return
+    await cb.message.edit_text(
+        "✅ <b>TASK COMPLETED</b>\n\n"
+        f"Published to: <code>{verified['chat_id']}</code>\n"
+        f"Telegram message: <code>{sent.message_id}</code>\n"
+        f"Mint reward: 🪙 {int(task.get('reward_amount', 1))}\n"
+        "Mint reward queued after successful Telegram publication; retries are automatic if needed.",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Back to tasks", callback_data="menu:tasks")],
+            [InlineKeyboardButton(text="⬅️ Main menu", callback_data="menu:hub")],
+        ]))
+    await cb.answer("Task completed")
+
+
+@dp.my_chat_member()
+async def my_chat_member_changed(update: types.ChatMemberUpdated):
+    """React immediately when Telegram changes the bot's membership or rights."""
+    row = channels.get(update.chat.id)
+    if not row:
+        return
+    verified, reason = await _verify_task_channel(row)
+    status = "ACTIVE" if verified else "DEGRADED"
+    previous = row.get("status", "ACTIVE")
+    channels.update(row["owner_id"], update.chat.id,
+                    bot_added=bool(verified), status=status)
+    if previous != status:
+        _record_channel_state_change(row, previous, status,
+                                     reason or "permissions verified")
+    if previous != status:
+        label = row.get("username") or update.chat.id
+        try:
+            await bot.send_message(
+                int(row["owner_id"]),
+                f"🔎 Telegram access updated for {label}: {status.lower()}.\\n"
+                f"{reason or 'Posting permissions verified.'}\\n\\n"
+                "Marketplace eligibility has been refreshed.",
+            )
+        except Exception:
+            logging.exception("could not notify channel owner about membership change")
+
+
 @dp.message(Command("scan"))
 async def scan_cmd(msg: types.Message):
     """Refresh what the Bot API can actually verify for the user's destinations."""
@@ -434,18 +1234,82 @@ async def scan_cmd(msg: types.Message):
     lines = ["🔎 CHANNEL SCAN", ""]
     for row in rows:
         try:
-            count = await bot.get_chat_member_count(row["chat_id"])
+            verified, reason = await _verify_task_channel(row)
+            if not verified:
+                previous = row.get("status", "ACTIVE")
+                channels.update(msg.from_user.id, row["chat_id"],
+                                bot_added=False, status="DEGRADED")
+                if previous != "DEGRADED":
+                    _record_channel_state_change(row, previous, "DEGRADED", reason)
+                lines.append(f"⚠️ {row['username']}: {reason}")
+                continue
+            previous = row.get("status", "ACTIVE")
+            if previous != "ACTIVE":
+                _record_channel_state_change(row, previous, "ACTIVE", "permissions verified")
+            count = await bot.get_chat_member_count(verified["chat_id"])
             stats.record(row["chat_id"], subscribers=count)
             channels.update(msg.from_user.id, row["chat_id"], size=count,
-                            bot_added=True)
+                            bot_added=True, status="ACTIVE")
             ledger.register(row["username"], count)
-            lines.append(f"✅ {row['username']}: {count} members/subscribers")
+            lines.append(f"✅ {row['username']}: verified; {count} members/subscribers")
         except Exception as exc:
-            channels.set_bot_access(row["chat_id"], False)
-            lines.append(f"⚠️ {row['username']}: bot access unavailable ({type(exc).__name__})")
+            channels.update(msg.from_user.id, row["chat_id"],
+                            bot_added=False, status="DEGRADED")
+            lines.append(f"⚠️ {row['username']}: reconciliation failed ({type(exc).__name__})")
     lines.append("\nViews/reactions/forwards are recorded only when a real stats provider "
                  "or channel observation is available; no numbers are invented.")
     await msg.answer("\n".join(lines))
+
+
+def _credibility_text(uid: int) -> str:
+    rows = channels.mine(uid)
+    if not rows:
+        return "🌱 No connected destinations yet. Register a channel first."
+    lines = ["📊 <b>CREDIBILITY</b>", ""]
+    for row in rows:
+        destination = row.get("chat_id") or row.get("username")
+        explanation = credibility_snapshots.explain(destination)
+        lines.append(
+            f"📢 {escape(str(row.get('username') or destination))}\n"
+            f"Tier: {explanation['status']} · Score: {explanation.get('score', '—')}\n"
+            f"Confidence: {explanation.get('confidence', 0):.0%} · "
+            f"Observations: {explanation.get('sample_size', 0)}\n"
+            f"{explanation['message']}\n"
+        )
+    return "\n".join(lines)
+
+
+@dp.callback_query(lambda c: c.data == "menu:credibility")
+async def credibility_menu(cb: types.CallbackQuery):
+    await cb.message.edit_text(
+        _credibility_text(cb.from_user.id), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Refresh", callback_data="menu:credibility")],
+            [InlineKeyboardButton(text="📜 Score history", callback_data="credibility:history")],
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")],
+        ]),
+    )
+    await cb.answer()
+
+
+@dp.message(Command("credibility"))
+async def credibility_cmd(msg: types.Message):
+    rows = channels.mine(msg.from_user.id)
+    if not rows:
+        await msg.answer("🌱 No connected destinations yet. Register a channel first.")
+        return
+    lines = ["📊 <b>CREDIBILITY</b>", ""]
+    for row in rows:
+        destination = row.get("chat_id") or row.get("username")
+        explanation = credibility_snapshots.explain(destination)
+        lines.append(
+            f"📢 {escape(str(row.get('username') or destination))}\n"
+            f"Tier: {explanation['status']} · Score: {explanation.get('score', '—')}\n"
+            f"Confidence: {explanation.get('confidence', 0):.0%} · "
+            f"Observations: {explanation.get('sample_size', 0)}\n"
+            f"{explanation['message']}\n"
+        )
+    await msg.answer("\n".join(lines), parse_mode="HTML")
 
 
 @dp.message(Command("balance"))
@@ -467,6 +1331,299 @@ async def balance_cmd(msg: types.Message):
 
 
 # admins log in via a one-time invite code (must have contacted the owner first)
+@dp.message(Command("outbox"))
+async def outbox_admin_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    if not hasattr(ledger, "tx"):
+        await msg.answer("Transactional outbox requires transactional Mint mode.")
+        return
+    events = ledger.tx.recent_outbox_events(status="failed", limit=20)
+    if not events:
+        await msg.answer("✅ No failed or paused outbox events.")
+        return
+    lines = ["⚠️ <b>FAILED OUTBOX EVENTS</b>", ""]
+    for event in events:
+        lines.append(
+            f"<code>{event['event_id']}</code> | {event['event_type']} | "
+            f"attempts={event['attempts']}\n{event.get('last_error') or 'retryable'}"
+        )
+    lines.append("\nUse /retryoutbox &lt;event_id&gt; or /pauseoutbox &lt;event_id&gt;.")
+    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("retryoutbox"))
+async def retry_outbox_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    parts = (msg.text or "").split()
+    if len(parts) != 2 or not hasattr(ledger, "tx"):
+        await msg.answer("Usage: /retryoutbox <event_id>")
+        return
+    ok = ledger.tx.retry_outbox(parts[1])
+    if ok:
+        _record_outbox_admin_action(msg.from_user.id, "OUTBOX_RETRY", parts[1], "manual retry command")
+    await msg.answer("✅ Event returned to the retry queue." if ok else "Event not found or not failed.")
+
+
+@dp.message(Command("pauseoutbox"))
+async def pause_outbox_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    parts = (msg.text or "").split()
+    if len(parts) != 2 or not hasattr(ledger, "tx"):
+        await msg.answer("Usage: /pauseoutbox <event_id>")
+        return
+    ok = ledger.tx.fail_outbox(parts[1], "paused by administrator", permanent=True)
+    if ok:
+        _record_outbox_admin_action(msg.from_user.id, "OUTBOX_PAUSE", parts[1], "manual pause command")
+    await msg.answer("⏸ Event paused safely." if ok else "Event not found or not processing.")
+
+
+@dp.message(Command("broadcastpreview"))
+async def broadcast_preview_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    text = (msg.text or "").partition(" ")[2].strip()
+    if not text:
+        await msg.answer("Usage: /broadcastpreview <explicit message text>")
+        return
+    recipients = [member.get("user_id") for member in ledger.ledger.values() if member.get("user_id")]
+    campaign_id = broadcasts.create_campaign(
+        bot_scope="reward", created_by=msg.from_user.id,
+        payload={"text": text, "audience": "known_reward_members"},
+    )
+    await msg.answer(
+        "📣 <b>REWARD BROADCAST PREVIEW</b>\n\n"
+        f"Campaign: <code>{campaign_id}</code>\n"
+        f"Recipients eligible for queueing: {len(set(recipients))}\n\n"
+        "No messages have been sent. Review the text and explicitly queue it with:\n"
+        f"<code>/broadcastqueue {campaign_id}</code>",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Command("broadcastqueue"))
+async def broadcast_queue_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    parts = (msg.text or "").split()
+    if len(parts) != 2:
+        await msg.answer("Usage: /broadcastqueue <campaign_id>")
+        return
+    campaign = broadcasts.get_campaign(parts[1])
+    if not campaign or campaign.get("bot_scope") != "reward":
+        await msg.answer("Reward campaign not found.")
+        return
+    recipients = [member.get("user_id") for member in ledger.ledger.values() if member.get("user_id")]
+    try:
+        inserted = broadcasts.queue_campaign(parts[1], recipients)
+    except (KeyError, ValueError) as exc:
+        await msg.answer(str(exc))
+        return
+    if hasattr(ledger, "tx"):
+        ledger.tx.add_audit_event(
+            actor_type="admin", actor_id=str(msg.from_user.id),
+            action="REWARD_BROADCAST_QUEUED", object_type="broadcast_campaign",
+            object_id=parts[1], reason=f"{inserted} recipients queued",
+        )
+    await msg.answer(
+        f"✅ Reward campaign queued.\nCampaign: <code>{parts[1]}</code>\n"
+        f"New deliveries: {inserted}\n\nDelivery will use the durable retry queue.",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Command("broadcaststatus"))
+async def broadcast_status_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    parts = (msg.text or "").split()
+    if len(parts) != 2:
+        await msg.answer("Usage: /broadcaststatus <campaign_id>")
+        return
+    summary = broadcasts.campaign_summary(parts[1])
+    if not summary:
+        await msg.answer("Campaign not found.")
+        return
+    deliveries = summary["deliveries"]
+    await msg.answer(
+        f"📣 Campaign <code>{parts[1]}</code>\nStatus: {summary['status']}\n" +
+        "\n".join(f"{key}: {value}" for key, value in deliveries.items()) +
+        "\n\nUse /broadcastpause, /broadcastresume, or /broadcastcancel as needed.",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Command("broadcastpause"))
+async def broadcast_pause_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    parts = (msg.text or "").split()
+    ok = len(parts) == 2 and broadcasts.pause(parts[1])
+    await msg.answer("⏸ Campaign paused." if ok else "Campaign not found or not pausable.")
+
+
+@dp.message(Command("broadcastresume"))
+async def broadcast_resume_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    parts = (msg.text or "").split()
+    ok = len(parts) == 2 and broadcasts.resume(parts[1])
+    await msg.answer("▶️ Campaign resumed." if ok else "Campaign not found or not paused.")
+
+
+@dp.message(Command("broadcastcancel"))
+async def broadcast_cancel_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    parts = (msg.text or "").split()
+    cancelled = broadcasts.cancel(parts[1]) if len(parts) == 2 else 0
+    await msg.answer(f"🛑 Campaign cancelled; {cancelled} deliveries stopped." if len(parts) == 2 else "Usage: /broadcastcancel <campaign_id>")
+
+
+@dp.message(Command("exportsecurityaudit"))
+async def export_security_audit(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    if not hasattr(ledger, "tx"):
+        await msg.answer("Transactional security audit export requires transactional Mint mode.")
+        return
+    parts = (msg.text or "").split()
+    fmt = parts[1].lower() if len(parts) > 1 else "csv"
+    if fmt not in {"csv", "json"}:
+        await msg.answer("Usage: /exportsecurityaudit [csv|json]")
+        return
+    events = ledger.tx.recent_audit_events(object_type="admin_security", limit=10000)
+    if fmt == "json":
+        data = json.dumps(events, indent=2, sort_keys=True).encode("utf-8")
+        filename = "admin-security-audit.json"
+    else:
+        output = io.StringIO()
+        fields = ["audit_id", "created_at", "actor_type", "actor_id", "action", "object_type", "object_id", "reason"]
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(events)
+        data = output.getvalue().encode("utf-8")
+        filename = "admin-security-audit.csv"
+    await msg.answer_document(types.BufferedInputFile(data, filename=filename),
+                              caption=f"Admin security audit export ({len(events)} events)")
+
+
+@dp.message(Command("auditretention"))
+async def audit_retention_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    if not hasattr(ledger, "tx"):
+        await msg.answer("Transactional audit retention requires transactional Mint mode.")
+        return
+    parts = (msg.text or "").split()
+    try:
+        days = int(parts[1]) if len(parts) > 1 else 365
+        if days < 1 or days > 3650:
+            raise ValueError
+    except ValueError:
+        await msg.answer("Usage: /auditretention [days 1-3650]")
+        return
+    report = ledger.tx.audit_retention_report(older_than_days=days)
+    lines = [
+        "🗄 <b>AUDIT RETENTION PLAN</b>", "",
+        f"Older than: {days} days",
+        f"Total events: {report['total_events']}",
+        f"Archival candidates: {report['archival_candidates']}",
+        f"Oldest event: {report['oldest_event'] or 'none'}",
+        "", "Candidates by object type:",
+    ]
+    lines.extend(f"• {item['object_type']}: {item['count']}" for item in report["candidates_by_type"])
+    lines.append("\nNo destructive action was taken. Export and independently archive before any future deletion policy.")
+    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("audithealth"))
+async def audit_health_cmd(msg: types.Message):
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    if not hasattr(ledger, "tx"):
+        await msg.answer("Transactional audit health requires transactional Mint mode.")
+        return
+    health = ledger.tx.audit_health()
+    db_size = os.path.getsize(ledger.tx.path) if os.path.exists(ledger.tx.path) else 0
+    size_kb = db_size / 1024
+    lines = [
+        "🩺 <b>AUDIT STORAGE HEALTH</b>",
+        "",
+        f"Database size: {size_kb:.1f} KB",
+        f"Total audit events: {health['total']}",
+        f"Channel permission events: {health['channel_events']}",
+        f"Oldest timestamp: {health['oldest'] or 'none'}",
+        f"Newest timestamp: {health['newest'] or 'none'}",
+        "",
+        "Events by action:",
+    ]
+    lines.extend(f"• {item['action']}: {item['count']}" for item in health["actions"][:10])
+    lines.extend(["", "Primary audit history is append-only; export before any future archival."])
+    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("exportaudit"))
+async def export_channel_audit(msg: types.Message):
+    """Export channel permission history without mutating the append-only log."""
+    if not _can_panel(msg.from_user.id, "reward"):
+        await msg.answer("🔒 Reward owner/admin access required.")
+        return
+    if not hasattr(ledger, "tx"):
+        await msg.answer("Transactional audit export requires transactional Mint mode.")
+        return
+    parts = (msg.text or "").split()
+    fmt = parts[1].lower() if len(parts) > 1 else "csv"
+    if fmt not in {"csv", "json"}:
+        await msg.answer("Usage: /exportaudit [csv|json] [start YYYY-MM-DD] [end YYYY-MM-DD]")
+        return
+    try:
+        start_at = None
+        end_at = None
+        if len(parts) >= 3:
+            start_at = int(dt.datetime.strptime(parts[2], "%Y-%m-%d").timestamp()) - 1
+        if len(parts) >= 4:
+            # End dates are inclusive for administrators; query through midnight
+            # of the following day.
+            end_at = int((dt.datetime.strptime(parts[3], "%Y-%m-%d") + dt.timedelta(days=1)).timestamp())
+        if len(parts) > 4:
+            raise ValueError
+    except ValueError:
+        await msg.answer("Usage: /exportaudit [csv|json] [start YYYY-MM-DD] [end YYYY-MM-DD]")
+        return
+    events = ledger.tx.recent_audit_events(
+        object_type="channel", after_created_at=start_at,
+        before_created_at=end_at, limit=10000)
+    if fmt == "json":
+        data = json.dumps(events, indent=2, sort_keys=True).encode("utf-8")
+        filename = "channel-audit.json"
+    else:
+        output = io.StringIO()
+        fields = ["audit_id", "created_at", "actor_type", "actor_id",
+                  "action", "object_type", "object_id", "reason"]
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(events)
+        data = output.getvalue().encode("utf-8")
+        filename = "channel-audit.csv"
+    await msg.answer_document(types.BufferedInputFile(data, filename=filename),
+                              caption=f"Channel permission audit export ({len(events)} events)")
+
+
 @dp.message(Command("adminlogin"))
 async def admin_login(msg: types.Message):
     parts = msg.text.split()
@@ -481,6 +1638,36 @@ async def admin_login(msg: types.Message):
 # ---------------------------------------------------------------------------
 # MAIN MENU navigation (buttons)
 # ---------------------------------------------------------------------------
+@dp.callback_query(lambda c: c.data == "credibility:history")
+async def credibility_history(cb: types.CallbackQuery):
+    rows = channels.mine(cb.from_user.id)
+    lines = ["📜 <b>CREDIBILITY HISTORY</b>", ""]
+    for row in rows:
+        destination = row.get("chat_id") or row.get("username")
+        history = credibility_snapshots.history(destination, limit=5)
+        lines.append(f"📢 {escape(str(row.get('username') or destination))}")
+        if not history:
+            lines.append("• No observations yet")
+            continue
+        for index, snapshot in enumerate(history):
+            previous = history[index + 1]["score"] if index + 1 < len(history) else None
+            delta = ""
+            if previous is not None:
+                delta = f" ({snapshot['score'] - previous:+.2f})"
+            lines.append(
+                f"• {snapshot['tier']} · {snapshot['score']:.2f}{delta} · "
+                f"confidence {snapshot['confidence']:.0%} · {snapshot['created_at']}"
+            )
+        lines.append("")
+    await cb.message.edit_text(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Back to credibility", callback_data="menu:credibility")],
+        ]),
+    )
+    await cb.answer()
+
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("menu:"))
 async def menu_nav(cb: types.CallbackQuery):
     _, which = cb.data.split(":", 1)
@@ -492,6 +1679,10 @@ async def menu_nav(cb: types.CallbackQuery):
         _session_clear(uid)
         await cb.message.edit_text("❌ Cancelled. Nothing was submitted.",
                                    reply_markup=_menu(role, uid))
+    elif which == "tasks":
+        await show_tasks_message(cb.message, uid, edit=True)
+        await cb.answer()
+        return
     elif which == "available":
         rows = available.available(uid, limit=10)
         count = available.count(uid)
@@ -816,6 +2007,7 @@ def _pending_from(msg, u: str, cat: str, sess: dict, owner_exempt: bool = False)
     return {
         "user": u, "tier": ledger.balance(u)["tier"], "post_type": cat,
         "source": forward_source(msg),
+        "source_text": _submitted_text(msg),
         "style": sess.get("style", "fwd"),
         "ntf": sess.get("ntf", "silent"),
         "from_chat_id": msg.chat.id,
@@ -841,6 +2033,7 @@ async def owner_forward(msg: types.Message, u: str):
             [InlineKeyboardButton(text="3", callback_data="s:3"), InlineKeyboardButton(text="4", callback_data="s:4")],
             [InlineKeyboardButton(text="5", callback_data="s:5")],
             [InlineKeyboardButton(text="All matching", callback_data="s:all")],
+            [InlineKeyboardButton(text="📋 Create marketplace task", callback_data="task:create")],
         ]))
 
 
@@ -1327,11 +2520,41 @@ async def _process_mint_outbox():
     tx.recover_outbox()
     for event in tx.claim_outbox(limit=20):
         try:
-            await bot.send_message(int(event["recipient_id"]), event["payload"])
+            if event["event_type"] == "TASK_MINT_REWARD":
+                reward = json.loads(event["payload"])
+                ledger.earn(
+                    reward["username"], int(reward["amount"]),
+                    idempotency_key=reward["idempotency_key"],
+                )
+                await bot.send_message(
+                    int(event["recipient_id"]),
+                    f"✅ Task reward credited: 🪙 {int(reward['amount'])} Mint\\n"
+                    f"Task: {reward['task_id']}",
+                )
+            else:
+                await bot.send_message(int(event["recipient_id"]), event["payload"])
             tx.complete_outbox(event["event_id"])
         except Exception as exc:
             delay = min(3600, 30 * (2 ** min(int(event.get("attempts", 1)), 6)))
             tx.fail_outbox(event["event_id"], str(exc), retry_delay=delay)
+
+
+async def _process_reward_broadcasts():
+    """Deliver only Reward-scope campaigns through the shared durable queue."""
+    for delivery in broadcasts.claim(limit=20, bot_scope="reward"):
+        try:
+            campaign = broadcasts.get_campaign(delivery["campaign_id"])
+            payload = campaign.get("payload", {}) if campaign else {}
+            text = payload.get("text")
+            if not text:
+                broadcasts.fail(delivery["delivery_id"], "campaign has no explicit text payload", blocked=True)
+                continue
+            sent = await bot.send_message(int(delivery["recipient_id"]), text, parse_mode="HTML")
+            broadcasts.complete(delivery["delivery_id"], sent.message_id)
+        except Exception as exc:
+            blocked = any(token in str(exc).lower() for token in ("blocked", "chat not found", "deactivated"))
+            broadcasts.fail(delivery["delivery_id"], str(exc)[:500], blocked=blocked,
+                            retry_seconds=min(3600, 30 * (2 ** min(delivery.get("attempts", 1), 6))))
 
 
 async def _notify_owner(text: str):
@@ -1344,6 +2567,275 @@ async def _notify_owner(text: str):
 # ---------------------------------------------------------------------------
 # OWNER / ADMIN PANEL: review queue, admins, terms (buttons)
 # ---------------------------------------------------------------------------
+def _channel_audit_markup(older_cursor: int | None = None):
+    buttons = [[InlineKeyboardButton(text="All", callback_data="audit:filter:all"),
+                InlineKeyboardButton(text="Active", callback_data="audit:filter:ACTIVE"),
+                InlineKeyboardButton(text="Degraded", callback_data="audit:filter:DEGRADED")]]
+    known = {}
+    for row in channels._items().values():
+        chat_id = row.get("chat_id") or row.get("username")
+        if chat_id is not None:
+            known[str(chat_id)] = row.get("username") or str(chat_id)
+    for chat_id, label in list(known.items())[:8]:
+        buttons.append([InlineKeyboardButton(
+            text=f"📢 {label[:30]}",
+            callback_data=f"audit:channel:{chat_id}")])
+    if older_cursor is not None:
+        buttons.append([InlineKeyboardButton(text="Older events", callback_data=f"audit:older:{older_cursor}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _channel_audit_text(action_prefix: str | None = None,
+                        object_id: str | None = None,
+                        before_created_at: int | None = None) -> str:
+    scope = f" FOR {object_id}" if object_id else ""
+    lines = [f"CHANNEL PERMISSION HISTORY{scope}", ""]
+    if hasattr(ledger, "tx"):
+        events = ledger.tx.recent_audit_events(
+            object_type="channel", action_prefix=action_prefix,
+            object_id=object_id, before_created_at=before_created_at, limit=20)
+        if not events:
+            lines.append("No matching channel transitions.")
+        for event in events:
+            lines.append(
+                f"[{event['created_at']}] {event['object_id']} "
+                f"| {event['action']} | {event['reason']}"
+            )
+    else:
+        lines.append("Transactional audit history is not enabled.")
+    return "\n".join(lines)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("audit:filter:"))
+async def channel_audit_filter(cb: types.CallbackQuery):
+    if not _can_panel(cb.from_user.id, "reward"):
+        await cb.answer("Reward admin access required.", show_alert=True)
+        return
+    value = cb.data.split(":", 2)[2]
+    prefix = None if value == "all" else f"CHANNEL_STATUS_{value}"
+    text = _channel_audit_text(prefix)
+    page = ledger.tx.recent_audit_events(object_type="channel", action_prefix=prefix, limit=20) if hasattr(ledger, "tx") else []
+    cursor = min((int(event["created_at"]) for event in page), default=None)
+    await cb.message.edit_text(text, reply_markup=_channel_audit_markup(cursor))
+    await cb.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("audit:channel:"))
+async def channel_audit_channel_filter(cb: types.CallbackQuery):
+    if not _can_panel(cb.from_user.id, "reward"):
+        await cb.answer("Reward admin access required.", show_alert=True)
+        return
+    object_id = cb.data.split(":", 2)[2]
+    page = ledger.tx.recent_audit_events(object_type="channel", object_id=object_id, limit=20) if hasattr(ledger, "tx") else []
+    cursor = min((int(event["created_at"]) for event in page), default=None)
+    await cb.message.edit_text(
+        _channel_audit_text(object_id=object_id),
+        reply_markup=_channel_audit_markup(cursor),
+    )
+    await cb.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("audit:older:"))
+async def channel_audit_older(cb: types.CallbackQuery):
+    if not _can_panel(cb.from_user.id, "reward"):
+        await cb.answer("Reward admin access required.", show_alert=True)
+        return
+    try:
+        cursor = int(cb.data.split(":", 2)[2])
+    except ValueError:
+        await cb.answer("Invalid audit cursor.", show_alert=True)
+        return
+    events = ledger.tx.recent_audit_events(
+        object_type="channel", before_created_at=cursor, limit=20)
+    text = _channel_audit_text(before_created_at=cursor)
+    next_cursor = min((int(event["created_at"]) for event in events), default=None)
+    await cb.message.edit_text(text, reply_markup=_channel_audit_markup(next_cursor))
+    await cb.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("outboxhealth:filter:"))
+async def outbox_health_filter(cb: types.CallbackQuery):
+    if not _can_panel(cb.from_user.id, "reward"):
+        await cb.answer("Reward admin access required.", show_alert=True)
+        return
+    value = cb.data.split(":", 2)[2]
+    events = ledger.tx.recent_audit_events(object_type="outbox_health", limit=30)
+    if value == "RAISED":
+        events = ledger.tx.active_health_alerts(limit=30)
+        title = "ACTIVE / RAISED HEALTH ALERTS"
+    else:
+        events = [event for event in events if event["action"] == "OUTBOX_ALERT_CLEARED"]
+        title = "CLEARED HEALTH ALERTS"
+    lines = [f"{title}", ""]
+    lines.extend(f"[{event['created_at']}] {event['reason']}" for event in events)
+    if not events:
+        lines.append("No matching health alerts.")
+    await cb.message.edit_text(
+        "\n".join(lines[:45]),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Back to outbox", callback_data="panel:outbox")],
+        ]),
+    )
+    await cb.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("outbox:filter:"))
+async def outbox_filter(cb: types.CallbackQuery):
+    if not _can_panel(cb.from_user.id, "reward"):
+        await cb.answer("Reward admin access required.", show_alert=True)
+        return
+    parts = cb.data.split(":")
+    value = parts[2]
+    offset = int(parts[3]) if len(parts) > 3 else 0
+    if value in {"TASK_MINT_REWARD", "OWNER_NOTIFICATION"}:
+        events = ledger.tx.recent_outbox_events(event_type=value, limit=15, offset=offset)
+        title = value
+    else:
+        events = ledger.tx.recent_outbox_events(status="failed" if value in {"failed", "paused"} else value, limit=15, offset=offset)
+        if value == "paused":
+            events = [event for event in events if str(event.get("last_error", "")).startswith("PAUSED:")]
+        title = value.upper()
+    lines = [f"📤 OUTBOX: {title}", ""]
+    buttons = []
+    for event in events[:15]:
+        lines.append(f"{_outbox_age_marker(event)} {event['event_id']} · {event['event_type']} · {event['status']} · attempts={event['attempts']}")
+        buttons.append([InlineKeyboardButton(text=f"🔎 View {event['event_id'][-8:]}", callback_data=f"outbox:view:{event['event_id']}")])
+    if not events:
+        lines.append("No matching events.")
+    navigation = []
+    if offset > 0:
+        navigation.append(InlineKeyboardButton(text="Newer events", callback_data=f"outbox:filter:{value}:{max(0, offset - 15)}"))
+    if len(events) >= 15:
+        navigation.append(InlineKeyboardButton(text="Older events", callback_data=f"outbox:filter:{value}:{offset + 15}"))
+    if navigation:
+        buttons.append(navigation)
+    buttons.append([InlineKeyboardButton(text="⬅️ Back to outbox", callback_data="panel:outbox")])
+    await cb.message.edit_text("\n".join(lines[:45]), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await cb.answer()
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("outbox:"))
+async def outbox_action(cb: types.CallbackQuery):
+    if not _can_panel(cb.from_user.id, "reward"):
+        await cb.answer("Reward admin access required.", show_alert=True)
+        return
+    _, action, event_id = cb.data.split(":", 2)
+    if not hasattr(ledger, "tx"):
+        await cb.answer("Transactional outbox is not enabled.", show_alert=True)
+        return
+    if action == "view":
+        event = ledger.tx.get_outbox_event(event_id)
+        if not event:
+            await cb.answer("Event not found.", show_alert=True)
+            return
+        history = ledger.tx.recent_audit_events(object_type="outbox", object_id=event_id, limit=20)
+        payload = escape(str(event.get("payload", ""))[:1200])
+        lines = [
+            "🔎 <b>OUTBOX EVENT DETAIL</b>", "",
+            f"Event: <code>{escape(event_id)}</code>",
+            f"Type: {escape(str(event.get('event_type')))}",
+            f"Status: {_outbox_age_marker(event)} {escape(str(event.get('status')))}",
+            f"Recipient: {escape(str(event.get('recipient_id')))}",
+            f"Attempts: {event.get('attempts', 0)}",
+            f"Created: {event.get('created_at')} ({_elapsed_label(event.get('created_at'))} ago)",
+            f"Available: {event.get('available_at')}",
+            f"Last error: {escape(str(event.get('last_error') or 'none'))}",
+            "", "Payload:", f"<code>{payload}</code>",
+        ]
+        if history:
+            lines.extend(["", "Action history:"])
+            lines.extend(f"{item['created_at']} · {item['actor_id']} · {item['action']} · {item['reason']}" for item in history)
+        await cb.message.edit_text(
+            "\n".join(lines[:45]), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="↻ Retry", callback_data=f"outbox:retry:{event_id}"),
+                 InlineKeyboardButton(text="⏸ Pause", callback_data=f"outbox:pause:{event_id}")],
+                [InlineKeyboardButton(text="⬅️ Back to outbox", callback_data="panel:outbox")],
+            ]),
+        )
+        await cb.answer()
+        return
+    if action == "retry":
+        ok = ledger.tx.retry_outbox(event_id)
+        if ok:
+            _record_outbox_admin_action(cb.from_user.id, "OUTBOX_RETRY", event_id, "manual retry")
+        message = "Event returned to retry queue." if ok else "Event not found or not failed."
+    elif action == "pause":
+        ok = ledger.tx.fail_outbox(event_id, "paused by administrator", permanent=True)
+        if ok:
+            _record_outbox_admin_action(cb.from_user.id, "OUTBOX_PAUSE", event_id, "manual pause")
+        message = "Event paused safely." if ok else "Event not found or not processing."
+    else:
+        await cb.answer("Unknown outbox action.", show_alert=True)
+        return
+    await cb.answer(message, show_alert=True)
+    await cb.message.edit_reply_markup(reply_markup=ui.role_menu(roles.role(cb.from_user.id)))
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("performance:clear:"))
+async def clear_performance_cooldown(cb: types.CallbackQuery):
+    if not _can_panel(cb.from_user.id, "reward"):
+        await cb.answer("Reward admin access required.", show_alert=True)
+        return
+    destination_id = cb.data.split(":", 2)[2]
+    ok = credibility_snapshots.clear_cooldown(
+        destination_id, reason=f"cleared by admin {cb.from_user.id}")
+    if ok and hasattr(ledger, "tx"):
+        ledger.tx.add_audit_event(
+            actor_type="admin", actor_id=str(cb.from_user.id),
+            action="PERFORMANCE_COOLDOWN_CLEARED",
+            object_type="destination_control", object_id=destination_id,
+            reason="manual intervention",
+        )
+    await cb.answer("Cooldown cleared." if ok else "No active cooldown found.", show_alert=True)
+    await cb.message.edit_reply_markup(reply_markup=ui.role_menu(roles.role(cb.from_user.id)))
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("broadcast:"))
+async def broadcast_panel_action(cb: types.CallbackQuery):
+    if not _can_panel(cb.from_user.id, "reward"):
+        await cb.answer("Reward admin access required.", show_alert=True)
+        return
+    _, action, campaign_id = cb.data.split(":", 2)
+    if action == "view":
+        summary = broadcasts.campaign_summary(campaign_id)
+        if not summary:
+            await cb.answer("Campaign not found.", show_alert=True)
+            return
+        payload = escape(str(summary["payload"].get("text", ""))[:800])
+        deliveries = summary.get("deliveries", {})
+        text = (f"📣 <b>CAMPAIGN DETAIL</b>\n\n"
+                f"ID: <code>{campaign_id}</code>\nStatus: {summary['status']}\n"
+                f"Payload: <code>{payload}</code>\n\n" +
+                "\n".join(f"{key}: {value}" for key, value in deliveries.items()))
+        buttons = []
+        if summary["status"] in {"queued", "running"}:
+            buttons.append([InlineKeyboardButton(text="⏸ Pause", callback_data=f"broadcast:pause:{campaign_id}"),
+                            InlineKeyboardButton(text="🛑 Cancel", callback_data=f"broadcast:cancel:{campaign_id}")])
+        elif summary["status"] == "paused":
+            buttons.append([InlineKeyboardButton(text="▶️ Resume", callback_data=f"broadcast:resume:{campaign_id}"),
+                            InlineKeyboardButton(text="🛑 Cancel", callback_data=f"broadcast:cancel:{campaign_id}")])
+        buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data="panel:broadcasts")])
+        await cb.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        return
+    actions = {"pause": broadcasts.pause, "resume": broadcasts.resume, "cancel": broadcasts.cancel}
+    if action not in actions:
+        await cb.answer("Unknown campaign action.", show_alert=True)
+        return
+    result = actions[action](campaign_id)
+    ok = bool(result)
+    if hasattr(ledger, "tx") and ok:
+        ledger.tx.add_audit_event(actor_type="admin", actor_id=str(cb.from_user.id),
+                                  action=f"REWARD_BROADCAST_{action.upper()}",
+                                  object_type="broadcast_campaign", object_id=campaign_id,
+                                  reason="inline admin action")
+    labels = {"pause": "paused", "resume": "resumed", "cancel": "cancelled"}
+    await cb.answer(f"Campaign {labels[action]}." if ok else "Campaign action not available.", show_alert=True)
+    await cb.message.edit_reply_markup(reply_markup=ui.role_menu(roles.role(cb.from_user.id)))
+
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("panel:"))
 async def panel(cb: types.CallbackQuery):
     _, which = cb.data.split(":", 1)
@@ -1356,14 +2848,140 @@ async def panel(cb: types.CallbackQuery):
         if not _can_panel(uid, "reward") and not _can_panel(uid, "partnership"):
             await cb.answer("Owner/admin only.", show_alert=True)
             return
+    if which == "broadcasts":
+        campaigns = broadcasts.recent_campaigns(bot_scope="reward", limit=12)
+        lines = ["📣 <b>REWARD BROADCASTS</b>", ""]
+        buttons = []
+        if not campaigns:
+            lines.append("No campaigns created yet.")
+        for campaign in campaigns:
+            summary = broadcasts.campaign_summary(campaign["campaign_id"])
+            deliveries = summary.get("deliveries", {}) if summary else {}
+            lines.append(
+                f"{campaign['campaign_id']} · {campaign['status']} · "
+                f"sent={deliveries.get('sent', 0)} failed={deliveries.get('failed', 0)}"
+            )
+            buttons.append([InlineKeyboardButton(
+                text=f"🔎 {campaign['campaign_id'][-8:]}",
+                callback_data=f"broadcast:view:{campaign['campaign_id']}")])
+        buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu:admin")])
+        await cb.message.edit_text("\n".join(lines[:45]), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        return
+    if which == "performance":
+        suspended = credibility_snapshots.suspended_destinations(limit=50)
+        lines = ["📈 <b>PERFORMANCE CONTROLS</b>", ""]
+        if not suspended:
+            lines.append("✅ No destinations are currently suspended.")
+        else:
+            lines.append("Temporarily suspended destinations:")
+            for control in suspended:
+                destination = str(control['destination_id'])
+                lines.append(
+                    f"• {escape(destination)} · "
+                    f"remaining {_remaining_label(control['cooldown_until'])} "
+                    f"({escape(control['reason'])})"
+                )
+        lines.extend(["", "Recent intervention history:"])
+        seen_history = 0
+        for control in suspended:
+            for item in credibility_snapshots.intervention_history(control["destination_id"], limit=3):
+                lines.append(f"• {item['destination_id']} · {item['action']} · {item['created_at']} · {item['reason']}")
+                seen_history += 1
+        if not seen_history:
+            lines.append("• No intervention history for active suspensions.")
+        lines.extend(["", "Suspensions are temporary and are triggered by repeated execution failures."])
+        performance_buttons = []
+        for control in suspended:
+            performance_buttons.append([InlineKeyboardButton(
+                text=f"✅ Clear {str(control['destination_id'])[-18:]}",
+                callback_data=f"performance:clear:{control['destination_id']}")])
+        performance_buttons.extend([
+            [InlineKeyboardButton(text="🔄 Refresh", callback_data="panel:performance")],
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:admin")],
+        ])
+        await cb.message.edit_text(
+            "\n".join(lines), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=performance_buttons),
+        )
+        await cb.answer()
+        return
+    if which == "outbox":
+        if not hasattr(ledger, "tx"):
+            await cb.message.edit_text("Transactional outbox is not enabled.", reply_markup=ui.role_menu(roles.role(uid)))
+            await cb.answer()
+            return
+        events = ledger.tx.recent_outbox_events(status="failed", limit=15)
+        health = ledger.tx.outbox_health()
+        metrics = ledger.tx.outbox_metrics()
+        performance = ledger.tx.outbox_performance()
+        lines = [
+            "📤 <b>OUTBOX METRICS</b>",
+            f"Pending: {health['pending']} · Processing: {health['processing']}",
+            f"Failed: {health['failed']} · Sent: {health['sent']}",
+            f"Retry rate: {performance['retry_rate'] * 100:.1f}% · Average attempts: {performance['average_attempts']:.2f}",
+            f"Oldest pending: {_elapsed_label(performance['oldest_pending'])}",
+            f"Oldest failed: {_elapsed_label(performance['oldest_failed'])}",
+            "",
+            "By type/status:",
+        ]
+        lines.extend(f"• {item['event_type']} / {item['status']}: {item['count']}" for item in metrics[:12])
+        lines.extend(["", "⚠️ FAILED OUTBOX EVENTS", ""])
+        buttons = []
+        if not events:
+            lines.append("✅ No failed or paused outbox events.")
+            lines.append("")
+        for event in events:
+            lines.append(f"{_outbox_age_marker(event)} {event['event_id']} · {event['event_type']} · attempts={event['attempts']}\n{event.get('last_error') or 'retryable'}")
+            buttons.append([
+                InlineKeyboardButton(text=f"🔎 View {event['event_id'][-8:]}", callback_data=f"outbox:view:{event['event_id']}"),
+            ])
+            buttons.append([
+                InlineKeyboardButton(text="↻ Retry", callback_data=f"outbox:retry:{event['event_id']}"),
+                InlineKeyboardButton(text="⏸ Pause", callback_data=f"outbox:pause:{event['event_id']}"),
+            ])
+        history = ledger.tx.recent_audit_events(object_type="outbox", limit=8)
+        health_history = ledger.tx.recent_audit_events(object_type="outbox_health", limit=8)
+        if history:
+            lines.extend(["", "ADMIN ACTION HISTORY"])
+            for event in history:
+                lines.append(
+                    f"[{event['created_at']}] {event['actor_id']} "
+                    f"| {event['action']} | {event['object_id']} | {event['reason']}"
+                )
+        if health_history:
+            lines.extend(["", "HEALTH ALERT HISTORY"])
+            for event in health_history:
+                lines.append(
+                    f"[{event['created_at']}] {event['action']} | {event['reason']}"
+                )
+        buttons.insert(0, [
+            InlineKeyboardButton(text="Failed", callback_data="outbox:filter:failed"),
+            InlineKeyboardButton(text="Paused", callback_data="outbox:filter:paused"),
+            InlineKeyboardButton(text="Processing", callback_data="outbox:filter:processing"),
+        ])
+        buttons.insert(1, [
+            InlineKeyboardButton(text="Rewards", callback_data="outbox:filter:TASK_MINT_REWARD"),
+            InlineKeyboardButton(text="Notifications", callback_data="outbox:filter:OWNER_NOTIFICATION"),
+        ])
+        buttons.append([
+            InlineKeyboardButton(text="⚠️ Raised alerts", callback_data="outboxhealth:filter:RAISED"),
+            InlineKeyboardButton(text="✅ Cleared alerts", callback_data="outboxhealth:filter:CLEARED"),
+        ])
+        buttons.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu:admin")])
+        await cb.message.edit_text("\n".join(lines[:45]), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        await cb.answer()
+        return
     if which == "audit":
-        log = audit.last(12)
-        lines = [audit.summary(), ""]
+        log = audit.last(10)
+        lines = [_channel_audit_text(), "", "DELIVERY HISTORY"]
         for r in reversed(log):
             lines.append(f"[{r.get('ts')}] {r.get('sender')} -> {r.get('target_channel')} "
                          f"| {r.get('status')} | {r.get('post_type')}")
-        await _panel_edit(cb, "\n".join(lines[:45]) or "No deliveries yet.",
-                          ui.role_menu(roles.role(uid)))
+        page = ledger.tx.recent_audit_events(object_type="channel", limit=20) if hasattr(ledger, "tx") else []
+        cursor = min((int(event["created_at"]) for event in page), default=None)
+        await cb.message.edit_text("\n".join(lines[:45]) or "No audit events yet.",
+                                   reply_markup=_channel_audit_markup(cursor))
         await cb.answer()
         return
     if which == "reports":
@@ -1569,24 +3187,105 @@ async def _notify_review_sender(item: dict):
         return False
 
 
+async def _monitor_operational_health():
+    """Send deduplicated owner alerts for actionable storage/queue failures."""
+    global _HEALTH_ALERT_LAST
+    if not hasattr(ledger, "tx"):
+        return
+    now = int(time.time())
+    if now - _HEALTH_ALERT_LAST < 3600:
+        return
+    _HEALTH_ALERT_LAST = now
+    health = ledger.tx.audit_health()
+    outbox = ledger.tx.outbox_health()
+    db_size = os.path.getsize(ledger.tx.path) if os.path.exists(ledger.tx.path) else 0
+    warnings = []
+    if db_size >= int(os.getenv("AUDIT_DB_WARN_BYTES", str(50 * 1024 * 1024))):
+        warnings.append(f"audit database is {db_size / 1024 / 1024:.1f} MB")
+    if outbox["failed"] >= int(os.getenv("OUTBOX_FAILED_WARN", "10")):
+        warnings.append(f"{outbox['failed']} outbox events are failed")
+    if outbox["processing"] >= int(os.getenv("OUTBOX_PROCESSING_WARN", "20")):
+        warnings.append(f"{outbox['processing']} outbox events are stuck processing")
+    stale_threshold = int(os.getenv("OUTBOX_STALE_WARN_SECONDS", "3600"))
+    stale_events = [event for event in ledger.tx.recent_outbox_events(limit=100)
+                    if event.get("status") in {"failed", "processing", "pending"}
+                    and _elapsed_seconds(event.get("created_at")) >= stale_threshold]
+    if stale_events:
+        warnings.append(f"{len(stale_events)} outbox events are stale beyond {_duration_label(stale_threshold)}")
+    if not warnings:
+        if _HEALTH_ALERTED:
+            for fingerprint in list(_HEALTH_ALERTED):
+                ledger.tx.add_audit_event(
+                    actor_type="system", actor_id="health-monitor",
+                    action="OUTBOX_ALERT_CLEARED", object_type="outbox_health",
+                    object_id="global", reason=fingerprint,
+                )
+            _HEALTH_ALERTED.clear()
+            owner_notify("✅ <b>PLATFORM HEALTH RECOVERED</b>\n\n"
+                         "Previously reported outbox conditions have cleared.")
+        return
+    fingerprint = "|".join(warnings)
+    if fingerprint in _HEALTH_ALERTED:
+        return
+    _HEALTH_ALERTED.add(fingerprint)
+    ledger.tx.add_audit_event(
+        actor_type="system", actor_id="health-monitor",
+        action="OUTBOX_ALERT_RAISED", object_type="outbox_health",
+        object_id="global", reason=fingerprint,
+    )
+    owner_notify("⚠️ <b>PLATFORM HEALTH ALERT</b>\n\n" +
+                 "\n".join(f"• {warning}" for warning in warnings) +
+                 f"\n\nAudit events: {health['total']}\nUse /audithealth for details.")
+
+
 async def notify_loop():
     """Background: hand out queued review outcomes to the senders (reward scope)."""
     while True:
         try:
+            recovery = marketplace.recover_expired()
+            if any(recovery.values()):
+                logging.info("task recovery: %s", recovery)
             await _process_mint_outbox()
-            for item in review.pending_notify("reward"): 
+            await _process_reward_broadcasts()
+            await _monitor_operational_health()
+            for item in review.pending_notify("reward"):   
                 if await _notify_review_sender(item):
                     review.clear_notify(item["id"])
+            # Reconcile Telegram permissions before calculating eligibility.
+            for member in ledger.ledger.values():
+                recipient = member.get("user_id")
+                if not recipient:
+                    continue
+                try:
+                    changes = await _reconcile_registered_channels(int(recipient))
+                    if changes:
+                        await bot.send_message(
+                            int(recipient),
+                            "🔎 Channel access updated:\n" + "\n".join(f"• {item}" for item in changes) +
+                            "\n\nMarketplace tasks require ACTIVE Telegram permissions.",
+                        )
+                except Exception:
+                    logging.exception("channel reconciliation failed for %s", recipient)
             # Keep one replaceable availability bubble per known member.
             for member in ledger.ledger.values():
                 recipient = member.get("user_id")
                 if not recipient:
                     continue
-                count = available.count(recipient)
+                legacy_count = available.count(recipient)
+                task_count = len(_eligible_marketplace_tasks(int(recipient)))
+                count = legacy_count + task_count
                 bubble = bubbles.get(recipient)
                 if count == bubble.get("count") and bubble.get("message_id"):
                     continue
-                text = f"📬 {count} post(s) available — tap /available to view" if count else "📭 No posts currently available"
+                if count:
+                    parts = []
+                    if task_count:
+                        parts.append(f"📋 {task_count} matching marketplace task(s)")
+                    if legacy_count:
+                        parts.append(f"📬 {legacy_count} legacy post(s)")
+                    text = "\n".join(parts) + "\nTap /start to view"
+                else:
+                    text = "📭 No eligible tasks or posts currently available"
                 try:
                     if bubble.get("message_id"):
                         await bot.edit_message_text(text, chat_id=int(recipient),

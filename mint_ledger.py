@@ -17,6 +17,7 @@ Rules implemented here:
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import sqlite3
 import time
@@ -76,6 +77,20 @@ CREATE TABLE IF NOT EXISTS referrals (
     reward_entry_id TEXT REFERENCES mint_ledger_entries(entry_id)
 );
 CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_id, status);
+
+CREATE TABLE IF NOT EXISTS referral_ranking_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    period TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('preview','approved','cancelled')),
+    pool INTEGER NOT NULL,
+    winners INTEGER NOT NULL,
+    ranking_json TEXT NOT NULL,
+    allocation_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    approved_by TEXT,
+    approved_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_snapshot_period ON referral_ranking_snapshots(period);
 
 CREATE TABLE IF NOT EXISTS reward_events (
     event_id TEXT PRIMARY KEY,
@@ -477,6 +492,43 @@ class TransactionalMintLedger:
             conn.execute("UPDATE post_orders SET status='refunded', completed_at=? WHERE order_id=?", (self._now(), order_id))
             return entry_id
 
+    def all_referrals(self, limit: int = 10000) -> list[dict]:
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM referrals ORDER BY first_touch_at DESC LIMIT ?", (int(limit),)
+            ).fetchall()]
+
+    def create_referral_ranking_snapshot(self, *, period: str, pool: int,
+                                         winners: int, ranking: list[dict],
+                                         allocation: list[dict]) -> dict:
+        snapshot_id = self._id("ref-rank")
+        now = self._now()
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO referral_ranking_snapshots(snapshot_id,period,status,pool,winners,ranking_json,allocation_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (snapshot_id, period, "preview", int(pool), int(winners),
+                 json.dumps(ranking, sort_keys=True), json.dumps(allocation, sort_keys=True), now),
+            )
+            return dict(conn.execute("SELECT * FROM referral_ranking_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone())
+
+    def referral_ranking_snapshot(self, period: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM referral_ranking_snapshots WHERE period=?", (period,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["ranking"] = json.loads(result.pop("ranking_json"))
+        result["allocation"] = json.loads(result.pop("allocation_json"))
+        return result
+
+    def approve_referral_ranking(self, period: str, admin_id) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE referral_ranking_snapshots SET status='approved', approved_by=?, approved_at=? WHERE period=? AND status='preview'",
+                (str(admin_id), self._now(), period),
+            )
+            return cur.rowcount == 1
+
     def referral_stats(self, owner_id) -> dict:
         with self._connect() as conn:
             rows = conn.execute(
@@ -538,6 +590,40 @@ class TransactionalMintLedger:
             )
             return cur.rowcount
 
+    def recent_outbox_events(self, *, status: str | None = None,
+                             event_type: str | None = None,
+                             limit: int = 30, offset: int = 0) -> list[dict]:
+        query = "SELECT * FROM outbox_events"
+        params: list[object] = []
+        conditions = []
+        if status:
+            conditions.append("status=?")
+            params.append(status)
+        if event_type:
+            conditions.append("event_type=?")
+            params.append(event_type)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([max(1, int(limit)), max(0, int(offset))])
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def get_outbox_event(self, event_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM outbox_events WHERE event_id=?", (event_id,)).fetchone()
+            return dict(row) if row else None
+
+    def retry_outbox(self, event_id: str) -> bool:
+        """Return one failed/paused event to the normal retry queue."""
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE outbox_events SET status='failed', available_at=?, last_error=NULL "
+                "WHERE event_id=? AND status='failed'",
+                (self._now(), event_id),
+            )
+            return cur.rowcount == 1
+
     def claim_outbox(self, limit: int = 20) -> list[dict]:
         """Atomically claim ready events for one worker process."""
         with self._tx() as conn:
@@ -566,9 +652,130 @@ class TransactionalMintLedger:
         with self._tx() as conn:
             cur = conn.execute(
                 "UPDATE outbox_events SET status=?, last_error=?, available_at=? WHERE event_id=? AND status='processing'",
-                ("failed", str(error)[:500], self._now() + (0 if permanent else max(0, int(retry_delay))), event_id),
+                ("failed", ("PAUSED: " if permanent else "") + str(error)[:500],
+                 self._now() + (10 * 365 * 24 * 3600 if permanent else max(0, int(retry_delay))), event_id),
             )
             return cur.rowcount == 1
+
+    def outbox_health(self) -> dict:
+        """Return pending/failed outbox counts for operational alerting."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS count FROM outbox_events GROUP BY status"
+            ).fetchall()
+        counts = {row["status"]: int(row["count"]) for row in rows}
+        return {"pending": counts.get("pending", 0),
+                "processing": counts.get("processing", 0),
+                "failed": counts.get("failed", 0),
+                "sent": counts.get("sent", 0)}
+
+    def outbox_performance(self) -> dict:
+        """Return retry and age metrics without changing queue state."""
+        with self._connect() as conn:
+            summary = conn.execute(
+                "SELECT COUNT(*) AS total, COALESCE(AVG(attempts), 0) AS average_attempts, "
+                "COALESCE(SUM(CASE WHEN attempts > 1 THEN 1 ELSE 0 END), 0) AS retried "
+                "FROM outbox_events"
+            ).fetchone()
+            oldest_pending = conn.execute(
+                "SELECT MIN(created_at) FROM outbox_events WHERE status IN ('pending','processing')"
+            ).fetchone()[0]
+            oldest_failed = conn.execute(
+                "SELECT MIN(created_at) FROM outbox_events WHERE status='failed'"
+            ).fetchone()[0]
+        total = int(summary["total"] or 0)
+        retried = int(summary["retried"] or 0)
+        return {"total": total, "average_attempts": float(summary["average_attempts"] or 0),
+                "retried": retried,
+                "retry_rate": (retried / total) if total else 0.0,
+                "oldest_pending": oldest_pending, "oldest_failed": oldest_failed}
+
+    def active_health_alerts(self, limit: int = 30) -> list[dict]:
+        """Return health fingerprints whose latest event is still raised."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM audit_events WHERE object_type='outbox_health' "
+                "ORDER BY created_at DESC, rowid DESC"
+            ).fetchall()
+        latest = {}
+        for row in rows:
+            key = row["reason"]
+            if key not in latest:
+                latest[key] = dict(row)
+        return [event for event in latest.values()
+                if event["action"] == "OUTBOX_ALERT_RAISED"][:max(1, int(limit))]
+
+    def outbox_metrics(self) -> list[dict]:
+        """Return queue totals grouped by event type and lifecycle status."""
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT event_type, status, COUNT(*) AS count "
+                "FROM outbox_events GROUP BY event_type, status "
+                "ORDER BY event_type, status"
+            ).fetchall()]
+
+    def audit_retention_report(self, *, older_than_days: int = 365) -> dict:
+        """Plan archival without deleting the append-only primary history."""
+        cutoff = self._now() - max(1, int(older_than_days)) * 86400
+        with self._connect() as conn:
+            total = int(conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0])
+            candidates = int(conn.execute("SELECT COUNT(*) FROM audit_events WHERE created_at<?", (cutoff,)).fetchone()[0])
+            oldest = conn.execute("SELECT MIN(created_at) FROM audit_events").fetchone()[0]
+            by_type = [dict(row) for row in conn.execute(
+                "SELECT object_type, COUNT(*) AS count FROM audit_events WHERE created_at<? GROUP BY object_type ORDER BY count DESC",
+                (cutoff,),
+            ).fetchall()]
+        return {"older_than_days": int(older_than_days), "cutoff": cutoff,
+                "total_events": total, "archival_candidates": candidates,
+                "oldest_event": oldest, "candidates_by_type": by_type,
+                "destructive_action_taken": False}
+
+    def audit_health(self) -> dict:
+        """Return non-destructive audit storage metrics for admin monitoring."""
+        with self._connect() as conn:
+            total = int(conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0])
+            channels = int(conn.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE object_type='channel'"
+            ).fetchone()[0])
+            oldest = conn.execute("SELECT MIN(created_at) FROM audit_events").fetchone()[0]
+            newest = conn.execute("SELECT MAX(created_at) FROM audit_events").fetchone()[0]
+            actions = [dict(row) for row in conn.execute(
+                "SELECT action, COUNT(*) AS count FROM audit_events "
+                "GROUP BY action ORDER BY count DESC"
+            ).fetchall()]
+        return {"total": total, "channel_events": channels,
+                "oldest": oldest, "newest": newest, "actions": actions}
+
+    def recent_audit_events(self, *, object_type: str | None = None,
+                            action_prefix: str | None = None,
+                            object_id: str | None = None,
+                            before_created_at: int | None = None,
+                            after_created_at: int | None = None,
+                            limit: int = 30) -> list[dict]:
+        query = "SELECT * FROM audit_events"
+        params: list[object] = []
+        conditions = []
+        if object_type:
+            conditions.append("object_type=?")
+            params.append(object_type)
+        if action_prefix:
+            conditions.append("action LIKE ?")
+            params.append(f"{action_prefix}%")
+        if object_id:
+            conditions.append("object_id=?")
+            params.append(str(object_id))
+        if before_created_at is not None:
+            conditions.append("created_at<?")
+            params.append(int(before_created_at))
+        if after_created_at is not None:
+            conditions.append("created_at>?" )
+            params.append(int(after_created_at))
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
 
     def add_audit_event(self, *, actor_type: str, actor_id: str, action: str,
                         object_type: str, object_id: str, reason: str) -> str:

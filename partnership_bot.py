@@ -9,6 +9,7 @@ gate (niche category + no spam/ads + human review), and a post-style selector
 (forward / direct / pin + loud / silent).
 """
 import asyncio
+import json
 import logging
 import time
 from aiogram import Bot, Dispatcher, types
@@ -17,6 +18,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from core import (Contract, CreditLedger, DeliveryLog, ReportRegistry,
                   PerformanceEngine, POST_TYPES, is_forward, forward_source)
+from broadcast_queue import BroadcastQueue
 from channel_registry import ChannelRegistry
 from features import StatsBook
 from store import JsonStore
@@ -37,6 +39,7 @@ audit = DeliveryLog(store)
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 channels = ChannelRegistry(store)
+broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
 stats = StatsBook(store)
 
 
@@ -454,11 +457,30 @@ async def _notify_review_sender(item: dict):
         return False
 
 
+async def _process_partnership_broadcasts():
+    """Deliver only Partnership-scope campaigns through the shared queue."""
+    for delivery in broadcasts.claim(limit=20, bot_scope="partnership"):
+        try:
+            campaign = broadcasts.get_campaign(delivery["campaign_id"])
+            payload = campaign.get("payload", {}) if campaign else {}
+            text = payload.get("text")
+            if not text:
+                broadcasts.fail(delivery["delivery_id"], "campaign has no explicit text payload", blocked=True)
+                continue
+            sent = await bot.send_message(int(delivery["recipient_id"]), text, parse_mode="HTML")
+            broadcasts.complete(delivery["delivery_id"], sent.message_id)
+        except Exception as exc:
+            blocked = any(token in str(exc).lower() for token in ("blocked", "chat not found", "deactivated"))
+            broadcasts.fail(delivery["delivery_id"], str(exc)[:500], blocked=blocked,
+                            retry_seconds=min(3600, 30 * (2 ** min(delivery.get("attempts", 1), 6))))
+
+
 async def notify_loop():
     """Hand out partner-scope review outcomes to their senders."""
     while True:
         try:
-            for item in review.pending_notify("partnership"):
+            await _process_partnership_broadcasts()
+            for item in review.pending_notify("partnership"): 
                 if await _notify_review_sender(item):
                     review.clear_notify(item["id"])
         except Exception as e:

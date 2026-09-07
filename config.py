@@ -38,6 +38,13 @@ PARTNER_STORE_PATH = os.path.join(STORE_DIR, "partnership_state.json")
 # Transactional Mint/referral foundation. This is separate from legacy JSON until
 # the reward flows are migrated to the ledger in a later compatibility step.
 MINT_DB_PATH = env("MINT_DB_PATH", os.path.join(STORE_DIR, "mint.sqlite3"))
+# Marketplace state is isolated during the additive migration. It can later be
+# moved into the authoritative platform database after the task schema is verified.
+TASK_DB_PATH = env("TASK_DB_PATH", os.path.join(STORE_DIR, "tasks.sqlite3"))
+CREDIBILITY_DB_PATH = env("CREDIBILITY_DB_PATH", os.path.join(STORE_DIR, "credibility.sqlite3"))
+BROADCAST_DB_PATH = env("BROADCAST_DB_PATH", os.path.join(STORE_DIR, "broadcast.sqlite3"))
+ADMIN_API_DB_PATH = env("ADMIN_API_DB_PATH", os.path.join(STORE_DIR, "admin_api.sqlite3"))
+ADMIN_ALLOWED_ORIGINS = [item.strip() for item in env("ADMIN_ALLOWED_ORIGINS", "").split(",") if item.strip()]
 # Keep legacy mode until `python3 migrate_mint.py` has been run and the
 # transactional backend has been verified in staging.
 MINT_LEDGER_MODE = env("MINT_LEDGER_MODE", "legacy").strip().lower()
