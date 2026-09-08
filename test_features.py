@@ -50,7 +50,7 @@ def test_bubble_is_single_replaceable_record():
 
 
 def test_role_counters_and_unconnected_limit():
-    assert daily_post_cap(5000, "A", connected=False) == 3
+    assert daily_post_cap(5000, "A", connected=False) == 0
     assert daily_post_cap(5000, "A", connected=True) == 4
     user_labels = [b.text for row in ui.main_menu("user", include_partnership=False).inline_keyboard for b in row]
     assert not any("Audit" in text for text in user_labels)
