@@ -3248,7 +3248,7 @@ async def notify_loop():
             await _process_mint_outbox()
             await _process_reward_broadcasts()
             await _monitor_operational_health()
-            for item in review.pending_notify("reward"):   
+            for item in review.pending_notify("reward"):
                 if await _notify_review_sender(item):
                     review.clear_notify(item["id"])
             # Reconcile Telegram permissions before calculating eligibility.

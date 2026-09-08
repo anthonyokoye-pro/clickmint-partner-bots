@@ -28,6 +28,12 @@ try:                                    # POSIX only; Windows degrades gracefull
 except ImportError:                     # pragma: no cover - non-POSIX fallback
     _HAS_FCNTL = False
 
+try:                                    # Windows file locking
+    import msvcrt
+    _HAS_MSVCRT = True
+except ImportError:                     # pragma: no cover - non-Windows
+    _HAS_MSVCRT = False
+
 
 class _FileLock:
     """Best-effort advisory lock around the read-merge-write cycle."""
@@ -37,19 +43,34 @@ class _FileLock:
         self._fh = None
 
     def __enter__(self):
-        if not _HAS_FCNTL:
+        if not _HAS_FCNTL and not _HAS_MSVCRT:
             return self
         try:
-            self._fh = open(self.path, "a+")
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+            self._fh = open(self.path, "a+b")
+            if _HAS_FCNTL:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+            else:
+                # msvcrt locks byte ranges and requires a byte to exist.
+                self._fh.seek(0, os.SEEK_END)
+                if self._fh.tell() == 0:
+                    self._fh.write(b"0")
+                    self._fh.flush()
+                self._fh.seek(0)
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_LOCK, 1)
         except OSError:                 # read-only dir etc. — carry on unlocked
+            if self._fh is not None:
+                self._fh.close()
             self._fh = None
         return self
 
     def __exit__(self, *exc):
         if self._fh is not None:
             try:
-                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                if _HAS_FCNTL:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                elif _HAS_MSVCRT:
+                    self._fh.seek(0)
+                    msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
             finally:
                 self._fh.close()
                 self._fh = None

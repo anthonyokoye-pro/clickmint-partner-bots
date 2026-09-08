@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS broadcast_campaigns (
     payload TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('draft','queued','running','paused','cancelled','completed')),
     scheduled_at INTEGER,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS broadcast_recipients (
     delivery_id TEXT PRIMARY KEY,
@@ -55,6 +56,9 @@ class BroadcastQueue:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(broadcast_campaigns)")}
+            if "title" not in columns:
+                conn.execute("ALTER TABLE broadcast_campaigns ADD COLUMN title TEXT NOT NULL DEFAULT ''")
 
     def _connect(self):
         conn = sqlite3.connect(self.path, timeout=30, isolation_level=None, factory=_ClosingConnection)
@@ -81,15 +85,15 @@ class BroadcastQueue:
         return f"{prefix}_{secrets.token_hex(10)}"
 
     def create_campaign(self, *, bot_scope: str, created_by, payload: dict,
-                        scheduled_at: int | None = None) -> str:
+                        scheduled_at: int | None = None, title: str = "") -> str:
         if bot_scope not in {"reward", "partnership"}:
             raise ValueError("invalid bot scope")
         campaign_id = self._id("broadcast")
         with self._tx() as conn:
             conn.execute(
-                "INSERT INTO broadcast_campaigns VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO broadcast_campaigns(campaign_id,bot_scope,created_by,payload,status,scheduled_at,created_at,title) VALUES(?,?,?,?,?,?,?,?)",
                 (campaign_id, bot_scope, str(created_by), json.dumps(payload),
-                 "draft", scheduled_at, int(time.time())),
+                 "draft", scheduled_at, int(time.time()), title.strip()[:160]),
             )
         return campaign_id
 
@@ -193,6 +197,19 @@ class BroadcastQueue:
         result["payload"] = json.loads(result["payload"] or "{}")
         result["deliveries"] = {row["status"]: int(row["count"]) for row in counts}
         return result
+
+    def update_draft(self, campaign_id: str, *, title: str, payload: dict, scheduled_at: int | None = None) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE broadcast_campaigns SET title=?,payload=?,scheduled_at=? WHERE campaign_id=? AND status='draft'",
+                (title.strip()[:160], json.dumps(payload), scheduled_at, campaign_id),
+            )
+            return cur.rowcount == 1
+
+    def delete_draft(self, campaign_id: str) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute("DELETE FROM broadcast_campaigns WHERE campaign_id=? AND status='draft'", (campaign_id,))
+            return cur.rowcount == 1
 
     def pause(self, campaign_id: str) -> bool:
         with self._tx() as conn:

@@ -11,7 +11,7 @@ class AdminAuthorizationError(PermissionError):
 class AdminReadAPI:
     """Application service independent of HTTP framework or Telegram web server."""
     def __init__(self, *, bot_token, owner_id, roles, channels, marketplace,
-                 snapshots, broadcasts, ledger=None):
+                 snapshots, broadcasts, ledger=None, enforcement=None):
         self.bot_token = bot_token
         self.owner_id = int(owner_id)
         self.roles = roles
@@ -20,6 +20,7 @@ class AdminReadAPI:
         self.snapshots = snapshots
         self.broadcasts = broadcasts
         self.ledger = ledger
+        self.enforcement = enforcement
 
     def authenticate(self, init_data: str):
         identity = validate_init_data(init_data, self.bot_token)
@@ -53,14 +54,14 @@ class AdminReadAPI:
         return {"period": period, "status": "approved"}
 
     def create_reward_campaign(self, init_data: str, text: str,
-                               scheduled_at: int | None = None) -> dict:
+                               scheduled_at: int | None = None, title: str = "") -> dict:
         identity = self.authenticate(init_data)
         if not text or len(text) > 4000:
             raise ValueError("explicit text is required and must be at most 4000 characters")
         campaign_id = self.broadcasts.create_campaign(
             bot_scope="reward", created_by=identity.user_id,
             payload={"text": text, "audience": "known_reward_members"},
-            scheduled_at=scheduled_at,
+            scheduled_at=scheduled_at, title=title or "Untitled Reward broadcast",
         )
         self._audit(identity.user_id, "REWARD_BROADCAST_CREATED", "broadcast_campaign", campaign_id, "Mini App campaign creation")
         return {"campaign_id": campaign_id, "status": "draft"}
@@ -77,6 +78,22 @@ class AdminReadAPI:
         self._audit(identity.user_id, "REWARD_BROADCAST_QUEUED", "broadcast_campaign", campaign_id, f"{inserted} recipients")
         return {"campaign_id": campaign_id, "status": "queued", "new_deliveries": inserted}
 
+    def update_reward_draft(self, init_data: str, campaign_id: str, title: str, text: str, scheduled_at=None) -> dict:
+        identity = self.authenticate(init_data)
+        if not title.strip() or not text.strip() or len(text) > 4000:
+            raise ValueError("title and text are required; text must be at most 4000 characters")
+        if not self.broadcasts.update_draft(campaign_id, title=title, payload={"text": text, "audience": "known_reward_members"}, scheduled_at=scheduled_at):
+            raise ValueError("only an existing draft can be edited")
+        self._audit(identity.user_id, "REWARD_BROADCAST_EDITED", "broadcast_campaign", campaign_id, "Mini App draft edit")
+        return {"campaign_id": campaign_id, "status": "draft"}
+
+    def delete_reward_draft(self, init_data: str, campaign_id: str) -> dict:
+        identity = self.authenticate(init_data)
+        if not self.broadcasts.delete_draft(campaign_id):
+            raise ValueError("only an existing draft can be deleted")
+        self._audit(identity.user_id, "REWARD_BROADCAST_DELETED", "broadcast_campaign", campaign_id, "Mini App draft deletion")
+        return {"campaign_id": campaign_id, "status": "deleted"}
+
     def broadcast_action(self, init_data: str, campaign_id: str, action: str,
                          reason: str = ""):
         identity = self.authenticate(init_data)
@@ -90,6 +107,38 @@ class AdminReadAPI:
         self._audit(identity.user_id, f"REWARD_BROADCAST_{action.upper()}",
                     "broadcast_campaign", campaign_id, reason or "Mini App action")
         return {"campaign_id": campaign_id, "action": action, "status": "applied"}
+
+    def enforcement_details(self, init_data: str, entity_id, entity_type: str) -> dict:
+        self.authenticate(init_data)
+        if self.enforcement is None:
+            raise RuntimeError("enforcement store required")
+        return {"entity": self.enforcement.get(entity_id, entity_type),
+                "timeline": self.enforcement.timeline(entity_id, entity_type)}
+
+    def enforce_entity(self, init_data: str, entity_id, entity_type: str,
+                       action: str, reason: str, duration_seconds=None, notes="") -> dict:
+        identity = self.authenticate(init_data)
+        if identity.user_id != self.owner_id:
+            raise AdminAuthorizationError("owner approval required for enforcement")
+        if self.enforcement is None:
+            raise RuntimeError("enforcement store required")
+        if action == "restore":
+            result = self.enforcement.restore(entity_id, entity_type, actor_id=identity.user_id, reason=reason, notes=notes)
+        else:
+            result = self.enforcement.enforce(entity_id, entity_type, action.upper(), actor_id=identity.user_id,
+                                              reason=reason, duration_seconds=duration_seconds, notes=notes)
+        self._audit(identity.user_id, f"ENFORCEMENT_{action.upper()}", "enforcement_entity", str(entity_id), reason)
+        return result
+
+    def emergency_mode(self, init_data: str, enabled: bool, reason: str) -> dict:
+        identity = self.authenticate(init_data)
+        if identity.user_id != self.owner_id:
+            raise AdminAuthorizationError("owner approval required for safe mode")
+        if self.enforcement is None:
+            raise RuntimeError("enforcement store required")
+        result = self.enforcement.set_emergency(bool(enabled), actor_id=identity.user_id, reason=reason)
+        self._audit(identity.user_id, "SAFE_MODE_ENABLED" if enabled else "SAFE_MODE_DISABLED", "safety_control", "safe_mode", reason)
+        return result
 
     def clear_performance_cooldown(self, init_data: str, destination_id,
                                    reason: str = "") -> dict:
@@ -149,6 +198,7 @@ class AdminReadAPI:
                       for task in tasks],
             "broadcasts": [{
                 "campaign_id": campaign["campaign_id"],
+                "title": campaign.get("title") or campaign.get("payload", {}).get("text", "")[:80],
                 "status": campaign["status"],
                 "deliveries": self.broadcasts.campaign_summary(campaign["campaign_id"]).get("deliveries", {}),
             } for campaign in campaigns[:20]],

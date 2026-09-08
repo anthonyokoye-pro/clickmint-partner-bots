@@ -176,6 +176,12 @@ class AdminWSGI:
             if method == "GET" and path.startswith("/api/admin/referrals/"):
                 period = unquote(path.split("/api/admin/referrals/", 1)[1])
                 return self._response(start_response, "200 OK", self.api.referral_snapshot(init_data, period), correlation_id)
+            if method == "GET" and path.startswith("/api/admin/enforcement/"):
+                parts = [unquote(item) for item in path.strip("/").split("/")]
+                if len(parts) != 5:
+                    return self._response(start_response, "404 Not Found", {"error": "not found"}, correlation_id)
+                payload = self.api.enforcement_details(init_data, parts[4], parts[3])
+                return self._response(start_response, "200 OK", payload, correlation_id)
             if method == "GET" and path.startswith("/api/admin/performance/"):
                 destination_id = unquote(path.split("/api/admin/performance/", 1)[1])
                 query = parse_qs(environ.get("QUERY_STRING", ""))
@@ -203,11 +209,25 @@ class AdminWSGI:
                 if replay is not None:
                     return replay
                 parts = [unquote(item) for item in path.strip("/").split("/")]
+                if parts[:4] == ["api", "admin", "safety", "emergency"] and len(parts) == 4:
+                    result = self.api.emergency_mode(init_data, bool(body.get("enabled")), body.get("reason", ""))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts[:3] == ["api", "admin", "enforcement"] and len(parts) == 6:
+                    result = self.api.enforce_entity(
+                        init_data, parts[4], parts[3], parts[5], body.get("reason", ""),
+                        body.get("duration_seconds"), body.get("notes", ""))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts[:3] == ["api", "admin", "referrals"] and len(parts) == 5 and parts[4] == "approve":
                     result = self.api.approve_referral_ranking(init_data, parts[3], body.get("reason", ""))
                     return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts[:3] == ["api", "admin", "broadcasts"] and len(parts) == 3:
-                    result = self.api.create_reward_campaign(init_data, body.get("text", ""), body.get("scheduled_at"))
+                    result = self.api.create_reward_campaign(init_data, body.get("text", ""), body.get("scheduled_at"), body.get("title", ""))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts[:3] == ["api", "admin", "broadcasts"] and len(parts) == 5 and parts[4] == "edit":
+                    result = self.api.update_reward_draft(init_data, parts[3], body.get("title", ""), body.get("text", ""), body.get("scheduled_at"))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts[:3] == ["api", "admin", "broadcasts"] and len(parts) == 5 and parts[4] == "delete":
+                    result = self.api.delete_reward_draft(init_data, parts[3])
                     return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts[:3] == ["api", "admin", "broadcasts"] and len(parts) == 5 and parts[4] == "queue":
                     result = self.api.queue_reward_campaign(init_data, parts[3])

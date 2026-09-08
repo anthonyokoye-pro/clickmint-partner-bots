@@ -16,6 +16,8 @@ class EligibilityContext:
     boost_radius: int = 0
     required_radius: int = 0
     fraud_block: bool = False
+    enforcement_state: str = "ACTIVE"
+    safe_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,4 +46,8 @@ def can_claim_task(context: EligibilityContext) -> EligibilityResult:
         reasons.append("distribution radius is not available")
     if context.fraud_block:
         reasons.append("account has an unresolved safety restriction")
+    if context.enforcement_state in {"RESTRICTED", "SUSPENDED", "BANNED", "REMOVED"}:
+        reasons.append(f"entity enforcement state is {context.enforcement_state.lower()}")
+    if context.safe_mode:
+        reasons.append("CLICKMINT safe mode is active")
     return EligibilityResult(not reasons, tuple(reasons))

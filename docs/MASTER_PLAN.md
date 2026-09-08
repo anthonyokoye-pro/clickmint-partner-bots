@@ -278,3 +278,17 @@ All saved in `CLICKMINT_Quality_Partnership_Research.md` and Part 1 above.
   report loop) and 17 medium issues — all fixed, all covered by tests.
 - **Handoff** (Part 4): a ready repo to push + a ready prompt so the next session starts from
   verified state and doesn't burn its limit.
+
+## 2026-09 compliance-first continuation
+
+Before financial or growth expansion, the platform must complete:
+
+- Admin enforcement/report/evidence/timeline UI and appeal workflow;
+- safe-mode wiring into every broadcast, task, registration, reward, and posting worker;
+- campaign title/edit/delete lifecycle and separate consent-aware Ad Campaign model;
+- Telegram-supported formatting editor using message entities/parse modes, never invented markup;
+- cross-platform persistence/concurrency verification and a real requirements-installed bot test run;
+- named HTTPS deployment only when a stable domain/host is available.
+
+Quick Cloudflare tunnels remain development/testing infrastructure only. Financial features
+remain disabled until these safety and operational controls are validated.

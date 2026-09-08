@@ -178,3 +178,12 @@ The full project documentation lives in `docs/` — read this before changing co
 - Add each bot as **admin (Post Messages)** in your own channel so it can post for you.
 - For partners who want true automation, have them add your bot as admin in their channel.
 - Keep volume low and always respect a partner's choice — this is a trust network, not a spam tool.
+
+## Compliance and enforcement
+
+CLICKMINT is compliance-first: it verifies Telegram permissions before direct posting,
+validates Mini App initData server-side, keeps borderline content in human review, and
+never treats one report or keyword as proof of wrongdoing. The durable enforcement,
+report, evidence, timeline, and safe-mode foundation is in `enforcement.py`; its policy and
+current gaps are documented in `docs/COMPLIANCE_AND_ENFORCEMENT.md`. Revenue, deposits,
+Boost purchases, withdrawals, and external payouts remain disabled.

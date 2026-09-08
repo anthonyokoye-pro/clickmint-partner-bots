@@ -168,3 +168,31 @@ python3 branding.py --check       # expect all fields within limits
 The engine was sound; the **bots were not runnable** and the credit economy, the daily cap
 and the report loop were each wrong in a way the old tests could not see. All of it is fixed
 and now covered by a test that fails loudly, in CI, if it regresses.
+
+## 2026-09-08 compliance-first audit addendum
+
+The completed Telegram Mini App smoke test proved the Admin frontend, HTTPS tunnel path,
+server-side initData validation, origin handling for Telegram WebViews, authenticated
+Dashboard, draft creation, and scheduled-draft persistence. It did not prove production
+uptime, named-tunnel stability, real bot polling, or real channel permissions.
+
+New findings and decisions:
+
+- A durable cross-entity enforcement model was missing; `enforcement.py` now records
+  ACTIVE/FLAGGED/RESTRICTED/SUSPENDED/BANNED/REMOVED state, reports, evidence references,
+  decisions, timelines, temporary expiry, and safe mode.
+- Eligibility now accepts enforcement state and safe-mode context and fails closed for
+  restricted, suspended, banned, removed, and safe-mode operations.
+- The Admin API now has the initial enforcement/safe-mode service boundary, owner approval
+  requirement, and protected routes; full frontend enforcement panels and appeal UI remain.
+- Campaigns now have durable user-facing titles and draft edit/delete service methods;
+  frontend title entry is required. Full campaign editor controls and Ad Campaign parity
+  remain unfinished.
+- JSON locking now uses `msvcrt` on Windows where available instead of silently running
+  without a lock.
+- The offline audit environment lacks `aiogram`; core/governance/enforcement suites pass,
+  while `test_bots.py` requires the installed requirements environment.
+
+Compliance boundary: no feature is being added to evade Telegram enforcement, bypass
+permissions/rate limits, automate fake engagement, rotate accounts, retaliate against
+reporters, or activate financial settlement. Advertising remains consent-gated future scope.

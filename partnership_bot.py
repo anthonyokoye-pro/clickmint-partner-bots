@@ -480,7 +480,7 @@ async def notify_loop():
     while True:
         try:
             await _process_partnership_broadcasts()
-            for item in review.pending_notify("partnership"): 
+            for item in review.pending_notify("partnership"):
                 if await _notify_review_sender(item):
                     review.clear_notify(item["id"])
         except Exception as e:

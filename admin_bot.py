@@ -156,7 +156,7 @@ async def dash(cb: types.CallbackQuery):
         await show_caps(cb)
     elif which == "mint":
         await show_mint(cb)
-    elif which == "rev": 
+    elif which == "rev":
         await show_review(cb, parts[2] if len(parts) > 2 else "reward")
     elif which == "contracts":
         await show_contracts(cb)
