@@ -99,6 +99,7 @@ deploy.
 | `ui.py` | Shared button menus + role routing. |
 | `branding.py` | The approved branding copy (`docs/BOT_BRANDING.md`) + a pusher for the Bot API. |
 | `views_provider.py` | **Optional** MTProto observer — the only way to read live channel views. |
+| `telegram_verification.py` | User-owned Telegram bot credential storage, Bot API verification, and real member-count retrieval. |
 | `test_core.py` | Engine tests (28). |
 | `test_governance.py` | Rules/roles/branding tests (33). |
 | `test_bots.py` | Bot wiring tests (26) — handlers, menus, funnel, roles, owner bypass. |
@@ -116,14 +117,16 @@ deploy.
   reliability + reputation. Bands A/B/C; match **like-with-like**; promote/demote as scores change;
   subscriber size is only a tiebreaker. Real views need `views_provider.py` (MTProto); without it
   the engine uses the reliability proxy (no fake views).
-- **`/rank`** shows the live score/band/status per channel.
+- **`/rank`** shows the live score/performance-tier/status per channel; the user-facing menu label is `🏆 Leaderboard`.
+- **User-owned Telegram verification:** each destination owner connects their own BotFather bot with `/connectbot`, adds it as an administrator, and registers with `/register @destination`. Telegram supplies member counts; manual counts are not accepted.
+- **Fail-closed participation:** destinations receive zero participation capacity until bot identity, administrator status, permissions, accessibility, eligibility, and active state are verified.
 
 ## 7. Governance features (governance.py — 33 tests)
 The terms & limits + roles you asked for. Pure logic in `governance.py`, tested by `test_governance.py`.
-- **Post limit scales with size × performance.** `daily_post_cap(size, band, status, is_owner)`:
-  size base (1–4 slots) × performance multiplier (A=1.0, B=0.75, C=0.5). Floor of 1 for any
-  ACTIVE channel (never zeroed); RESTRICTED/REMOVED = 0; owner = unlimited. So a small channel
-  can't spam 10 posts/day — it's capped to what it can realistically deliver.
+- **Post limit scales with size × performance after verification.** `daily_post_cap(size, band, status, is_owner, connected)`:
+  unverified destinations receive 0 slots; verified size base (1–4 slots) × performance multiplier
+  (A=1.0, B=0.75, C=0.5) applies a floor of 1; RESTRICTED/REMOVED = 0; owner is unlimited only
+  after verification. No unconnected participation allowance remains.
 - **Submission gate (terms & regulations):** sender must accept the terms (button), declare a
   **niche category** (from `POST_CATEGORIES`), and the category must be one the target channel
   agreed to *receive*. Hard-block list catches scam / money-asking / fraud / phishing / free-stuff

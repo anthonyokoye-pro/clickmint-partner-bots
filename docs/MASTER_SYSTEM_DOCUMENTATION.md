@@ -415,11 +415,16 @@ The admin bot is used for the decision; the network bot sends the user notificat
 
 The partnership bot supports:
 
-- `/start @name <subscriber_count>` legacy registration
+- `/connectbot <BotFather token>` connects the user's own Telegram bot
+- `/register @name` resolves and verifies the destination through that user-owned bot
 - Button-led **My channels / groups → Add channel/Add group** registration
+- `/scan` and `📊 Check Stats` refresh real Telegram verification and member counts
 - `/mychannels`
 
-Registration creates/updates a ledger row and a `ChannelRegistry` destination row. The bot-added flag begins false unless later verified by code. The source asks users to add the bot as an admin for direct posting and accurate statistics.
+Registration never accepts a manual subscriber/member count. The user-owned bot
+must be present as an administrator with required permissions before the
+`ChannelRegistry` row becomes `VERIFIED` and eligible for participation. The
+stored count is sourced from Telegram's `getChatMemberCount` endpoint.
 
 ### 6.3 Contract setup
 

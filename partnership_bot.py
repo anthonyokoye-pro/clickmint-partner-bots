@@ -47,8 +47,7 @@ stats = StatsBook(store)
 
 
 def _is_connected(username: str) -> bool:
-    row = channels.get(username)
-    return True if row is None else bool(row.get("bot_added"))
+    return channels.participation_allowed(username)
 perf.views_provider = stats.provider
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
@@ -143,6 +142,10 @@ async def connect_bot_cmd(msg: types.Message):
         await msg.answer("Usage: /connectbot <token from BotFather>")
         return
     try:
+        try:
+            await msg.delete()
+        except Exception:
+            logging.warning("could not delete bot-token message")
         identity = await telegram_verification.connect_bot(msg.from_user.id, parts[1].strip())
     except Exception as exc:
         await msg.answer(f"❌ Bot connection failed: {str(exc)}")

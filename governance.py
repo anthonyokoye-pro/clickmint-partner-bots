@@ -80,8 +80,8 @@ def daily_post_cap(size: int, band: str, status: str = "ACTIVE",
 
 
 def daily_cap_text(size: int, band: str, status: str = "ACTIVE",
-                   is_owner: bool = False) -> str:
-    cap = daily_post_cap(size, band, status, is_owner)
+                   is_owner: bool = False, connected: bool = False) -> str:
+    cap = daily_post_cap(size, band, status, is_owner, connected=connected)
     if cap == -1:
         return "unlimited (owner)"
     return str(cap)

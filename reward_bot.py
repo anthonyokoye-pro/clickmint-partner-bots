@@ -98,9 +98,8 @@ def _menu(role: str, uid: int | None = None):
 
 
 def _is_connected(username: str) -> bool:
-    row = channels.get(username)
-    # Legacy ledger-only rows predate ChannelRegistry; preserve their behavior.
-    return True if row is None else bool(row.get("bot_added"))
+    """Fail-closed destination gate used by every participation path."""
+    return channels.participation_allowed(username)
 
 
 def _audit_counts() -> dict[str, int]:
@@ -258,6 +257,12 @@ async def connect_bot_cmd(msg: types.Message):
         await msg.answer("Usage: /connectbot <token from BotFather>\nYour token is encrypted and never shown back.")
         return
     try:
+        # Remove the token message immediately where Telegram permits it; tokens
+        # must not remain visible in the conversation history.
+        try:
+            await msg.delete()
+        except Exception:
+            logging.warning("could not delete bot-token message")
         identity = await telegram_verification.connect_bot(msg.from_user.id, parts[1].strip())
     except Exception as exc:
         await msg.answer(f"❌ Bot connection failed: {escape(str(exc))}")
@@ -639,7 +644,8 @@ def _destination_daily_limit(destination_id) -> int:
 def _eligible_marketplace_tasks(uid: int) -> list[dict]:
     """Return tasks matching at least one active destination and its tier."""
     destinations = [row for row in channels.mine(uid)
-                    if row.get("status", "ACTIVE") == "ACTIVE"]
+                    if row.get("status", "ACTIVE") == "ACTIVE"
+                    and channels.participation_allowed(row.get("chat_id") or row.get("username"))]
     if not destinations:
         return []
     tier_order = {"PROVISIONAL": 0, "EMERGING": 1, "ESTABLISHED": 2,
@@ -700,7 +706,9 @@ def _task_menu(tasks: list[dict]) -> InlineKeyboardMarkup:
 async def task_eligibility_explanation(cb: types.CallbackQuery):
     uid = cb.from_user.id
     destinations = channels.mine(uid)
-    active = [row for row in destinations if row.get("status", "ACTIVE") == "ACTIVE"]
+    active = [row for row in destinations
+              if row.get("status", "ACTIVE") == "ACTIVE"
+              and channels.participation_allowed(row.get("chat_id") or row.get("username"))]
     categories = sorted({category for row in active for category in (row.get("categories") or [])})
     if active:
         tier_order = {"PROVISIONAL": 0, "EMERGING": 1, "ESTABLISHED": 2,
@@ -981,7 +989,8 @@ async def task_recommendation_reason(cb: types.CallbackQuery):
         await cb.answer("That task is no longer available.", show_alert=True)
         return
     destinations = [row for row in channels.mine(cb.from_user.id)
-                    if row.get("status", "ACTIVE") == "ACTIVE"]
+                    if row.get("status", "ACTIVE") == "ACTIVE"
+                    and channels.participation_allowed(row.get("chat_id") or row.get("username"))]
     categories = _task_categories(cb.from_user.id)
     matching = [row for row in destinations
                 if task.get("category") in (row.get("categories") or [])]
@@ -1031,7 +1040,9 @@ async def task_action(cb: types.CallbackQuery):
 async def choose_task_channel(cb: types.CallbackQuery):
     task_id = cb.data.split(":", 2)[2]
     rows = channels.mine(cb.from_user.id)
-    candidates = [row for row in rows if row.get("status", "ACTIVE") == "ACTIVE"]
+    candidates = [row for row in rows
+                  if row.get("status", "ACTIVE") == "ACTIVE"
+                  and channels.participation_allowed(row.get("chat_id") or row.get("username"))]
     if not candidates:
         await cb.answer("Register a channel first.", show_alert=True)
         return
@@ -1053,28 +1064,15 @@ async def choose_task_channel(cb: types.CallbackQuery):
 
 
 async def _verify_task_channel(row: dict):
-    """Verify the bot's current Telegram administrator rights before execution."""
+    """Recheck the destination with its owner's bot, never the shared bot."""
     chat_id = row.get("chat_id") or row.get("username")
     if not chat_id:
         return None, "destination has no Telegram chat id"
     try:
-        chat = await bot.get_chat(chat_id)
-        me = await bot.get_me()
-        member = await bot.get_chat_member(chat.id, me.id)
-        snapshot = TelegramPermissionSnapshot(
-            chat_id=str(chat.id),
-            chat_type=getattr(chat, "type", row.get("kind", "channel")),
-            member_status=getattr(member, "status", ""),
-            can_post_messages=bool(getattr(member, "can_post_messages", False)),
-            can_edit_messages=bool(getattr(member, "can_edit_messages", False)),
-            can_delete_messages=bool(getattr(member, "can_delete_messages", False)),
-            can_pin_messages=bool(getattr(member, "can_pin_messages", False)),
-            checked_at=int(time.time()),
-        )
-        result = verify_permissions(snapshot, require_post=True)
+        result = await telegram_verification.verify(int(row["owner_id"]), chat_id)
         if not result.eligible:
             return None, "; ".join(result.reasons)
-        return {"row": row, "chat_id": chat.id, "snapshot": snapshot}, None
+        return {"row": row, "chat_id": int(result.chat_id), "verification": result}, None
     except Exception as exc:
         return None, f"Telegram verification failed: {type(exc).__name__}"
 
@@ -1096,26 +1094,31 @@ async def _reconcile_registered_channels(uid: int) -> list[str]:
     return changes
 
 
-async def _execute_task_payload(task: dict, chat_id):
+async def _execute_task_payload(task: dict, chat_id, owner_id: int):
     """Publish only content explicitly stored with the task.
 
     Forwarded tasks require source_chat_id/source_message_id. Text tasks are
     platform-generated tasks. A title alone is never fabricated into a post.
     """
     payload = task.get("payload") or {}
-    source_chat_id = payload.get("source_chat_id")
-    source_message_id = payload.get("source_message_id")
-    if source_chat_id is not None and source_message_id is not None:
-        return await bot.forward_message(
-            chat_id=chat_id,
-            from_chat_id=source_chat_id,
-            message_id=int(source_message_id),
-            disable_notification=bool(payload.get("silent", False)),
-        )
-    text = payload.get("text")
-    if text:
-        return await bot.send_message(chat_id, text, parse_mode="HTML")
-    raise ValueError("task has no executable Telegram payload")
+    from aiogram import Bot as TelegramBot
+    owned_bot = TelegramBot(token=telegram_verification.credentials.token(int(owner_id)))
+    try:
+        source_chat_id = payload.get("source_chat_id")
+        source_message_id = payload.get("source_message_id")
+        if source_chat_id is not None and source_message_id is not None:
+            return await owned_bot.forward_message(
+                chat_id=chat_id,
+                from_chat_id=source_chat_id,
+                message_id=int(source_message_id),
+                disable_notification=bool(payload.get("silent", False)),
+            )
+        text = payload.get("text")
+        if text:
+            return await owned_bot.send_message(chat_id, text, parse_mode="HTML")
+        raise ValueError("task has no executable Telegram payload")
+    finally:
+        await owned_bot.session.close()
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("task:claim:"))
@@ -1168,7 +1171,7 @@ async def claim_task(cb: types.CallbackQuery):
     try:
         claim = marketplace.claim(task_id, user_id=cb.from_user.id,
                                   destination_id=destination_id)
-        sent = await _execute_task_payload(task, verified["chat_id"])
+        sent = await _execute_task_payload(task, verified["chat_id"], int(destination["owner_id"]))
         completion = marketplace.complete(
             claim["claim_id"],
             telegram_chat_id=verified["chat_id"],
@@ -2308,10 +2311,16 @@ async def direct_deliver(cb, sender, target, pending, style="fwd", silent=False)
         await cb.message.answer(f"⚠ Nothing to forward to {target} — resubmit the "
                                 "post as a forward.")
         return
+    destination = channels.get(target)
+    if not destination or not channels.participation_allowed(target):
+        await cb.message.answer(f"⚠ Destination {target} is not currently verified.")
+        return
+    from aiogram import Bot as TelegramBot
+    owned_bot = TelegramBot(token=telegram_verification.credentials.token(int(destination["owner_id"])))
     try:
-        sent = await bot.forward_message(chat_id=target, from_chat_id=f_chat_id,
-                                         message_id=f_msg_id,
-                                         disable_notification=silent)
+        sent = await owned_bot.forward_message(chat_id=target, from_chat_id=f_chat_id,
+                                                message_id=f_msg_id,
+                                                disable_notification=silent)
         perf.mark_posted(target)
         audit.record(bot="reward", sender=sender, target_channel=target,
                      mode="direct", status="delivered", forward_valid=True, style=style)
@@ -2321,6 +2330,8 @@ async def direct_deliver(cb, sender, target, pending, style="fwd", silent=False)
                      mode="direct", status="offered", forward_valid=True,
                      error=str(e)[:120])
         await cb.message.answer(f"Direct delivery to {target} failed ({e}). Fell back to offer.")
+    finally:
+        await owned_bot.session.close()
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("chain:"))
