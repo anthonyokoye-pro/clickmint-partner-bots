@@ -27,3 +27,9 @@
 **Finding:** Core and governance suites pass, but the environment used for offline audit does not have `aiogram`; bot wiring tests therefore cannot execute here.
 
 **Decision:** Keep aiogram-dependent tests explicit and require `pip install -r requirements.txt` in Windows/CI before claiming full bot coverage. Never treat import-only checks as live Telegram validation.
+
+## 2026-09-08 — AI and verification scope decision
+
+**Decision:** Keep AI and human verification out of the core transaction path. Add provider-neutral interfaces and structured risk/audit data first. Use progressive, risk-based challenges only for sensitive or suspicious actions. Do not add vector databases, autonomous production changes, or a CAPTCHA on every screen at the 1,000–10,000 target.
+
+**Reason:** The current bottlenecks are reliability, enforcement integration, campaign lifecycle, and dependency-complete testing—not model intelligence. A provider-neutral boundary preserves replacement freedom and zero-budget operation.

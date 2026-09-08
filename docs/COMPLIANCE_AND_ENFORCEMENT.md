@@ -73,3 +73,7 @@ Not yet implemented:
 - appeals UI/workflow;
 - full safe-mode wiring into all workers;
 - consent-aware advertising.
+
+## Human verification and risk
+
+Human verification complements Telegram identity; it does not prove that a person is legitimate. The future provider boundary must validate tokens server-side, reject replay and expiry, bind a result to the intended action/session, and record only minimal operational metrics. Normal navigation should not be challenged. High-risk referrals, reward farming, rapid campaigns, and unusual registration may require a challenge. Provider failure must fail safely without silently granting sensitive access.

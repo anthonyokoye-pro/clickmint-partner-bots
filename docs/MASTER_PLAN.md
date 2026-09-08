@@ -292,3 +292,18 @@ Before financial or growth expansion, the platform must complete:
 
 Quick Cloudflare tunnels remain development/testing infrastructure only. Financial features
 remain disabled until these safety and operational controls are validated.
+
+## Future AI intelligence and anti-bot roadmap
+
+AI is an optional intelligence layer, never a core dependency. The staged path is
+Observe → Propose → Test → Controlled implementation → Limited automation. High-impact
+security, enforcement, authentication, financial, and production changes require human
+approval. The knowledge base should remain versioned documentation, structured events,
+SQLite records, and engineering decision records until scale justifies search/indexing
+infrastructure.
+
+Human verification is risk-based, not universal. Telegram identity, rate limits, behavior,
+reputation, enforcement, and a replaceable provider result must be combined. Turnstile is a
+candidate for a free provider, but it must be validated server-side, single-use, and
+short-lived; it is not proof of innocence or humanity. Do not challenge normal read-only
+navigation or every Mini App session.
