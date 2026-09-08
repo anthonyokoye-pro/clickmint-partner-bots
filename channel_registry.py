@@ -56,7 +56,10 @@ class ChannelRegistry:
         row = self._items().get(key)
         if not row or int(row.get("owner_id")) != int(owner_id):
             raise KeyError("channel not found or not owned by this user")
-        allowed = {"username", "categories", "size", "bot_added", "status", "band"}
+        allowed = {"username", "categories", "size", "bot_added", "status", "band",
+                   "verified_state", "telegram_member_count", "telegram_member_count_source",
+                   "telegram_member_count_checked_at", "telegram_chat_type", "telegram_bot_id",
+                   "permissions", "verification_reasons", "last_verified_at"}
         unknown = set(changes) - allowed
         if unknown:
             raise ValueError(f"unsupported fields: {sorted(unknown)}")
@@ -82,6 +85,12 @@ class ChannelRegistry:
 
     def get(self, chat_id) -> dict | None:
         return self._items().get(str(chat_id))
+
+    def participation_allowed(self, chat_id) -> bool:
+        row = self.get(chat_id)
+        return bool(row and row.get("verified_state") == "VERIFIED"
+                    and row.get("bot_added") is True
+                    and row.get("status") == "ACTIVE")
 
     def set_bot_access(self, chat_id, added: bool) -> dict:
         row = self.get(chat_id)

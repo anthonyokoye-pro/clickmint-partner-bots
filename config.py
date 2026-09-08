@@ -27,6 +27,9 @@ def env(key: str, default: str = "") -> str:
 REWARD_BOT_TOKEN = env("REWARD_BOT_TOKEN", "YOUR_REWARD_BOT_TOKEN")
 PARTNER_BOT_TOKEN = env("PARTNER_BOT_TOKEN", "YOUR_PARTNER_BOT_TOKEN")
 ADMIN_BOT_TOKEN = env("ADMIN_BOT_TOKEN", "YOUR_ADMIN_BOT_TOKEN")
+# Encryption key for user-owned Telegram bot credentials. Keep in a secrets
+# manager; changing it intentionally invalidates stored credentials.
+CLICKMINT_CREDENTIAL_KEY = env("CLICKMINT_CREDENTIAL_KEY", "")
 
 # Your numeric Telegram user id — identifies the OWNER (splits owner/admin/user menus).
 OWNER_USER_ID = int(env("OWNER_USER_ID", "0") or 0)

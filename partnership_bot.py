@@ -20,6 +20,7 @@ from core import (Contract, CreditLedger, DeliveryLog, ReportRegistry,
                   PerformanceEngine, POST_TYPES, is_forward, forward_source)
 from broadcast_queue import BroadcastQueue
 from channel_registry import ChannelRegistry
+from telegram_verification import BotCredentialStore, TelegramVerificationService, CredentialError
 from features import StatsBook
 from store import JsonStore
 from governance import (SubmissionGate, ReviewQueue, RoleRegistry, POST_CATEGORIES,
@@ -39,6 +40,8 @@ audit = DeliveryLog(store)
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 channels = ChannelRegistry(store)
+bot_credentials = BotCredentialStore(store)
+telegram_verification = TelegramVerificationService(bot_credentials)
 broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
 stats = StatsBook(store)
 
@@ -52,6 +55,25 @@ review = ReviewQueue(store)
 roles = RoleRegistry(store, owner_user_id=OWNER_USER_ID)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+
+async def _register_from_telegram(msg, destination: str, kind: str = "channel") -> str:
+    owner = msg.from_user.id
+    channels.add(owner, destination, destination, kind, ["General"], size=0, bot_added=False)
+    channels.update(owner, destination, status="VERIFYING")
+    result = await telegram_verification.verify(owner, destination)
+    if not result.eligible:
+        channels.update(owner, destination, status=result.state, bot_added=False,
+                        verified_state=result.state, verification_reasons=list(result.reasons))
+        return "❌ Verification failed: " + "; ".join(result.reasons) + "\nAdd your bot as administrator and try again."
+    size = result.member_count or 0
+    channels.update(owner, destination, size=size, bot_added=True, status="ACTIVE",
+                    verified_state="VERIFIED", telegram_member_count=size,
+                    telegram_member_count_source="telegram_api",
+                    telegram_member_count_checked_at=result.checked_at,
+                    permissions=result.permissions or {})
+    ledger.register(destination, size, is_partner=True); ledger.set_user_id(destination, owner)
+    return f"✅ Verified {destination}; Telegram reports {size:,} members/subscribers."
 
 
 @dp.update.outer_middleware()
@@ -114,27 +136,30 @@ def _submitted_text(msg) -> str:
     return (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
 
 
+@dp.message(Command("connectbot"))
+async def connect_bot_cmd(msg: types.Message):
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await msg.answer("Usage: /connectbot <token from BotFather>")
+        return
+    try:
+        identity = await telegram_verification.connect_bot(msg.from_user.id, parts[1].strip())
+    except Exception as exc:
+        await msg.answer(f"❌ Bot connection failed: {str(exc)}")
+        return
+    await msg.answer(f"✅ Connected @{identity.get('username') or 'your bot'}. Add it as an administrator, then register a destination.")
+
+
 @dp.message(Command("start"))
 async def start(msg: types.Message):
     parts = (msg.text or "").split()
-    if len(parts) >= 3:
+    if len(parts) >= 2:
         username = parts[1] if parts[1].startswith("@") else "@" + parts[1]
         try:
-            size = int(parts[2].replace(",", "").replace("_", ""))
-        except ValueError:
-            # `int()` on a typo used to raise straight out of the handler.
-            await msg.answer("Usage: /start @yourchannel <subscriber_count>\n"
-                             "e.g.  /start @MyChan 1200")
-            return
-        if size < 0 or size > 100_000_000:
-            await msg.answer("That subscriber count isn't plausible.")
-            return
-        m = ledger.register(username, size, is_partner=True)
-        channels.add(_uid(msg), username, username, "channel",
-                     ["General"], size=size, bot_added=False)
-        ledger.set_user_id(username, _uid(msg))
-        await msg.answer(f"Partner {username} registered ({m['tier']}, {size} subs).",
-                         reply_markup=ui.main_menu(roles.role(_uid(msg))))
+            text = await _register_from_telegram(msg, username)
+        except CredentialError:
+            text = "❌ Connect your own Telegram bot first with /connectbot <token from BotFather>."
+        await msg.answer(text, reply_markup=ui.main_menu(roles.role(_uid(msg))))
         return
     role = roles.role(_uid(msg))
     head = ("Partnership bot. Set your terms with /contract (what you ACCEPT & RECEIVE). "
@@ -229,7 +254,7 @@ async def menu_nav(cb: types.CallbackQuery):
         label = "GROUP" if kind == "group" else "CHANNEL"
         await cb.message.edit_text(
             f"➕ <b>ADD {label}</b>\n\nSend the {kind}'s @username or public link.\n"
-            "Then send its current member/subscriber count.", parse_mode="HTML",
+            "Telegram will retrieve its current member count automatically.", parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")],
                 [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:channels")]]))
@@ -502,26 +527,13 @@ async def destination_capture(msg: types.Message):
             raw = "@" + raw
         if len(raw) < 2 or " " in raw or raw == "@":
             await msg.answer("Please send a valid @username or public Telegram link."); return
-        _session_set(uid, destination_phase="size", destination_name=raw)
-        await msg.answer(f"👥 Now send the current member/subscriber count for <b>{raw}</b>.",
-                         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                             [InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")]]))
-        return
-    if sess.get("destination_phase") == "size":
+        _session_clear(uid)
         try:
-            size = int(raw.replace(",", "").replace("_", ""))
-        except ValueError:
-            await msg.answer("Send numbers only, for example: 1200"); return
-        if size < 0 or size > 100_000_000:
-            await msg.answer("That member/subscriber count is not plausible."); return
-        name = sess.get("destination_name"); kind = sess.get("destination_kind", "channel")
-        m = ledger.register(name, size, is_partner=True)
-        channels.add(uid, name, name, kind, ["General"], size=size, bot_added=False)
-        ledger.set_user_id(name, uid); _session_clear(uid)
-        await msg.answer(f"✅ <b>DESTINATION REGISTERED</b> — {name}\n\n"
-                         f"👥 Audience: {size:,}\n📈 Band: {perf.score(name)['band']}\n"
-                         "⚠️ Add the bot for accurate delivery and statistics.",
-                         parse_mode="HTML", reply_markup=ui.main_menu(roles.role(uid)))
+            text = await _register_from_telegram(msg, raw,
+                                                  kind=sess.get("destination_kind", "channel"))
+        except CredentialError:
+            text = "❌ Connect your own Telegram bot first with /connectbot, then try again."
+        await msg.answer(text, parse_mode="HTML", reply_markup=ui.main_menu(roles.role(uid)))
         return
 
 

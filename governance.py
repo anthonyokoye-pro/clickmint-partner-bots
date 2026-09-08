@@ -64,19 +64,16 @@ def daily_post_cap(size: int, band: str, status: str = "ACTIVE",
     Rules:
       • owner is UNLIMITED (returns a large sentinel, -1 = unlimited).
       • non-active channels (RESTRICTED / REMOVED) get 0.
-      • unconnected destinations receive exactly 3 starter slots.
-      • connected channels use size + performance and get a hard floor of 1, so a good/new performer is
-        never zeroed out — but it can never spam (cap stays proportional to size
-        and how well the channel actually performs).
+      • unverified destinations receive exactly 0 slots (fail closed).
+      • verified channels use size + performance and get a hard floor of 1.
     """
-    if is_owner:
-        return -1                       # unlimited
     if status in ("RESTRICTED", "REMOVED"):
         return 0
-    # Unconnected destinations receive a safe fixed starter allowance. Once the
-    # bot is connected and can process real metrics, band/tier limits apply.
+    # Participation is fail-closed for every account, including the owner.
     if not connected:
-        return 3
+        return 0
+    if is_owner:
+        return -1                       # unlimited after verification
     base = base_cap_for_size(size)
     n = int(base * CAP_BAND_MULT.get(band, 0.5))
     return max(1, n)

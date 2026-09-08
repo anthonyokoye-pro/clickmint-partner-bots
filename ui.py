@@ -54,7 +54,7 @@ def main_menu(role: str, include_partnership: bool = True,
                        InlineKeyboardButton(text="📜 My contract", callback_data="menu:contract")]))
     if role in ("owner", "admin"):
         kb.append(row([InlineKeyboardButton(text="📁 Audit / Reports", callback_data="menu:audit")]))
-    kb.append(row([InlineKeyboardButton(text="🏆 Rank / leaderboard", callback_data="menu:rank")]))
+    kb.append(row([InlineKeyboardButton(text="🏆 Leaderboard", callback_data="menu:rank")]))
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -81,7 +81,7 @@ def role_menu(role: str, scope: str | None = None,
         row([InlineKeyboardButton(text="🚩 Pending reports", callback_data="panel:reports")]),
         row([InlineKeyboardButton(text="🧾 Review queue", callback_data="panel:review"),
              InlineKeyboardButton(text="📈 Performance", callback_data="panel:performance")]),
-        row([InlineKeyboardButton(text="🏆 Rank", callback_data="panel:rank")]),
+        row([InlineKeyboardButton(text="🏆 Leaderboard", callback_data="panel:rank")]),
         row([InlineKeyboardButton(text="⚡ Direct delivery", callback_data="panel:direct"),
              InlineKeyboardButton(text="⏰ Scheduled", callback_data="panel:scheduled")]),
     ]
