@@ -1287,6 +1287,36 @@ async def stats_cmd(msg: types.Message):
         await msg.answer("⚠️ Telegram did not return a current member count. No statistic was invented.")
 
 
+@dp.callback_query(lambda c: c.data == "stats:all")
+async def stats_all_callback(cb: types.CallbackQuery):
+    rows = channels.mine(cb.from_user.id)
+    if not rows:
+        await cb.answer("Register a destination first.", show_alert=True)
+        return
+    lines = ["📊 <b>TELEGRAM STATISTICS</b>", ""]
+    for row in rows:
+        try:
+            result = await telegram_verification.verify(cb.from_user.id, row.get("chat_id") or row.get("username"))
+            if result.member_count is None:
+                lines.append(f"⚠️ {escape(str(row.get('username')))}: member count unavailable")
+                continue
+            channels.update(cb.from_user.id, row["chat_id"], size=result.member_count,
+                            telegram_member_count=result.member_count,
+                            telegram_member_count_source="telegram_api",
+                            telegram_member_count_checked_at=result.checked_at)
+            lines.append(f"✅ {escape(str(row.get('username')))}: <b>{result.member_count:,}</b> members · Telegram API")
+        except CredentialError:
+            lines.append("❌ Connect your own bot first with /connectbot.")
+            break
+        except Exception:
+            lines.append(f"⚠️ {escape(str(row.get('username')))}: Telegram refresh failed")
+    await cb.message.edit_text("\n".join(lines), parse_mode="HTML",
+                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                   [InlineKeyboardButton(text="🔄 Refresh", callback_data="stats:all")],
+                                   [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")]]))
+    await cb.answer()
+
+
 @dp.message(Command("scan"))
 async def scan_cmd(msg: types.Message):
     """Refresh what the Bot API can actually verify for the user's destinations."""
@@ -1298,6 +1328,11 @@ async def scan_cmd(msg: types.Message):
     for row in rows:
         try:
             result = await telegram_verification.verify(msg.from_user.id, row.get("chat_id") or row.get("username"))
+            lines.append(f"🔍 Verifying {row['username']}")
+            lines.append("✅ Resolving Telegram destination")
+            lines.append(f"{'✅' if result.member_status not in {'left', 'kicked', 'unknown'} else '❌'} Checking bot membership")
+            lines.append(f"{'✅' if result.member_status in {'administrator', 'creator'} else '❌'} Checking administrator status")
+            lines.append(f"{'✅' if result.eligible else '❌'} Checking required permissions")
             if not result.eligible:
                 previous = row.get("status", "ACTIVE")
                 channels.update(msg.from_user.id, row["chat_id"], bot_added=False,
@@ -1307,6 +1342,9 @@ async def scan_cmd(msg: types.Message):
                     _record_channel_state_change(row, previous, result.state, "; ".join(result.reasons))
                 lines.append(f"❌ {row['username']}: {'; '.join(result.reasons)}")
                 continue
+            lines.append("✅ Checking destination accessibility")
+            lines.append("✅ Retrieving member count" if result.member_count is not None else "⚠️ Member count unavailable")
+            lines.append("✅ Checking eligibility")
             previous = row.get("status", "ACTIVE")
             count = result.member_count or 0
             stats.record(row["chat_id"], subscribers=count)
