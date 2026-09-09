@@ -148,7 +148,7 @@ fi
 # ---------------------------------------------------------------- deps
 rule
 say "${B}Installing what the bots need${N} ${D}(aiogram — this can take a minute)${N}"
-if python3 -c "import aiogram" >/dev/null 2>&1; then
+if python3 -c "import aiogram, cryptography" >/dev/null 2>&1; then
   ok "Already installed."
 else
   if python3 -m pip install -q -r requirements.txt 2>/dev/null; then

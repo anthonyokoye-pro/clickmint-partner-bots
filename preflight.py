@@ -129,8 +129,10 @@ async def check_live() -> None:
     print("\n\033[1m6. Telegram\033[0m")
     try:
         from aiogram import Bot
-    except ImportError:
-        bad("aiogram is not installed", "pip install -r requirements.txt")
+        import cryptography  # noqa: F401
+    except ImportError as exc:
+        bad(f"required dependency is not installed: {exc.name or exc}",
+            "pip install -r requirements.txt")
         return
 
     for name, tok, script in BOTS:
