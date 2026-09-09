@@ -82,3 +82,11 @@ appeal decisions are delivered to the member via the outbox.
 **Decision:** Keep AI and human verification out of the core transaction path. Add provider-neutral interfaces and structured risk/audit data first. Use progressive, risk-based challenges only for sensitive or suspicious actions. Do not add vector databases, autonomous production changes, or a CAPTCHA on every screen at the 1,000–10,000 target.
 
 **Reason:** The current bottlenecks are reliability, enforcement integration, campaign lifecycle, and dependency-complete testing—not model intelligence. A provider-neutral boundary preserves replacement freedom and zero-budget operation.
+
+## 2026-09-09 — Centralized destination state machine
+
+**Finding:** Both bots wrote `verified_state=` in ~20 call sites with inconsistent status derivation. Reward `/disconnectbot` left destinations VERIFIED with no credential; the reconcile loop probed every destination of every member every 15 s; all Telegram failures collapsed into DEGRADED with a raw error string.
+
+**Decision:** Single `DestinationStateMachine` (`destination_state.py`) with an explicit legal-edge table, derived `status`, mandatory reason+source, and a per-row history. Structured `classify_telegram_error` chooses the target state (revoked / inaccessible / disconnected / degraded) and whether to back off. Background re-verification is schedule-driven per state with a bounded batch and pauses in safe mode. Owners get inline Re-verify/Details/Remove controls in `/mychannels`.
+
+**Not done here:** live Telegram integration tests — they require real bot tokens and a test channel, which this environment does not have.

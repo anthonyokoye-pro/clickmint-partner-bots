@@ -123,6 +123,9 @@ class VerificationResult:
     permissions: dict | None = None
     # Each key corresponds to a real Bot API operation or policy evaluation.
     checks: dict | None = None
+    # Structured failure classification (destination_state.TelegramErrorKind).
+    error_kind: str | None = None
+    transient: bool = False
 
     def as_dict(self):
         return asdict(self)
@@ -215,17 +218,24 @@ class TelegramVerificationService:
                                      chat_data.get("title", ""), chat_data.get("username"),
                                      status, count, checked, tuple(reasons), permissions, checks)
         except Exception as exc:
-            text = str(exc).lower()
-            if any(x in text for x in ("unauthorized", "invalid token", "token is invalid")):
+            # One classifier for the whole codebase (see destination_state.py).
+            from destination_state import classify_telegram_error, TelegramErrorKind
+            info = classify_telegram_error(exc)
+            if info.kind == TelegramErrorKind.TOKEN_REVOKED:
                 return VerificationResult("REVOKED", False, str(chat_ref), checked_at=checked,
                                          reasons=("Telegram rejected this bot token; reconnect the bot with /connectbot.",),
-                                         checks=_failed_checks(destination="unavailable"))
-            state = "INACCESSIBLE" if any(x in text for x in ("not found", "chat not found", "forbidden")) else "DEGRADED"
-            reason = ("Telegram could not access this destination; add the bot as an administrator and try again."
-                      if state == "INACCESSIBLE" else
-                      "Telegram is temporarily unavailable; retry verification.")
+                                         checks=_failed_checks(destination="unavailable"), error_kind=info.kind.value)
+            state = info.verification_state.value if info.verification_state else "DEGRADED"
+            reason = {
+                "INACCESSIBLE": "Telegram could not access this destination; add the bot as an administrator and try again.",
+                "DISCONNECTED": "Your bot was removed from this destination; add it back as an administrator.",
+                "DEGRADED": ("Your bot lacks the required administrator rights here."
+                             if info.kind == TelegramErrorKind.NOT_ENOUGH_RIGHTS else
+                             "Telegram is temporarily unavailable; retry verification."),
+            }.get(state, "Telegram is temporarily unavailable; retry verification.")
             return VerificationResult(state, False, str(chat_ref), checked_at=checked,
-                                     reasons=(reason,), checks=_failed_checks())
+                                     reasons=(reason,), checks=_failed_checks(), error_kind=info.kind.value,
+                                     transient=info.retryable)
         finally:
             session = getattr(bot, "session", None); close = getattr(session, "close", None)
             if close:

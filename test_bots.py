@@ -25,6 +25,7 @@ import os
 import sys
 import tempfile
 import traceback
+import time
 
 # --- isolate the stores + a known owner BEFORE the bot modules are imported ---
 _TMP = tempfile.mkdtemp(prefix="clickmint-tests-")
@@ -367,6 +368,64 @@ def test_chain_agree_credits_the_sharer_not_the_sender():
     print("OK the credit goes to the channel that shares, not the one that posts")
 
 
+def test_destination_inline_controls_and_background_reverify():
+    """Step 4/5: /mychannels renders per-destination controls; Re-verify runs a
+    live check through the state machine; the background worker only touches
+    destinations that are due and notifies the owner on a real status change."""
+    import destination_state
+    s = _fresh_bot(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    reward_bot.channels.update(1001, "@alice", last_verified_at=int(time.time()) - 7 * 3600)
+    s.reset()
+    errs = run(feed(reward_bot, make_message("/mychannels", uid=1001, username="alice")))
+    assert_no_errors(errs, "/mychannels")
+    assert "Re-verify" in s.texts()
+    sent = [d for d in s.sent() if d.get("reply_markup")]
+    assert sent, "no inline controls rendered"
+    # Re-verify with a stubbed Telegram: the bot lost admin rights.
+    async def degraded_verify(uid, ref):
+        return destination_state and __import__('telegram_verification').VerificationResult(
+            state="DEGRADED", eligible=False, chat_id="-100123", chat_type="channel",
+            username="alice", member_status="member", member_count=2500, checked_at=int(time.time()),
+            reasons=("bot is not an administrator",),
+            checks={"destination": "passed", "bot_membership": "passed",
+                    "administrator": "failed", "permissions": "failed"},
+            error_kind="not_enough_rights")
+    original = reward_bot.telegram_verification.verify
+    reward_bot.telegram_verification.verify = degraded_verify
+    try:
+        s.reset()
+        errs = run(feed(reward_bot, make_callback("dest:verify:0", 1001, "alice")))
+        assert_no_errors(errs, "re-verify tap")
+        row = reward_bot.channels.get("@alice")
+        assert row["verified_state"] == "DEGRADED" and row["status"] == "DEGRADED", row
+        assert row["state_history"][-1]["source"] == "scan"
+        # Background worker: DEGRADED rechecks every 30 min → due after 31 min.
+        async def healthy_verify(uid, ref):
+            r = await degraded_verify(uid, ref)
+            return r.__class__(**{**r.__dict__, "eligible": True, "state": "VERIFIED",
+                                  "member_status": "administrator", "reasons": (), "error_kind": None,
+                                  "checks": {k: "passed" for k in r.checks}})
+        reward_bot.telegram_verification.verify = healthy_verify
+        s.reset()
+        assert run(reward_bot._background_reverify(now=int(time.time()) + 60)) == [], "not due yet"
+        notes = run(reward_bot._background_reverify(now=int(time.time()) + 31 * 60))
+        assert notes and "DEGRADED → ACTIVE" in notes[0], notes
+        row = reward_bot.channels.get("@alice")
+        assert row["status"] == "ACTIVE" and row["state_history"][-1]["source"] == "background"
+        assert "access changed" in s.texts(), "owner must be notified of the change"
+        # Healthy destination is not re-probed again until its 6 h interval elapses.
+        assert run(reward_bot._background_reverify(now=int(time.time()) + 32 * 60)) == []
+    finally:
+        reward_bot.telegram_verification.verify = original
+    # Remove via inline control goes through the state machine and drops the row.
+    s.reset()
+    errs = run(feed(reward_bot, make_callback("dest:remove:0", 1001, "alice")))
+    assert_no_errors(errs, "remove tap")
+    assert reward_bot.channels.get("@alice") is None
+    print("OK inline re-verify + scheduled background re-verification")
+
+
 def test_report_is_filed_pending_for_a_human():
     s = _fresh_bot(reward_bot)
     _register(reward_bot, "alice", 1001, 2500)
@@ -494,6 +553,37 @@ def test_panels_are_closed_to_regular_users():
 # ---------------------------------------------------------------------------
 # 3) Partnership bot
 # ---------------------------------------------------------------------------
+def test_partnership_inline_controls_and_background_reverify():
+    """The partnership store gets the same per-destination controls and worker."""
+    import telegram_verification as tv
+    s = _fresh_bot(partnership_bot)
+    _register(partnership_bot, "dave", 2001, 3000)
+    s.reset()
+    errs = run(feed(partnership_bot, make_message("/mychannels", uid=2001, username="dave")))
+    assert_no_errors(errs, "partnership /mychannels")
+    assert "Re-verify" in s.texts()
+    async def kicked(uid, ref):
+        return tv.VerificationResult(state="DISCONNECTED", eligible=False, chat_id="-100777", chat_type="channel",
+                                     username="dave", member_status="kicked", member_count=3000,
+                                     checked_at=int(time.time()), reasons=("bot was kicked",),
+                                     checks={"destination": "passed", "bot_membership": "failed"},
+                                     error_kind="bot_kicked")
+    original = partnership_bot.telegram_verification.verify
+    partnership_bot.telegram_verification.verify = kicked
+    try:
+        errs = run(feed(partnership_bot, make_callback("dest:verify:0", 2001, "dave")))
+        assert_no_errors(errs, "partnership re-verify tap")
+        row = partnership_bot.channels.get("@dave")
+        assert row["status"] == "DISCONNECTED", row
+        # DISCONNECTED rechecks every 6 h; the worker leaves it alone before then.
+        assert run(partnership_bot._background_reverify(now=int(time.time()) + 3600)) == []
+        assert run(partnership_bot._background_reverify(now=int(time.time()) + 7 * 3600)) == [], "still kicked → no change, no spam"
+        assert partnership_bot.channels.get("@dave")["state_history"][-1]["source"] == "scan", "unchanged recheck must not append history"
+    finally:
+        partnership_bot.telegram_verification.verify = original
+    print("OK partnership bot: inline re-verify + scheduled worker")
+
+
 def test_partnership_start_and_contract():
     s = _fresh_bot(partnership_bot)
     errs = run(feed(partnership_bot, make_message("/start @PartnerChan 3000", uid=2001,
@@ -919,6 +1009,8 @@ ALL_TESTS = [
     test_captioned_scam_post_is_still_gated,
     test_borderline_post_goes_to_human_review,
     test_chain_agree_credits_the_sharer_not_the_sender,
+    test_destination_inline_controls_and_background_reverify,
+    test_partnership_inline_controls_and_background_reverify,
     test_report_is_filed_pending_for_a_human,
     test_owner_bypasses_credits_caps_and_funnel,
     test_non_owner_cannot_route_to_all,
