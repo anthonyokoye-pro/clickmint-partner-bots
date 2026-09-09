@@ -183,7 +183,9 @@ async def show_caps(cb):
                              connected=connected)
         cap_txt = "unlimited" if cap == -1 else str(cap)
         verification = row.get("verified_state", "REGISTERED") if row else "REGISTERED"
-        lines.append(f"{username:<22} performance tier {s['band']}  {verification}  cap={cap_txt}  ({m.get('size',0)} members)")
+        reason = ("; ".join(row.get("verification_reasons") or []) if row else "")
+        detail = f" — {reason[:100]}" if reason else ""
+        lines.append(f"{username:<22} performance tier {s['band']}  {verification}  cap={cap_txt}  ({m.get('size',0)} members){detail}")
     await _safe_edit(cb, "\n".join(lines[:50]), _kb([[_back("dash:back")]]))
 
 
