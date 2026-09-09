@@ -128,6 +128,18 @@ class VerificationResult:
         return asdict(self)
 
 
+def _failed_checks(*, destination: str = "failed", eligibility: str = "failed") -> dict:
+    return {
+        "destination": destination,
+        "bot_membership": "unavailable",
+        "administrator": "unavailable",
+        "permissions": "unavailable",
+        "accessibility": "failed" if destination == "failed" else "unavailable",
+        "member_count": "unavailable",
+        "eligibility": eligibility,
+    }
+
+
 class TelegramVerificationService:
     def __init__(self, credential_store: BotCredentialStore, *, bot_factory=None):
         self.credentials = credential_store
@@ -203,13 +215,14 @@ class TelegramVerificationService:
             text = str(exc).lower()
             if any(x in text for x in ("unauthorized", "invalid token", "token is invalid")):
                 return VerificationResult("REVOKED", False, str(chat_ref), checked_at=checked,
-                                         reasons=("Telegram rejected this bot token; reconnect the bot with /connectbot.",))
+                                         reasons=("Telegram rejected this bot token; reconnect the bot with /connectbot.",),
+                                         checks=_failed_checks(destination="unavailable"))
             state = "INACCESSIBLE" if any(x in text for x in ("not found", "chat not found", "forbidden")) else "DEGRADED"
             reason = ("Telegram could not access this destination; add the bot as an administrator and try again."
                       if state == "INACCESSIBLE" else
                       "Telegram is temporarily unavailable; retry verification.")
             return VerificationResult(state, False, str(chat_ref), checked_at=checked,
-                                     reasons=(reason,))
+                                     reasons=(reason,), checks=_failed_checks())
         finally:
             session = getattr(bot, "session", None); close = getattr(session, "close", None)
             if close:

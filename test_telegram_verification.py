@@ -113,6 +113,8 @@ def test_revoked_bot_token_requires_reconnect():
     result = __import__('asyncio').run(TelegramVerificationService(c, bot_factory=FakeRevoked).verify(10, "@example"))
     assert result.state == "REVOKED"
     assert "reconnect" in result.reasons[0]
+    assert result.checks["destination"] == "unavailable"
+    assert result.checks["bot_membership"] == "unavailable"
 
 
 def test_verification_retrieves_telegram_count():
