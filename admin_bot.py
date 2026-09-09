@@ -27,6 +27,7 @@ from verification_store import VerificationStore
 from core import CreditLedger, PerformanceEngine, ReportRegistry
 from mint_ledger import TransactionalMintLedger
 from governance import ReviewQueue, RoleRegistry, daily_post_cap
+from platform_store import SharedKV
 from features import category_counts
 from channel_registry import ChannelRegistry
 from enforcement import EnforcementStore, EnforcementError
@@ -46,6 +47,11 @@ def load_stores():
     # Destinations/credentials moved to the shared SQLite verification DB; wrap
     # the reward store so its managed_channels reads hit the live table.
     return VerificationStore(config.VERIFICATION_DB_PATH, legacy=rstore), pstore
+
+
+def _roles_users() -> dict:
+    """Roles live in the shared platform DB (one table for every bot)."""
+    return SharedKV(config.PLATFORM_DB_PATH).get("roles_users", {}) or {}
 
 
 enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
@@ -114,11 +120,8 @@ def _dashboard_text():
     category_summary = category_counts(category_rows)
     category_text = ", ".join(f"{k}: {v}" for k, v in sorted(category_summary.items())) or "none"
     # admin logins across both stores
-    admins = {}
-    for st in (rstore, pstore):
-        for uid, u in (st.get("roles_users", {}) or {}).items():
-            if u.get("role") == "admin" and u.get("active") is not False:
-                admins[uid] = u
+    admins = {uid: u for uid, u in _roles_users().items()
+              if u.get("role") == "admin" and u.get("active") is not False}
     lines = [
         "🛠 CLICKMINT ADMIN DASHBOARD",
         f"  • Registered channels/groups: {ledger_members}",
@@ -309,11 +312,7 @@ async def show_contracts(cb):
 # --- admin logins (generate invite codes by button) ---
 async def show_admins(cb):
     rstore, pstore = load_stores()
-    all_admins = {}
-    for st in (rstore, pstore):
-        for uid, u in (st.get("roles_users", {}) or {}).items():
-            if u.get("role") == "admin":
-                all_admins[uid] = u
+    all_admins = {uid: u for uid, u in _roles_users().items() if u.get("role") == "admin"}
     lines = ["👤 ADMIN LOGINS", "",
              "How it works: an admin must CONTACT the owner first. Then tap Generate a "
              "one-time code below and send it to them. They redeem it in the network bot "
@@ -343,20 +342,14 @@ async def gen_invite(cb: types.CallbackQuery):
     if scopes is None:
         await cb.answer("Unknown scope.", show_alert=True)
         return
-    # A 'reward' code goes into the reward store's invite list; 'partnership' into the
-    # partner store; 'both' into both — so /adminlogin works in whichever bot they use.
-    created = []
-    rstore, pstore = load_stores()
-    gen_r = RoleRegistry(rstore, owner_user_id=OWNER_USER_ID)
-    gen_p = RoleRegistry(pstore, owner_user_id=OWNER_USER_ID)
-    if "reward" in scopes:
-        created.append(("reward", gen_r.create_invite(["reward"], created_by=int(OWNER_USER_ID))))
-    if "partnership" in scopes:
-        created.append(("partnership", gen_p.create_invite(["partnership"], created_by=int(OWNER_USER_ID))))
+    # Roles are shared across bots (platform DB), so ONE code carries the whole
+    # scope list and /adminlogin works in whichever bot the admin uses.
+    gen = RoleRegistry(SharedKV(config.PLATFORM_DB_PATH), owner_user_id=OWNER_USER_ID)
+    label = " + ".join(scopes)
     if "ads" in scopes:
-        # Ads Manager is a role in the reward store (where the Mini App reads
-        # roles from). It grants NO network moderation power — only ad drafting.
-        created.append(("ads (redeem in the reward bot)", gen_r.create_invite(["ads"], created_by=int(OWNER_USER_ID))))
+        # Ads Manager grants NO network moderation power — only ad drafting.
+        label = "ads manager (drafting only)"
+    created = [(label, gen.create_invite(scopes, created_by=int(OWNER_USER_ID)))]
     lines = ["🔑 One-time admin invite code(s) generated:", ""]
     for sc, code in created:
         lines.append(f"• {sc}:  {code}")

@@ -25,8 +25,9 @@ requires real credentials and is intentionally **not** marked done.
 3. Go-live check did not know about the onboarding URL → added.
 
 ### Known limitations (documented, not hidden)
-- Ledger, audit, roles and sessions still live in per-bot JSON. Only destinations and
-  credentials moved to SQLite. Next migration candidate: `DeliveryLog` (append-heavy).
+- ~~Ledger, audit, roles and sessions still live in per-bot JSON.~~ *Updated later the same day:*
+  audit + roles moved to `platform.sqlite3` (`platform_store.py`); sessions stay JSON by decision;
+  ledger moves via `MINT_LEDGER_MODE=transactional`.
 - `relay.destination_from_registry` infers "platform bot is admin" from
   `telegram_bot_id == platform bot id`. Owners who add the platform bot manually without
   re-verifying will resolve to `unavailable` until they tap **Re-verify**.

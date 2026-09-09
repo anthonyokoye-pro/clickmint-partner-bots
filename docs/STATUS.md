@@ -29,7 +29,8 @@ audit logs, governance, safety, consent, anti-abuse preserved · no auto-ban fro
 | Relay routing: platform / owner_origin / fail-closed; strict forward mock | Implemented | `relay.py`, `test_relay.py` |
 | Direct mode as **destination capability** (owner opt-in ⚡ Auto-post in `/mychannels`, only with a legal route; sender no longer chooses) | Implemented | `relay.auto_post_blocker`, `_auto_post_enabled`, `test_relay.py`, `test_bots.py` |
 | Shared SQLite verification DB (destinations + encrypted credentials), JSON migration | Implemented | `verification_store.py` |
-| Delivery audit log + roles → SQLite | Approved → in progress | decision 2026-09-09 #2 |
+| Delivery audit log + roles → shared SQLite (`PLATFORM_DB_PATH`, one-time JSON migration, one role table for all bots) | Implemented | `platform_store.py`, `test_platform_store.py` |
+| Sessions stay JSON; ledger via `MINT_LEDGER_MODE=transactional`; Postgres | Rejected for now | decision #2 |
 | MINT ledger: transactional SQLite mode | Partial (`MINT_LEDGER_MODE`) | `mint_ledger.py` |
 | Sessions in JSON | Implemented, stays | — |
 | PostgreSQL | **Rejected until measured need** | decision #2 |
@@ -61,5 +62,5 @@ audit logs, governance, safety, consent, anti-abuse preserved · no auto-ban fro
    this file + topic docs are canonical.
 
 ## Test counts (offline, `run_all_tests.py`)
-core 28 · governance 34 · bot wiring 37 · ads 6 · destination state 5 · relay 9 · verification store 4 ·
+core 28 · governance 34 · bot wiring 37 · ads 6 · destination state 5 · relay 9 · verification store 4 · platform store 3 ·
 onboarding 5 · transactional mint 10 · plus admin/enforcement/feature/economics/credibility suites · `simulate.py` clean.

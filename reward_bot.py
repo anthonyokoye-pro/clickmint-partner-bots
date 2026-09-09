@@ -63,6 +63,7 @@ from governance import (SubmissionGate, ReviewQueue, PartnerContractRegistry,
                         RoleRegistry, POST_CATEGORIES, TERMS_TEXT, daily_post_cap)
 import config
 import ui
+from platform_store import DeliveryAudit, SharedKV
 
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = config.REWARD_BOT_TOKEN          # from @BotFather, via env var
@@ -76,7 +77,7 @@ if config.MINT_LEDGER_MODE == "transactional":
 else:
     ledger = CreditLedger(store)
 ledger.owner_user_id = config.OWNER_USER_ID      # owner recognised by numeric id too
-audit = DeliveryLog(store)
+audit = DeliveryAudit(config.PLATFORM_DB_PATH, legacy=store)     # shared SQLite, JSON migrated once
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 sched = Scheduler(store)
@@ -145,7 +146,8 @@ def _audit_counts() -> dict[str, int]:
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
 contracts = PartnerContractRegistry(store)
-roles = RoleRegistry(store, owner_user_id=OWNER_USER_ID)
+platform_kv = SharedKV(config.PLATFORM_DB_PATH, legacy=store)
+roles = RoleRegistry(platform_kv, owner_user_id=OWNER_USER_ID)   # one role table for every bot
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -2693,10 +2695,7 @@ async def chain_delivery(cb: types.CallbackQuery):
         # The credit goes to the channel that SHARES someone else's post — i.e.
         # the target that just agreed. Crediting the sender would let anyone mint
         # credits simply by broadcasting their own posts.
-        offered = next((r for r in reversed(audit.all())
-                        if r.get("sender") == sender
-                        and r.get("target_channel") == target
-                        and r.get("status") == "offered"), None)
+        offered = audit.latest_for(sender=sender, target_channel=target, status="offered")
         if not offered:
             # Backward-compatible completion for offers created by an older
             # process before delivery rows were persisted. New UI offers always
@@ -2729,9 +2728,7 @@ async def chain_delivery(cb: types.CallbackQuery):
         # completed and credited; new offers always take the preservation path above.
         ledger.earn(target)
         perf.mark_posted(target)
-        offered["status"] = "delivered"
-        audit.store[audit.key] = audit.all()
-        audit.store.sync()
+        audit.update(offered["id"], status="delivered")
         bal = ledger.balance(target)["balance"]
         await cb.message.answer("✅ <b>POST SHARED</b>\n\n"
                                 "The original buttons and attribution were preserved.\n"

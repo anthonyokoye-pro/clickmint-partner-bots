@@ -19,6 +19,7 @@ from telegram_verification import BotCredentialStore, TelegramVerificationServic
 from destination_state import DestinationStateMachine
 from enforcement_gate import EnforcementGate
 from onboarding_api import OnboardingAPI
+from platform_store import SharedKV
 from governance import RoleRegistry
 from mint_ledger import TransactionalMintLedger
 from performance_snapshots import PerformanceSnapshotRepository
@@ -37,7 +38,7 @@ class _LedgerFacade:
 
 def build_runtime_app(*, dev: bool = False):
     shared_store = JsonStore(config.REWARD_STORE_PATH)
-    roles = RoleRegistry(shared_store, config.OWNER_USER_ID)
+    roles = RoleRegistry(SharedKV(config.PLATFORM_DB_PATH, legacy=shared_store), config.OWNER_USER_ID)
     # Destinations + credentials live in the SQLite verification DB shared by both bots.
     verification_store = VerificationStore(config.VERIFICATION_DB_PATH, legacy=shared_store)
     channels = ChannelRegistry(verification_store)

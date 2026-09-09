@@ -35,6 +35,7 @@ from governance import (SubmissionGate, ReviewQueue, RoleRegistry, POST_CATEGORI
 import config
 import relay
 import ui
+from platform_store import DeliveryAudit, SharedKV
 
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = config.PARTNER_BOT_TOKEN
@@ -44,7 +45,7 @@ store = JsonStore(config.PARTNER_STORE_PATH)
 ledger = CreditLedger(store)
 ledger.owner_user_id = config.OWNER_USER_ID      # owner recognised by numeric id too
 contract = Contract()
-audit = DeliveryLog(store)
+audit = DeliveryAudit(config.PLATFORM_DB_PATH, legacy=store)     # shared SQLite, JSON migrated once
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 # Destinations + bot credentials live in the SQLite verification DB shared with
@@ -63,7 +64,8 @@ def _is_connected(username: str) -> bool:
 perf.views_provider = stats.provider
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
-roles = RoleRegistry(store, owner_user_id=OWNER_USER_ID)
+platform_kv = SharedKV(config.PLATFORM_DB_PATH, legacy=store)
+roles = RoleRegistry(platform_kv, owner_user_id=OWNER_USER_ID)   # one role table for every bot
 enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
 enforcement_gate = EnforcementGate(enforcement, owner_user_id=config.OWNER_USER_ID)
 

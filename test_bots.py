@@ -116,12 +116,13 @@ def _fresh_bot(module) -> MockSession:
         module.ledger.ledger = {}
         module.ledger.store["ledger"] = {}
     module.store.sync()
-    for attr in ("audit", "reports", "review", "contracts", "sched"):
+    for attr in ("reports", "review", "contracts", "sched"):
         obj = getattr(module, attr, None)
         if obj is not None and hasattr(obj, "key"):
             module.store[obj.key] = []
-    module.store["roles_users"] = {}
-    module.store["roles_invites"] = {}
+    module.audit.clear()                     # shared SQLite audit table
+    module.platform_kv.clear()               # shared SQLite roles
+    module.platform_kv.reload()
     module.store["sessions"] = {}
     module.store.sync()
     return session
@@ -563,11 +564,11 @@ def test_admin_invite_codes_are_owner_only():
     s = _fresh_bot(reward_bot)
     errs = run(feed(reward_bot, make_callback("admin:invite:both", 1001, "alice")))
     assert_no_errors(errs, "non-owner invite attempt")
-    assert not reward_bot.store.get("roles_invites"), "a non-owner generated a code"
+    assert not reward_bot.platform_kv.get("roles_invites"), "a non-owner generated a code"
     s.reset()
     errs = run(feed(reward_bot, make_callback("admin:invite:reward", OWNER_ID, "owner")))
     assert_no_errors(errs, "owner invite")
-    codes = reward_bot.store.get("roles_invites") or {}
+    codes = reward_bot.platform_kv.get("roles_invites") or {}
     assert len(codes) == 1
     code = list(codes)[0]
     # a scoped admin gets exactly that scope, and the code is single-use
