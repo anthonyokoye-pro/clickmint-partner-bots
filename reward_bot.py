@@ -235,6 +235,7 @@ async def _register_from_telegram(msg, destination: str, kind: str = "channel") 
                     telegram_member_count_source="telegram_api",
                     telegram_member_count_checked_at=result.checked_at,
                     telegram_chat_type=result.chat_type,
+                    canonical_chat_id=result.chat_id,
                     telegram_bot_id=bot_credentials.public(owner)["bot_id"],
                     permissions=result.permissions or {})
     ledger.set_user_id(destination, owner)
@@ -1368,6 +1369,7 @@ async def scan_cmd(msg: types.Message):
                             telegram_member_count=count,
                             telegram_member_count_source="telegram_api",
                             telegram_member_count_checked_at=result.checked_at,
+                            canonical_chat_id=result.chat_id,
                             permissions=result.permissions or {}, last_verified_at=result.checked_at)
             ledger.register(row["username"], count)
             lines.append(f"✅ {row['username']}: verified; {count:,} members/subscribers (Telegram API)")

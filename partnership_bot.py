@@ -70,6 +70,7 @@ async def _register_from_telegram(msg, destination: str, kind: str = "channel") 
                     verified_state="VERIFIED", telegram_member_count=size,
                     telegram_member_count_source="telegram_api",
                     telegram_member_count_checked_at=result.checked_at,
+                    canonical_chat_id=result.chat_id,
                     permissions=result.permissions or {})
     ledger.register(destination, size, is_partner=True); ledger.set_user_id(destination, owner)
     return f"✅ Verified {destination}; Telegram reports {size:,} members/subscribers."
@@ -253,7 +254,8 @@ async def stats_all_callback(cb: types.CallbackQuery):
                             size=result.member_count,
                             telegram_member_count=result.member_count,
                             telegram_member_count_source="telegram_api",
-                            telegram_member_count_checked_at=result.checked_at)
+                            telegram_member_count_checked_at=result.checked_at,
+                            canonical_chat_id=result.chat_id)
             lines.append(f"✅ {row.get('username')}: <b>{result.member_count:,}</b> members · Telegram API")
         except CredentialError:
             lines.append("❌ Connect your own bot first with /connectbot.")
