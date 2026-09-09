@@ -17,7 +17,7 @@ This document is a status register, not a roadmap. A requirement is marked **imp
 
 ## Repository synchronization state
 
-The current implementation is on branch `arena/01a0713e-clickmint-partner-bots` at commit `8e4954b`, rebased onto upstream commit `31b8faf`. The working tree was clean after the Phase 7 hardening pass. The upstream entity, advertising, onboarding, relay, shared SQLite audit/roles, platform-store, and scheduled-delivery verification work is retained.
+The current implementation is on branch `arena/01a0713e-clickmint-partner-bots` at commit `4f00837`, rebased onto upstream commit `31b8faf`. The working tree was clean after the Phase 7 hardening pass. The upstream entity, advertising, onboarding, relay, shared SQLite audit/roles, platform-store, and scheduled-delivery verification work is retained.
 
 ## 2026-09-10 implementation pass
 
