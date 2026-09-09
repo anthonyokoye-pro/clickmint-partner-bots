@@ -163,6 +163,24 @@ async def connect_bot_cmd(msg: types.Message):
     await msg.answer(f"✅ Connected @{identity.get('username') or 'your bot'}. Add it as an administrator, then register a destination.")
 
 
+@dp.message(Command("botstatus"))
+async def bot_status_cmd(msg: types.Message):
+    identity = bot_credentials.public(msg.from_user.id)
+    if not identity:
+        await msg.answer("❌ No Telegram bot connected. Use /connectbot in this private chat.")
+        return
+    destinations = channels.mine(msg.from_user.id)
+    verified = sum(1 for row in destinations if row.get("verified_state") == "VERIFIED"
+                   and row.get("bot_added") is True)
+    await msg.answer(
+        f"🤖 <b>CONNECTED TELEGRAM BOT</b>\n\n"
+        f"Username: @{identity.get('username') or 'unknown'}\n"
+        f"Bot ID: <code>{identity.get('bot_id')}</code>\n"
+        f"Verified destinations: {verified}/{len(destinations)}\n\n"
+        "Use /scan to refresh administrator permissions and Telegram statistics.",
+        parse_mode="HTML")
+
+
 @dp.message(Command("disconnectbot"))
 async def disconnect_bot_cmd(msg: types.Message):
     bot_credentials.remove(msg.from_user.id)
