@@ -517,6 +517,9 @@ async def on_partner_forward(msg: types.Message):
             continue
         if om.get("status") in ("RESTRICTED", "REMOVED"):
             continue
+        # Partnership offers cannot target an unverified destination.
+        if not _is_connected(other):
+            continue
         if contract.allows_receive(om, cat):
             offered.append(other)
     if not offered:
