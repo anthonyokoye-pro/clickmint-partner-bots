@@ -65,6 +65,7 @@ import config
 import tg_entities
 import ui
 from platform_store import DeliveryAudit, SharedKV
+from delivery_worker import WorkerStore
 
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = config.REWARD_BOT_TOKEN          # from @BotFather, via env var
@@ -101,6 +102,7 @@ reroutes = ReroutePlanner(store)
 marketplace = TaskMarketplace(config.TASK_DB_PATH)
 credibility_snapshots = PerformanceSnapshotRepository(config.CREDIBILITY_DB_PATH)
 broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
+worker_store = WorkerStore(config.WORKER_DB_PATH)
 # Shared compliance boundary: every participation path asks this ONE gate.
 # It only reads states a human recorded; it never decides guilt.
 enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
@@ -3007,8 +3009,15 @@ async def _process_reward_broadcasts():
         return
     for delivery in broadcasts.claim(limit=20, bot_scope="reward"):
         try:
+            bucket = f"reward:{delivery['recipient_id']}"
+            if not worker_store.acquire(bucket, rate_per_second=config.WORKER_RATE_PER_SECOND, burst=config.WORKER_RATE_BURST):
+                broadcasts.fail(delivery["delivery_id"], "central delivery rate limit", retry_seconds=1)
+                worker_store.record("reward", "rate_limited")
+                continue
+            started = time.perf_counter()
             if not enforcement_gate.check(delivery["recipient_id"], "user", "campaigns"):
                 broadcasts.fail(delivery["delivery_id"], "recipient blocked by enforcement", blocked=True)
+                worker_store.record("reward", "blocked")
                 continue
             campaign = broadcasts.get_campaign(delivery["campaign_id"])
             payload = campaign.get("payload", {}) if campaign else {}
@@ -3025,7 +3034,9 @@ async def _process_reward_broadcasts():
                 # Legacy drafts created before entities were captured.
                 sent = await bot.send_message(int(delivery["recipient_id"]), text)
             broadcasts.complete(delivery["delivery_id"], sent.message_id)
+            worker_store.record("reward", "delivered", (time.perf_counter() - started) * 1000)
         except Exception as exc:
+            worker_store.record("reward", "failed", (time.perf_counter() - started) * 1000 if 'started' in locals() else 0)
             blocked = any(token in str(exc).lower() for token in ("blocked", "chat not found", "deactivated"))
             broadcasts.fail(delivery["delivery_id"], str(exc)[:500], blocked=blocked,
                             retry_seconds=min(3600, 30 * (2 ** min(delivery.get("attempts", 1), 6))))

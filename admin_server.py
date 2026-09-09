@@ -26,6 +26,7 @@ from mint_ledger import TransactionalMintLedger
 from performance_snapshots import PerformanceSnapshotRepository
 from store import JsonStore
 from task_marketplace import TaskMarketplace
+from delivery_worker import WorkerStore
 
 
 class _LedgerFacade:
@@ -48,6 +49,7 @@ def build_runtime_app(*, dev: bool = False):
     broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
     ledger = _LedgerFacade(TransactionalMintLedger(config.MINT_DB_PATH))
     enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
+    worker_store = WorkerStore(config.WORKER_DB_PATH)
     ads = AdCampaignStore(config.ADS_DB_PATH, enabled=config.ADS_ENABLED)
     credentials = BotCredentialStore(verification_store)
     verification = TelegramVerificationService(credentials)
@@ -66,6 +68,7 @@ def build_runtime_app(*, dev: bool = False):
         enforcement=enforcement,
         ads=ads,
         verification=verification,
+        worker=worker_store,
     )
     onboarding = OnboardingAPI(
         # Members open the onboarding page from the REWARD bot, so its token signs initData.

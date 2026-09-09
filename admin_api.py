@@ -24,7 +24,7 @@ def _safe_preview(payload: dict) -> str:
 class AdminReadAPI:
     """Application service independent of HTTP framework or Telegram web server."""
     def __init__(self, *, bot_token, owner_id, roles, channels, marketplace,
-                 snapshots, broadcasts, ledger=None, audience=None, enforcement=None, ads=None, verification=None):
+                 snapshots, broadcasts, ledger=None, audience=None, enforcement=None, ads=None, verification=None, worker=None):
         self.bot_token = bot_token
         self.owner_id = int(owner_id)
         self.roles = roles
@@ -37,6 +37,7 @@ class AdminReadAPI:
         self.enforcement = enforcement
         self.ads = ads
         self.verification = verification
+        self.worker = worker
 
     def authenticate(self, init_data: str):
         identity = validate_init_data(init_data, self.bot_token)
@@ -368,6 +369,12 @@ class AdminReadAPI:
             "interventions": self.snapshots.intervention_history(destination_id, limit=max(1, min(int(limit), 100))),
             "control": self.snapshots.control(destination_id),
         }
+
+    def worker_metrics(self, init_data: str, *, since: int = 0) -> dict:
+        self.authenticate(init_data)
+        if self.worker is None:
+            raise RuntimeError("worker metrics are not configured")
+        return {"scopes": self.worker.summary(since=since)}
 
     def recover_broadcast_deliveries(self, init_data: str, *, older_than_seconds: int = 900) -> dict:
         identity = self.authenticate(init_data)

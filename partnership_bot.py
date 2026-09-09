@@ -36,6 +36,7 @@ import config
 import relay
 import ui
 from platform_store import DeliveryAudit, SharedKV
+from delivery_worker import WorkerStore
 
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = config.PARTNER_BOT_TOKEN
@@ -56,6 +57,7 @@ destination_states = DestinationStateMachine(channels)   # the ONLY writer of ve
 bot_credentials = BotCredentialStore(verification_store)
 telegram_verification = TelegramVerificationService(bot_credentials)
 broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
+worker_store = WorkerStore(config.WORKER_DB_PATH)
 stats = StatsBook(store)
 
 
@@ -838,8 +840,15 @@ async def _process_partnership_broadcasts():
         return
     for delivery in broadcasts.claim(limit=20, bot_scope="partnership"):
         try:
+            bucket = f"partnership:{delivery['recipient_id']}"
+            if not worker_store.acquire(bucket, rate_per_second=config.WORKER_RATE_PER_SECOND, burst=config.WORKER_RATE_BURST):
+                broadcasts.fail(delivery["delivery_id"], "central delivery rate limit", retry_seconds=1)
+                worker_store.record("partnership", "rate_limited")
+                continue
+            started = time.perf_counter()
             if not enforcement_gate.check(delivery["recipient_id"], "user", "campaigns"):
                 broadcasts.fail(delivery["delivery_id"], "recipient blocked by enforcement", blocked=True)
+                worker_store.record("partnership", "blocked")
                 continue
             campaign = broadcasts.get_campaign(delivery["campaign_id"])
             payload = campaign.get("payload", {}) if campaign else {}
@@ -849,7 +858,9 @@ async def _process_partnership_broadcasts():
                 continue
             sent = await bot.send_message(int(delivery["recipient_id"]), text)
             broadcasts.complete(delivery["delivery_id"], sent.message_id)
+            worker_store.record("partnership", "delivered", (time.perf_counter() - started) * 1000)
         except Exception as exc:
+            worker_store.record("partnership", "failed", (time.perf_counter() - started) * 1000 if 'started' in locals() else 0)
             blocked = any(token in str(exc).lower() for token in ("blocked", "chat not found", "deactivated"))
             broadcasts.fail(delivery["delivery_id"], str(exc)[:500], blocked=blocked,
                             retry_seconds=min(3600, 30 * (2 ** min(delivery.get("attempts", 1), 6))))

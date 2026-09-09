@@ -219,6 +219,10 @@ class AdminWSGI:
             if method == "GET" and path == "/api/admin/transport/metrics":
                 self.api.authenticate(init_data)
                 return self._response(start_response, "200 OK", self.metrics(), correlation_id)
+            if method == "GET" and path == "/api/admin/worker/metrics":
+                query = parse_qs(environ.get("QUERY_STRING", ""))
+                payload = self.api.worker_metrics(init_data, since=int(query.get("since", [0])[0]))
+                return self._response(start_response, "200 OK", payload, correlation_id)
             if method == "GET" and path == "/api/admin/audit":
                 query = parse_qs(environ.get("QUERY_STRING", ""))
                 payload = {"events": self.api.audit_events(
