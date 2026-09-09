@@ -38,6 +38,10 @@ by reconnecting the bot.
 
 ## Supported checks
 
+Partnership offer notifications and Reward Bot direct task publication use the
+verified destination owner's bot session. The shared ClickMint bot is not used
+as proof of, or a substitute for, the owner's administrator permissions.
+
 The verification service performs real Telegram API calls for:
 
 - destination resolution with `getChat`
