@@ -149,16 +149,16 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
    🤖 → 555000555
         Distributing to 4 channel(s): ['@alphadrops', '@bravoai', '@charliedefi', '@deltaguides'].
    🤖 → @alphadrops
-        @clickminthq has a fwd post (General) for your band. Agree to forward, skip, or report.
+        @clickminthq has a fwd post (General) for your performance tier. Agree to forward, skip, or report.
         [ ✅ Agree (forward it) ] [ ❌ Disagree (skip) ] [ 🚩 Report as scam/fraud ]
    🤖 → @bravoai
-        @clickminthq has a fwd post (General) for your band. Agree to forward, skip, or report.
+        @clickminthq has a fwd post (General) for your performance tier. Agree to forward, skip, or report.
         [ ✅ Agree (forward it) ] [ ❌ Disagree (skip) ] [ 🚩 Report as scam/fraud ]
    🤖 → @charliedefi
-        @clickminthq has a fwd post (General) for your band. Agree to forward, skip, or report.
+        @clickminthq has a fwd post (General) for your performance tier. Agree to forward, skip, or report.
         [ ✅ Agree (forward it) ] [ ❌ Disagree (skip) ] [ 🚩 Report as scam/fraud ]
    🤖 → @deltaguides
-        @clickminthq has a fwd post (General) for your band. Agree to forward, skip, or report.
+        @clickminthq has a fwd post (General) for your performance tier. Agree to forward, skip, or report.
         [ ✅ Agree (forward it) ] [ ❌ Disagree (skip) ] [ 🚩 Report as scam/fraud ]
    🤖 toast
         done
@@ -209,10 +209,10 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
    🤖 → 1001
         Distributing to 2 channel(s): ['@bravoai', '@charliedefi'].
    🤖 → @bravoai
-        @alphadrops has a fwd post (Airdrops) for your band. Agree to forward, skip, or report.
+        @alphadrops has a fwd post (Airdrops) for your performance tier. Agree to forward, skip, or report.
         [ ✅ Agree (forward it) ] [ ❌ Disagree (skip) ] [ 🚩 Report as scam/fraud ]
    🤖 → @charliedefi
-        @alphadrops has a fwd post (Airdrops) for your band. Agree to forward, skip, or report.
+        @alphadrops has a fwd post (Airdrops) for your performance tier. Agree to forward, skip, or report.
         [ ✅ Agree (forward it) ] [ ❌ Disagree (skip) ] [ 🚩 Report as scam/fraud ]
    🤖 toast
         done
@@ -402,7 +402,7 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
    🤖 → 1004
         Distributing to 1 channel(s): ['@charliedefi'].
    🤖 → @charliedefi
-        @deltaguides has a fwd post (Guides) for your band. Agree to forward, skip, or report.
+        @deltaguides has a fwd post (Guides) for your performance tier. Agree to forward, skip, or report.
         [ ✅ Agree (forward it) ] [ ❌ Disagree (skip) ] [ 🚩 Report as scam/fraud ]
    🤖 toast
         done
