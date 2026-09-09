@@ -3613,9 +3613,10 @@ async def schedule_direct(msg: types.Message):
         await msg.answer("That time is in the past (times are UTC).")
         return
     destination = channels.get(target)
-    if not destination or not destination.get("bot_added"):
-        await msg.answer("⛔ Scheduling requires the bot to be added to that channel/group "
-                         "so Telegram can publish automatically.")
+    if not destination or not channels.participation_allowed(target):
+        reason = channels.participation_block_reason(target) if destination else "destination is not registered"
+        await msg.answer("⛔ Scheduling is blocked: " + str(reason) +
+                         "\nRun /scan after correcting the Telegram setup.")
         return
     pending = _session(msg.from_user.id).get("pending") or {}
     if not pending.get("from_message_id"):
