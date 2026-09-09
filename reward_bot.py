@@ -252,6 +252,9 @@ async def _register_from_telegram(msg, destination: str, kind: str = "channel") 
 # ---------------------------------------------------------------------------
 @dp.message(Command("connectbot"))
 async def connect_bot_cmd(msg: types.Message):
+    if getattr(msg.chat, "type", "private") != "private":
+        await msg.answer("🔒 For security, connect your bot only in a private chat with ClickMint.")
+        return
     parts = (msg.text or "").split(maxsplit=1)
     if len(parts) != 2:
         await msg.answer("Usage: /connectbot <token from BotFather>\nYour token is encrypted and never shown back.")

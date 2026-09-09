@@ -6,7 +6,7 @@ import os
 import tempfile
 
 from store import JsonStore
-from telegram_verification import BotCredentialStore, TelegramVerificationService
+from telegram_verification import BotCredentialStore, TelegramVerificationService, CredentialError
 
 
 class FakeBot:
@@ -47,6 +47,18 @@ def test_token_is_round_tripped_without_plaintext_record():
     assert c.token(10) == "123:secret-token"
     assert "secret-token" not in str(s.get("telegram_bot_credentials"))
     assert c.public(10)["bot_id"] == 77
+
+
+def test_one_bot_cannot_be_assigned_to_two_owners():
+    os.environ["CLICKMINT_CREDENTIAL_KEY"] = "test-secret"
+    c = BotCredentialStore(store())
+    c.save(10, "123:secret-token", {"id": 77, "username": "owner_bot"})
+    try:
+        c.save(11, "456:other-token", {"id": 77, "username": "owner_bot"})
+    except CredentialError as exc:
+        assert "another" in str(exc)
+    else:
+        raise AssertionError("bot ownership must be exclusive")
 
 
 def test_verification_requires_admin_post_permission():

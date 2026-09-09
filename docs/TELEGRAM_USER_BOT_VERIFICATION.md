@@ -44,6 +44,7 @@ The verification service performs real Telegram API calls for:
 - chat-type-aware permissions
 - member count with `getChatMemberCount`
 
-A statistics failure never fabricates a number. Failure messages identify the
+Both Reward and Partnership bots expose `/scan`, `/stats`, `/disconnectbot`, and
+`📊 Check Stats` where available. A statistics failure never fabricates a number. Failure messages identify the
 problem and tell the owner to add/promote the bot, grant the missing permission,
 or retry when Telegram is temporarily unavailable.

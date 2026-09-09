@@ -137,6 +137,9 @@ def _submitted_text(msg) -> str:
 
 @dp.message(Command("connectbot"))
 async def connect_bot_cmd(msg: types.Message):
+    if getattr(msg.chat, "type", "private") != "private":
+        await msg.answer("🔒 For security, connect your bot only in a private chat with ClickMint.")
+        return
     parts = (msg.text or "").split(maxsplit=1)
     if len(parts) != 2:
         await msg.answer("Usage: /connectbot <token from BotFather>")
@@ -151,6 +154,16 @@ async def connect_bot_cmd(msg: types.Message):
         await msg.answer(f"❌ Bot connection failed: {str(exc)}")
         return
     await msg.answer(f"✅ Connected @{identity.get('username') or 'your bot'}. Add it as an administrator, then register a destination.")
+
+
+@dp.message(Command("disconnectbot"))
+async def disconnect_bot_cmd(msg: types.Message):
+    bot_credentials.remove(msg.from_user.id)
+    for row in channels.mine(msg.from_user.id):
+        channels.update(msg.from_user.id, row.get("chat_id") or row.get("username"),
+                        bot_added=False, status="DISCONNECTED", verified_state="DISCONNECTED",
+                        verification_reasons=["Telegram bot credential removed"])
+    await msg.answer("✅ Your Telegram bot credential and destination access were removed.")
 
 
 @dp.message(Command("start"))
@@ -178,11 +191,80 @@ async def start(msg: types.Message):
 async def mychannels_cmd(msg: types.Message):
     rows = channels.mine(_uid(msg))
     if not rows:
-        await msg.answer("📂 No registered channels/groups. Use /start @name <count>.")
+        await msg.answer("📂 No registered channels/groups. Connect your bot with /connectbot, then use /start @name.")
         return
     await msg.answer("📂 MY CHANNELS / GROUPS\n\n" + "\n".join(
         f"• {r.get('username')} · {r.get('kind')} · band {r.get('band')} · "
         f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}" for r in rows))
+
+
+@dp.message(Command("scan"))
+async def scan_cmd(msg: types.Message):
+    rows = channels.mine(_uid(msg))
+    if not rows:
+        await msg.answer("Register a destination first with /start @name.")
+        return
+    lines = ["🔍 PARTNERSHIP DESTINATION SCAN", ""]
+    for row in rows:
+        try:
+            result = await telegram_verification.verify(_uid(msg), row.get("chat_id") or row.get("username"))
+            if not result.eligible:
+                channels.update(_uid(msg), row.get("chat_id") or row.get("username"),
+                                bot_added=False, status=result.state,
+                                verified_state=result.state,
+                                verification_reasons=list(result.reasons))
+                lines.append(f"❌ {row.get('username')}: {'; '.join(result.reasons)}")
+                continue
+            count = result.member_count or 0
+            channels.update(_uid(msg), row.get("chat_id") or row.get("username"),
+                            bot_added=True, status="ACTIVE", verified_state="VERIFIED",
+                            size=count, telegram_member_count=count,
+                            telegram_member_count_source="telegram_api",
+                            telegram_member_count_checked_at=result.checked_at,
+                            permissions=result.permissions or {}, last_verified_at=result.checked_at)
+            lines.append(f"✅ {row.get('username')}: {count:,} members (Telegram API)")
+        except CredentialError:
+            lines.append("❌ Connect your own bot first with /connectbot.")
+            break
+        except Exception as exc:
+            lines.append(f"⚠️ {row.get('username')}: refresh failed ({type(exc).__name__})")
+    await msg.answer("\n".join(lines))
+
+
+@dp.message(Command("stats"))
+async def stats_cmd(msg: types.Message):
+    await scan_cmd(msg)
+
+
+@dp.callback_query(lambda c: c.data == "stats:all")
+async def stats_all_callback(cb: types.CallbackQuery):
+    rows = channels.mine(cb.from_user.id)
+    if not rows:
+        await cb.answer("Register a destination first.", show_alert=True)
+        return
+    lines = ["📊 <b>TELEGRAM STATISTICS</b>", ""]
+    for row in rows:
+        try:
+            result = await telegram_verification.verify(cb.from_user.id, row.get("chat_id") or row.get("username"))
+            if result.member_count is None:
+                lines.append(f"⚠️ {row.get('username')}: member count unavailable")
+                continue
+            channels.update(cb.from_user.id, row.get("chat_id") or row.get("username"),
+                            size=result.member_count,
+                            telegram_member_count=result.member_count,
+                            telegram_member_count_source="telegram_api",
+                            telegram_member_count_checked_at=result.checked_at)
+            lines.append(f"✅ {row.get('username')}: <b>{result.member_count:,}</b> members · Telegram API")
+        except CredentialError:
+            lines.append("❌ Connect your own bot first with /connectbot.")
+            break
+        except Exception:
+            lines.append(f"⚠️ {row.get('username')}: Telegram refresh failed")
+    await cb.message.edit_text("\n".join(lines), parse_mode="HTML",
+                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                   [InlineKeyboardButton(text="🔄 Refresh", callback_data="stats:all")],
+                                   [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")]]))
+    await cb.answer()
 
 
 @dp.message(Command("adminlogin"))

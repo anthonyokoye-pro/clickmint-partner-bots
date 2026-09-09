@@ -53,8 +53,13 @@ class BotCredentialStore:
         key = _key(); nonce = secrets.token_bytes(16)
         ciphertext = _crypt_bytes(token.encode(), nonce, key)
         mac = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+        items = self.store.get(self.key, {})
+        bot_id = int(bot["id"])
+        for existing_owner, existing in items.items():
+            if str(existing_owner) != str(owner_id) and int(existing.get("bot_id", -1)) == bot_id:
+                raise CredentialError("this Telegram bot is already connected to another ClickMint account")
         record = {
-            "owner_id": int(owner_id), "bot_id": int(bot["id"]),
+            "owner_id": int(owner_id), "bot_id": bot_id,
             "username": bot.get("username"), "name": bot.get("first_name"),
             "nonce": base64.b64encode(nonce).decode(),
             "ciphertext": base64.b64encode(ciphertext).decode(),
