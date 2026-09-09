@@ -329,5 +329,5 @@ class BroadcastQueue:
                 "UPDATE broadcast_recipients SET status='cancelled' WHERE campaign_id=? AND status IN ('pending','processing')",
                 (campaign_id,),
             )
-            conn.execute("UPDATE broadcast_campaigns SET status='cancelled' WHERE campaign_id=?", (campaign_id,))
+            conn.execute("UPDATE broadcast_campaigns SET status='cancelled' WHERE campaign_id=? AND status IN ('draft','queued','running','paused')", (campaign_id,))
             return cur.rowcount

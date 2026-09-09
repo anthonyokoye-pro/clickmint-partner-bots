@@ -53,7 +53,15 @@ def test_invalid_campaign_transitions_are_rejected():
         campaign_id = queue.create_campaign(bot_scope="reward", created_by=1, payload={"text": "hi"})
         assert not queue.pause(campaign_id)
         assert not queue.resume(campaign_id)
-        assert queue.cancel(campaign_id) == 0
+        assert queue.cancel(campaign_id) == 0  # draft cancellation has no deliveries
+        assert queue.get_campaign(campaign_id)["status"] == "cancelled"
+        active = queue.create_campaign(bot_scope="reward", created_by=1, payload={"text": "active"})
+        queue.queue_campaign(active, [10])
+        claimed = queue.claim(limit=1)
+        queue.complete(claimed[0]["delivery_id"], 1)
+        assert queue.get_campaign(active)["status"] == "completed"
+        assert queue.cancel(active) == 0
+        assert queue.get_campaign(active)["status"] == "completed"
 
 
 def test_retry_budget_becomes_terminal_and_stale_workers_are_recovered():
