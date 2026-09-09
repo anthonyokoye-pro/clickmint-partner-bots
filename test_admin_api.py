@@ -118,8 +118,77 @@ def test_reports_appeals_and_owner_only_enforcement():
         directory.cleanup()
 
 
+def test_ads_are_scoped_consent_gated_and_owner_reviewed():
+    from admin_api import AdminAuthorizationError
+    from ad_campaigns import AdCampaignStore, AdPolicyError
+
+    class ScopedRoles:
+        # 9 = network admin (reward), 11 = Ads Manager only
+        def is_admin(self, uid, scope=None):
+            uid = int(uid)
+            if scope is None:
+                return uid in (9, 11)
+            return {9: "reward", 11: "ads"}.get(uid) == scope
+
+    directory = tempfile.TemporaryDirectory(prefix="clickmint-api-")
+    try:
+        root = Path(directory.name)
+        store = JsonStore(str(root / "store.json"))
+        ads = AdCampaignStore(root / "ads.sqlite3", enabled=True)
+        api = AdminReadAPI(bot_token="token", owner_id=8, roles=ScopedRoles(),
+                           channels=ChannelRegistry(store), marketplace=TaskMarketplace(root / "t.sqlite3"),
+                           snapshots=PerformanceSnapshotRepository(root / "c.sqlite3"),
+                           broadcasts=BroadcastQueue(root / "b.sqlite3"), ads=ads)
+        now = str(int(time.time()))
+        owner = signed("token", {"auth_date": now, "user": json.dumps({"id": 8})})
+        network_admin = signed("token", {"auth_date": now, "user": json.dumps({"id": 9})})
+        ads_manager = signed("token", {"auth_date": now, "user": json.dumps({"id": 11})})
+
+        def denied(fn):
+            try:
+                fn()
+            except AdminAuthorizationError:
+                return
+            raise AssertionError("authorization should have failed")
+
+        denied(lambda: api.publish_ad_terms(ads_manager, "t"))            # owner only
+        api.publish_ad_terms(owner, "Advertising terms v1")
+        denied(lambda: api.create_ad_campaign(network_admin, "t", "Acme", "Guides", "x"))   # wrong scope
+        cid = api.create_ad_campaign(ads_manager, "Launch", "Acme", "Guides", "hello")["campaign_id"]
+        assert api.ads_overview(network_admin)["campaigns"][0]["status"] == "draft"   # read-only is fine
+        api.ad_campaign_action(ads_manager, cid, "submit")
+        denied(lambda: api.ad_campaign_action(ads_manager, cid, "approve", "self-approval"))   # review is owner-only
+        try:
+            api.ad_campaign_action(owner, cid, "approve", "")
+        except AdPolicyError:
+            pass
+        else:
+            raise AssertionError("approval without a reason accepted")
+        api.ad_campaign_action(owner, cid, "approve", "disclosed, on-topic")
+        try:
+            api.ad_campaign_action(ads_manager, cid, "queue")
+        except AdPolicyError as exc:
+            assert "consented" in str(exc)
+        else:
+            raise AssertionError("queued with zero consent")
+        ads.grant_consent("@willing", owner_id=42, terms_version=1)
+        assert api.ad_campaign_action(ads_manager, cid, "queue")["new_deliveries"] == 1
+        assert api.ad_campaign_action(ads_manager, cid, "pause")["status"] == "applied"
+        ads.enabled = False
+        try:
+            api.ad_campaign_action(ads_manager, cid, "resume")
+        except AdPolicyError as exc:
+            assert "disabled" in str(exc)
+        else:
+            raise AssertionError("resumed while ads disabled")
+    finally:
+        directory.cleanup()
+
+
 if __name__ == "__main__":
     test_authenticated_dashboard_is_read_only()
     print("PASS test_authenticated_dashboard_is_read_only")
     test_reports_appeals_and_owner_only_enforcement()
     print("PASS test_reports_appeals_and_owner_only_enforcement")
+    test_ads_are_scoped_consent_gated_and_owner_reviewed()
+    print("PASS test_ads_are_scoped_consent_gated_and_owner_reviewed")

@@ -176,6 +176,8 @@ class AdminWSGI:
             if method == "GET" and path.startswith("/api/admin/referrals/"):
                 period = unquote(path.split("/api/admin/referrals/", 1)[1])
                 return self._response(start_response, "200 OK", self.api.referral_snapshot(init_data, period), correlation_id)
+            if method == "GET" and path == "/api/admin/ads":
+                return self._response(start_response, "200 OK", self.api.ads_overview(init_data), correlation_id)
             if method == "GET" and path == "/api/admin/safety":
                 return self._response(start_response, "200 OK", self.api.safety_overview(init_data), correlation_id)
             if method == "GET" and path == "/api/admin/reports":
@@ -224,6 +226,19 @@ class AdminWSGI:
                 parts = [unquote(item) for item in path.strip("/").split("/")]
                 if parts[:4] == ["api", "admin", "safety", "emergency"] and len(parts) == 4:
                     result = self.api.emergency_mode(init_data, bool(body.get("enabled")), body.get("reason", ""))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts == ["api", "admin", "ads", "terms"]:
+                    result = self.api.publish_ad_terms(init_data, body.get("text", ""))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts == ["api", "admin", "ads"]:
+                    result = self.api.create_ad_campaign(init_data, body.get("title", ""), body.get("advertiser_label", ""),
+                                                         body.get("category", ""), body.get("text", ""), body.get("scheduled_at"))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts[:3] == ["api", "admin", "ads"] and len(parts) == 5 and parts[4] == "edit":
+                    result = self.api.update_ad_draft(init_data, parts[3], body.get("title"), body.get("text"), body.get("category"), body.get("scheduled_at"))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts[:3] == ["api", "admin", "ads"] and len(parts) == 5:
+                    result = self.api.ad_campaign_action(init_data, parts[3], parts[4], body.get("reason", ""))
                     return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts == ["api", "admin", "reports"]:
                     result = self.api.file_report(init_data, body.get("entity_id", ""), body.get("entity_type", ""),

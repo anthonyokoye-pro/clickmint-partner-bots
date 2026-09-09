@@ -1,5 +1,30 @@
 # CLICKMINT Engineering History
 
+## 2026-09-09 — Consent-aware advertising and group-scoped reports
+
+**Problem:** The compliance directive required advertising to be separate from announcements
+and tasks, with consent, versioned terms, a scoped Ads Manager role and safety review — none
+of which existed. Reports could only be filed from inside an offer card, so abuse seen in a
+group had no entry point.
+
+**Alternatives considered:** reuse `BroadcastQueue` with a flag — rejected (audience is
+"all known members", the opposite of opt-in; no review step; no terms binding). A global
+"ads on/off" per user — rejected (consent must be per destination, since each channel's
+audience is distinct).
+
+**Decision:** `ad_campaigns.py` as an isolated store with hard preconditions raised as
+`AdPolicyError`; `ADS_ENABLED` kill switch defaulting off; `"ads"` added to `RoleRegistry`
+scopes; delivery through the destination owner's bot after fresh verification, always
+labelled. `/report` in groups resolves the live chat id to the registered row and attaches the
+replied message as evidence.
+
+**Result:** `ad_campaigns.py`, `test_ad_campaigns.py` (6), `/ads`, `/report`, Mini App
+Advertising panel + 9 routes, admin-bot Ads Manager invite, `go_live_check` advertising
+check. `_execute_task_payload` now uses `TelegramVerificationService.make_bot()` so the
+owner-bot path is a single mockable seam. Bot wiring tests 32→34.
+
+**Remaining:** none from the audit list. Live validation needs real Telegram credentials.
+
 ## 2026-09-09 — Shared enforcement gate, appeals, and admin compliance surface
 
 **Problem:** `enforcement.py` existed but nothing in the running bots consulted it; a

@@ -60,7 +60,7 @@ Optional observation: views_provider.py / future Telethon observer
 
 1. ~~Put enforcement checks at the shared application-service boundary, not only in UI handlers.~~ **Done 2026-09-09** — `enforcement_gate.py`, wired into both network bots and the scheduler.
 2. ~~Add admin API/UI for reports, evidence, timelines, enforcement actions, appeals, and emergency controls.~~ **Done 2026-09-09** — see `docs/ADMIN_API.md` "Trust & safety".
-3. Unify campaign state transitions and add named draft lifecycle for announcements and future ads. (Draft title/edit/delete shipped; ad-campaign parity and consent remain.)
+3. ~~Unify campaign state transitions and add named draft lifecycle for announcements and future ads.~~ **Done 2026-09-09** — broadcasts have the named draft lifecycle; ads have their own consent-gated lifecycle in `ad_campaigns.py` (see `docs/ADVERTISING.md`).
 4. ~~Add a cross-platform store lock~~ — `store.py` now uses `msvcrt` on Windows; single-writer migration remains a longer-term goal.
 5. ~~Add dependency-aware CI~~ — `.github/workflows/tests.yml` runs `run_all_tests.py` after `pip install -r requirements.txt`.
 6. Keep financial systems disabled until marketplace, consent, safety, and operational recovery are validated.

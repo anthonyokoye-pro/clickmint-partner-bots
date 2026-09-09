@@ -88,6 +88,15 @@ class ChannelRegistry:
     def get(self, chat_id) -> dict | None:
         return self._items().get(str(chat_id))
 
+    def find_by_telegram_chat(self, telegram_chat_id) -> dict | None:
+        """Resolve a live Telegram chat id (e.g. from a group message) to its
+        registered row, matching on canonical id, chat_id or username."""
+        wanted = str(telegram_chat_id)
+        for row in self._items().values():
+            if wanted in {str(row.get("canonical_chat_id")), str(row.get("chat_id")), str(row.get("username"))}:
+                return row
+        return None
+
     @staticmethod
     def telegram_reference(row: dict):
         """Prefer immutable Telegram chat IDs after the first successful lookup."""

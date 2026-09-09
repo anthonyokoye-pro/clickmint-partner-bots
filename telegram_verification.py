@@ -145,12 +145,15 @@ class TelegramVerificationService:
         self.credentials = credential_store
         self.bot_factory = bot_factory
 
-    async def connect_bot(self, owner_id: int, token: str) -> dict:
+    def make_bot(self, token: str):
+        """Build an aiogram Bot for a user-owned token (mockable via bot_factory)."""
         if self.bot_factory is None:
             from aiogram import Bot
-            bot = Bot(token=token)
-        else:
-            bot = self.bot_factory(token)
+            return Bot(token=token)
+        return self.bot_factory(token)
+
+    async def connect_bot(self, owner_id: int, token: str) -> dict:
+        bot = self.make_bot(token)
         try:
             me = await bot.get_me()
             data = me.model_dump() if hasattr(me, "model_dump") else dict(me)

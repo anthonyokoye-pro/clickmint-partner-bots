@@ -778,6 +778,114 @@ def test_broadcast_worker_honours_safe_mode_and_blocked_recipients():
     print("OK broadcast worker pauses in safe mode and never messages a banned member")
 
 
+def _group_message(text, chat_id, uid, username="member", reply_to=None, chat_username=None):
+    _uid_seq[0] += 1
+    return Message(message_id=_uid_seq[0], date=dt.datetime.now(dt.timezone.utc),
+                   chat=Chat(id=chat_id, type="supergroup", username=chat_username, title="Group"),
+                   from_user=make_user(uid, username), text=text, reply_to_message=reply_to)
+
+
+def _clean_ads(module):
+    import sqlite3
+    with sqlite3.connect(module.ads.path) as conn:
+        for table in ("ad_terms", "ad_consents", "ad_campaigns", "ad_deliveries", "ad_events"):
+            conn.execute(f"DELETE FROM {table}")
+
+
+def test_group_report_files_with_evidence_and_private_report_targets_registered_only():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    # a registered group with a real chat id
+    reward_bot.channels.add(1001, "-100777", "@alicegroup", "group", ["General"], size=300, bot_added=True)
+    reward_bot.channels.update(1001, "-100777", verified_state="VERIFIED", status="ACTIVE", canonical_chat_id=-100777)
+    # unregistered group -> nothing to report
+    errs = run(feed(reward_bot, _group_message("/report spam", -100999, 7001)))
+    assert_no_errors(errs, "report in unregistered group")
+    assert "not registered" in s.texts()
+    # registered group, replying to a message -> report + evidence, by a non-member of CLICKMINT
+    s.reset()
+    offending = _group_message("buy followers here", -100777, 7002, "spammer")
+    errs = run(feed(reward_bot, _group_message("/report sells fake engagement", -100777, 7001, reply_to=offending)))
+    assert_no_errors(errs, "report in registered group")
+    reports = reward_bot.enforcement.list_reports("PENDING", entity_type="group")
+    assert len(reports) == 1 and reports[0]["entity_id"] == "@alicegroup", reports
+    evidence = reward_bot.enforcement.evidence_for("@alicegroup", "group", report_id=reports[0]["report_id"])
+    assert evidence and evidence[0]["reference"] == f"telegram:-100777/{offending.message_id}"
+    assert reward_bot.enforcement.get("@alicegroup", "group")["state"] == "ACTIVE"   # never automatic
+    # private: owner cannot report own destination; stranger can report a registered one
+    s.reset()
+    run(feed(reward_bot, make_message("/report @alice self report", uid=1001, username="alice")))
+    assert "own destination" in s.texts()
+    s.reset()
+    errs = run(feed(reward_bot, make_message("/report @alice scam links", uid=1002, username="bob")))
+    assert_no_errors(errs, "private report")
+    assert "filed against @alice" in s.texts()
+    s.reset()
+    run(feed(reward_bot, make_message("/report @ghost anything", uid=1002, username="bob")))
+    assert "not registered" in s.texts()
+    _clean_enforcement(reward_bot)
+    print("OK group-scoped /report files evidence-backed reports; private /report only targets registered destinations")
+
+
+def test_ads_consent_is_per_destination_and_delivery_is_labelled():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot); _clean_ads(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    _register(reward_bot, "bob", 1002, 2500)
+    reward_bot.bot_credentials.save(1001, "9001:test-token", {"id": 9001, "username": "alicebot"})
+    reward_bot.telegram_verification.bot_factory = lambda token: reward_bot.bot
+    # The mocked session cannot answer getChat/getChatMember (covered by
+    # test_telegram_verification.py); treat the destination as verified here.
+    real_verify = reward_bot._verify_task_channel
+    async def fake_verify(row):
+        return {"row": row, "chat_id": -100555, "verification": None}, None
+    reward_bot._verify_task_channel = fake_verify
+    # no terms yet -> cannot opt in
+    run(feed(reward_bot, make_message("/ads on @alice", uid=1001, username="alice")))
+    assert "No advertising terms" in s.texts()
+    reward_bot.ads.publish_terms("Ads are labelled; you may opt out anytime.", published_by="owner")
+    s.reset()
+    run(feed(reward_bot, make_message("/ads on @bob", uid=1001, username="alice")))   # not hers
+    assert "only manage consent for a destination you registered" in s.texts()
+    s.reset()
+    errs = run(feed(reward_bot, make_message("/ads on @alice", uid=1001, username="alice")))
+    assert_no_errors(errs, "/ads on")
+    assert reward_bot.ads.consent("@alice") is not None and reward_bot.ads.consent("@bob") is None
+    # campaign approved by owner, queued -> only @alice gets a delivery
+    cid = reward_bot.ads.create_campaign(title="Launch", advertiser_label="Acme Wallet", category="General", text="Try Acme", created_by=OWNER_ID)
+    reward_bot.ads.submit_for_review(cid, actor_id=OWNER_ID)
+    reward_bot.ads.review(cid, approved=True, reviewer_id=OWNER_ID, reason="disclosed")
+    reward_bot.ads.enabled = True
+    assert reward_bot.ads.queue(cid, actor_id=OWNER_ID) == 1
+    s.reset()
+    run(reward_bot._process_ad_deliveries())
+    sent = s.sent()
+    assert len(sent) == 1 and "Ad · Acme Wallet" in sent[0]["text"] and "Sponsored" in sent[0]["text"], sent
+    assert reward_bot.ads.get_campaign(cid)["status"] == "completed"
+    # opt out cancels anything pending and stops future deliveries
+    cid2 = reward_bot.ads.create_campaign(title="Second", advertiser_label="Acme", category="General", text="Again", created_by=OWNER_ID)
+    reward_bot.ads.submit_for_review(cid2, actor_id=OWNER_ID)
+    reward_bot.ads.review(cid2, approved=True, reviewer_id=OWNER_ID, reason="ok")
+    reward_bot.ads.queue(cid2, actor_id=OWNER_ID)
+    s.reset()
+    run(feed(reward_bot, make_message("/ads off @alice", uid=1001, username="alice")))
+    assert "opted out" in s.texts()
+    s.reset()
+    run(reward_bot._process_ad_deliveries())
+    assert not s.sent(), "nothing may be sent after opt-out"
+    assert reward_bot.ads.summary(cid2)["deliveries"].get("cancelled") == 1
+    # kill switch: disabled worker sends nothing even with consent
+    reward_bot.ads.enabled = False
+    run(feed(reward_bot, make_message("/ads on @alice", uid=1001, username="alice")))
+    s.reset()
+    run(reward_bot._process_ad_deliveries())
+    assert not s.sent()
+    reward_bot._verify_task_channel = real_verify
+    _clean_ads(reward_bot); _clean_enforcement(reward_bot)
+    print("OK ads: consent is per destination and revocable; deliveries are labelled and use the owner's bot")
+
+
 def test_enforced_partner_is_never_offered_a_post():
     s = _fresh_bot(partnership_bot)
     _clean_enforcement(partnership_bot)
@@ -833,6 +941,8 @@ ALL_TESTS = [
     test_bot_reports_are_mirrored_into_the_compliance_store,
     test_enforced_partner_is_never_offered_a_post,
     test_broadcast_worker_honours_safe_mode_and_blocked_recipients,
+    test_group_report_files_with_evidence_and_private_report_targets_registered_only,
+    test_ads_consent_is_per_destination_and_delivery_is_labelled,
     test_admin_bot_safe_mode_toggle_is_owner_only,
 ]
 

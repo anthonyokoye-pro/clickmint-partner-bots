@@ -50,6 +50,7 @@ from referral_ranking import ReferralRecord, rank_referrers, allocate_monthly_re
 from broadcast_queue import BroadcastQueue
 from enforcement import EnforcementStore, EnforcementError
 from enforcement_gate import EnforcementGate
+from ad_campaigns import AdCampaignStore, AdPolicyError
 from currency import MINT_ICON, MINT_NAME, amount, amount_short, balance_line
 from store import JsonStore
 from scheduler import Scheduler
@@ -93,6 +94,8 @@ broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
 # It only reads states a human recorded; it never decides guilt.
 enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
 enforcement_gate = EnforcementGate(enforcement, owner_user_id=config.OWNER_USER_ID)
+# Advertising is a separate, consent-gated model. Disabled by default.
+ads = AdCampaignStore(config.ADS_DB_PATH, enabled=config.ADS_ENABLED)
 # PerformanceEngine consumes real observations when available; absent fields stay absent.
 perf.views_provider = stats.provider
 
@@ -1176,8 +1179,9 @@ async def _execute_task_payload(task: dict, chat_id, owner_id: int):
     platform-generated tasks. A title alone is never fabricated into a post.
     """
     payload = task.get("payload") or {}
-    from aiogram import Bot as TelegramBot
-    owned_bot = TelegramBot(token=telegram_verification.credentials.token(int(owner_id)))
+    # Same factory seam the verification service uses, so the owner-bot path
+    # is one code path in production and mockable offline.
+    owned_bot = telegram_verification.make_bot(telegram_verification.credentials.token(int(owner_id)))
     try:
         source_chat_id = payload.get("source_chat_id")
         source_message_id = payload.get("source_message_id")
@@ -1193,7 +1197,8 @@ async def _execute_task_payload(task: dict, chat_id, owner_id: int):
             return await owned_bot.send_message(chat_id, text, parse_mode="HTML")
         raise ValueError("task has no executable Telegram payload")
     finally:
-        await owned_bot.session.close()
+        if owned_bot is not bot:
+            await owned_bot.session.close()
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("task:claim:"))
@@ -2819,6 +2824,41 @@ async def _process_reward_broadcasts():
                             retry_seconds=min(3600, 30 * (2 ** min(delivery.get("attempts", 1), 6))))
 
 
+async def _process_ad_deliveries():
+    """Deliver approved, consented ads through the DESTINATION OWNER's bot.
+
+    Every message is labelled as an ad with the disclosed advertiser. Consent
+    is re-checked at claim time inside the store; enforcement and safe mode
+    are checked here, at the shared boundary."""
+    if not ads.enabled or enforcement_gate.safe_mode():
+        return
+    for delivery in ads.claim(limit=10):
+        try:
+            campaign = ads.get_campaign(delivery["campaign_id"])
+            row = channels.get(delivery["destination_id"])
+            if not campaign or not row:
+                ads.fail(delivery["delivery_id"], "campaign or destination missing", blocked=True)
+                continue
+            if not enforcement_gate.check_many([(row.get("owner_id"), "user"), (delivery["destination_id"], "channel")], "campaigns"):
+                ads.fail(delivery["delivery_id"], "destination blocked by enforcement", blocked=True)
+                continue
+            verified, why = await _verify_task_channel(row)
+            if not verified:
+                ads.fail(delivery["delivery_id"], f"verification: {why}", retry_seconds=1800)
+                continue
+            text = (f"📢 <b>Ad · {escape(campaign['advertiser_label'])}</b>\n\n"
+                    f"{escape(campaign['payload']['text'])}\n\n"
+                    f"<i>Sponsored content. This channel opted in to CLICKMINT ads (terms v{campaign['terms_version']}).</i>")
+            sent = await _execute_task_payload({"payload": {"text": text}}, verified["chat_id"], int(row["owner_id"]))
+            ads.complete(delivery["delivery_id"], sent.message_id)
+            audit.record(bot="reward", sender=f"ad:{campaign['campaign_id']}", target_channel=delivery["destination_id"],
+                         mode="direct", status="delivered", forward_valid=True)
+        except Exception as exc:
+            blocked = any(t in str(exc).lower() for t in ("blocked", "chat not found", "not enough rights", "deactivated"))
+            ads.fail(delivery["delivery_id"], str(exc)[:500], blocked=blocked,
+                     retry_seconds=min(3600, 60 * (2 ** min(int(delivery.get("attempts", 1)), 6))))
+
+
 async def _notify_owner(text: str):
     try:
         await bot.send_message(int(roles.owner_user_id), text)
@@ -3509,6 +3549,7 @@ async def notify_loop():
                 logging.info("task recovery: %s", recovery)
             await _process_mint_outbox()
             await _process_reward_broadcasts()
+            await _process_ad_deliveries()
             await _monitor_operational_health()
             for item in review.pending_notify("reward"):
                 if await _notify_review_sender(item):
@@ -3613,6 +3654,118 @@ async def audit_view(msg: types.Message):
         lines.append(f"[{r.get('ts')}] {r.get('sender')} -> {r.get('target_channel')} "
                      f"| {r.get('status')} | {r.get('post_type')} | fwd={'✅' if r.get('forward_valid', True) else '❌'}")
     await msg.answer("\n".join(lines[:55]))
+
+
+@dp.message(Command("report"))
+async def report_cmd(msg: types.Message):
+    """Group-scoped report entry point.
+
+    • Inside a registered GROUP, replying to a message with `/report <reason>`
+      files a report against that group (entity_type=group) with the replied
+      message as evidence. Members of the group need no CLICKMINT account.
+    • In private chat, `/report @target <reason>` reports a channel/group.
+    Filing NEVER changes anyone's state — a human reviews it.
+    """
+    uid = _uid(msg)
+    chat_type = getattr(msg.chat, "type", "private")
+    parts = (msg.text or "").split(maxsplit=2)
+    if chat_type in {"group", "supergroup"}:
+        row = channels.find_by_telegram_chat(msg.chat.id) or (
+            channels.find_by_telegram_chat("@" + msg.chat.username) if getattr(msg.chat, "username", None) else None)
+        if row is None:
+            await msg.reply("This group is not registered with CLICKMINT, so there is nothing to report here.")
+            return
+        reason = parts[1] + (" " + parts[2] if len(parts) > 2 else "") if len(parts) > 1 else ""
+        if not reason.strip():
+            await msg.reply("Usage: reply to the offending message with /report <reason>.")
+            return
+        entity_id = row.get("username") or row.get("chat_id")
+        subject = f"group_message:{msg.chat.id}/{msg.reply_to_message.message_id}" if msg.reply_to_message else f"group:{msg.chat.id}"
+        try:
+            item = enforcement.report(uid, entity_id, "group", reason.strip()[:500], subject=subject)
+            if msg.reply_to_message:
+                enforcement.add_evidence(entity_id, "group", "message", f"telegram:{msg.chat.id}/{msg.reply_to_message.message_id}",
+                                         captured_by=uid, report_id=item["report_id"], notes="reported in-group")
+        except EnforcementError as exc:
+            await msg.reply(f"⚠ {exc}")
+            return
+        await msg.reply(f"🚩 Report {item['report_id'][-6:]} filed. A human reviews every report — nothing is automatic.")
+        owner_notify(f"🚩 In-group report {item['report_id']} on group {entity_id}: {reason.strip()[:120]}")
+        return
+    # private chat: /report @target reason
+    if len(parts) < 3 or not parts[1].startswith("@"):
+        await msg.answer("Usage: /report @channel_or_group <reason>\n"
+                         "Inside a registered group you can also reply to a message with /report <reason>.")
+        return
+    target, reason = parts[1], parts[2].strip()
+    row = channels.get(target)
+    if row is None:
+        await msg.answer("That destination is not registered with CLICKMINT.")
+        return
+    if int(row.get("owner_id", -1)) == uid:
+        await msg.answer("You cannot report your own destination. Use /removechannel or /ads off instead.")
+        return
+    try:
+        item = enforcement.report(uid, target, row.get("kind", "channel"), reason[:500], subject="private_report")
+    except EnforcementError as exc:
+        await msg.answer(f"⚠ {exc}")
+        return
+    await msg.answer(f"🚩 Report {item['report_id'][-6:]} filed against {target}. "
+                     "A human reviews every report — nothing is auto-banned.")
+    owner_notify(f"🚩 Report {item['report_id']} on {row.get('kind', 'channel')} {target}: {reason[:120]}")
+
+
+@dp.message(Command("ads"))
+async def ads_cmd(msg: types.Message):
+    """Destination owners opt IN (or out) of receiving ads — per channel, under
+    the current terms version. Nothing is ever posted to a channel that has
+    not opted in; consent can be withdrawn at any time with immediate effect."""
+    uid = _uid(msg)
+    parts = (msg.text or "").split()
+    terms = ads.current_terms()
+    mine = channels.mine(uid)
+    if len(parts) < 3 or parts[1] not in {"on", "off"}:
+        lines = ["📢 ADVERTISING CONSENT", ""]
+        if terms is None:
+            lines.append("No advertising terms are published yet, so nothing can be advertised.")
+        else:
+            lines.append(f"Current terms v{terms['version']}:")
+            lines.append(terms["text"][:1200])
+            lines.append("")
+        for row in mine:
+            dest = row.get("username") or row.get("chat_id")
+            c = ads.consent(dest)
+            lines.append(f"• {dest}: " + (f"✅ opted in (terms v{c['terms_version']})" if c else "⛔ not opted in"))
+        lines += ["", "Usage: /ads on @channel   ·   /ads off @channel",
+                  "Opting in means an approved, clearly labelled ad may be posted to that "
+                  "channel by YOUR bot. You can opt out at any time."]
+        await msg.answer("\n".join(lines))
+        return
+    action, dest = parts[1], parts[2]
+    row = next((r for r in mine if (r.get("username") or r.get("chat_id")) == dest), None)
+    if row is None:
+        await msg.answer("You can only manage consent for a destination you registered.")
+        return
+    if action == "off":
+        ads.revoke_consent(dest, owner_id=uid, reason="owner opted out via /ads off")
+        await msg.answer(f"⛔ {dest} opted out of advertising. Any pending ads for it were cancelled.")
+        return
+    if terms is None:
+        await msg.answer("No advertising terms are published yet.")
+        return
+    blocked = _enforcement_block(uid, "campaigns", dest)
+    if blocked:
+        await msg.answer(blocked)
+        return
+    try:
+        ads.grant_consent(dest, owner_id=uid, terms_version=terms["version"],
+                          categories=row.get("categories") or [])
+    except AdPolicyError as exc:
+        await msg.answer(f"⚠ {exc}")
+        return
+    await msg.answer(f"✅ {dest} opted in to advertising under terms v{terms['version']} "
+                     f"(categories: {', '.join(row.get('categories') or ['any'])}). "
+                     "Use /ads off to withdraw at any time.")
 
 
 @dp.message(Command("appeal"))

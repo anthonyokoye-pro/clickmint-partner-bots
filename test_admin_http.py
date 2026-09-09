@@ -25,6 +25,13 @@ class API:
         self.last = ("appeal", appeal_id, decision)
         return {"appeal_id": appeal_id, "status": decision}
 
+    def ads_overview(self, init):
+        return {"enabled": False, "campaigns": []}
+
+    def ad_campaign_action(self, init, campaign_id, action, reason=""):
+        self.last = ("ad", campaign_id, action, reason)
+        return {"campaign_id": campaign_id, "status": "applied"}
+
     def approve_referral_ranking(self, init, period, reason):
         self.approvals += 1
         return {"period": period, "status": "approved"}
@@ -99,6 +106,10 @@ def test_compliance_routes_are_wired():
     assert status == "200 OK" and api.last == ("review", "rpt_1", "DISMISSED")
     status, _ = call("POST", "/api/admin/appeals/apl_1/decide", {"decision": "UPHELD"})
     assert status == "200 OK" and api.last == ("appeal", "apl_1", "UPHELD")
+    status, body = call("GET", "/api/admin/ads")
+    assert status == "200 OK" and body["enabled"] is False
+    status, _ = call("POST", "/api/admin/ads/ad_1/approve", {"reason": "ok"})
+    assert status == "200 OK" and api.last == ("ad", "ad_1", "approve", "ok")
 
 
 if __name__ == "__main__":

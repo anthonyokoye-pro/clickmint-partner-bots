@@ -33,6 +33,19 @@
     } catch (error) { $("notice").textContent = error.message; }
   }
   const post = (path, body) => api(path, {method:"POST",headers:{"Content-Type":"application/json","X-Idempotency-Key":crypto.randomUUID()},body:JSON.stringify(body)});
+  async function loadAds() {
+    try {
+      const ads = await api("/api/admin/ads");
+      $("ads-status").textContent = `${ads.enabled ? "ENABLED" : "disabled"} · ${ads.consents} consenting destinations`;
+      $("ads-terms").textContent = ads.terms ? `Terms v${ads.terms.version} published ${new Date(ads.terms.published_at*1000).toLocaleDateString()}: ${ads.terms.text.slice(0,200)}` : "No advertising terms published — publish terms before any consent or campaign.";
+      const rows = ads.campaigns || [];
+      const btn = (id, action, label) => `<button data-ad="${esc(id)}" data-ad-action="${action}">${label}</button>`;
+      $("ads").innerHTML = rows.length ? rows.map(c => { const d=c.deliveries||{}; let actions=""; if (c.status==="draft"||c.status==="rejected") actions=btn(c.campaign_id,"submit","Submit for review"); else if (c.status==="in_review") actions=btn(c.campaign_id,"approve","Approve")+btn(c.campaign_id,"reject","Reject"); else if (c.status==="approved") actions=btn(c.campaign_id,"queue","Queue to consenting"); else if (["queued","running"].includes(c.status)) actions=btn(c.campaign_id,"pause","Pause"); else if (c.status==="paused") actions=btn(c.campaign_id,"resume","Resume"); if (!["completed","cancelled"].includes(c.status)) actions+=btn(c.campaign_id,"cancel","Cancel"); return `<div class="item"><div><b>${esc(c.title)}</b> <span class="muted">by ${esc(c.advertiser_label)}</span><div class="muted">${esc(c.status)} · ${esc(c.category)} · terms v${esc(c.terms_version)} · sent ${esc(d.sent||0)} · pending ${esc(d.pending||0)} · blocked ${esc(d.blocked||0)}${c.review_reason?` · review: ${esc(c.review_reason)}`:""}</div></div><span>${actions}</span></div>`; }).join("") : `<div class="muted">No ad campaigns.</div>`;
+      document.querySelectorAll("[data-ad]").forEach(b => b.onclick = async () => { const a=b.dataset.adAction; let reason=""; if (["approve","reject","cancel"].includes(a)) { reason = prompt(`Reason for ${a} (required for review):`) || ""; if ((a==="approve"||a==="reject") && !reason) return; } try { await post(`/api/admin/ads/${encodeURIComponent(b.dataset.ad)}/${a}`, {reason}); loadAds(); } catch (e) { $("notice").textContent = e.message; } });
+    } catch (error) { $("ads-status").textContent = "unavailable"; }
+  }
+  $("publish-ad-terms").addEventListener("click", async () => { const text=$("ads-terms-text").value.trim(); if(!text){$("notice").textContent="Terms text is required";return;} if(!confirm("Publishing new terms invalidates every existing consent. Continue?")) return; try { await post("/api/admin/ads/terms",{text}); $("ads-terms-text").value=""; loadAds(); } catch(e){$("notice").textContent=e.message;} });
+  $("create-ad").addEventListener("click", async () => { const body={title:$("ad-title").value.trim(), advertiser_label:$("ad-advertiser").value.trim(), category:$("ad-category").value.trim(), text:$("ad-text").value.trim()}; if(!body.title||!body.advertiser_label||!body.category||!body.text){$("notice").textContent="Title, advertiser, category and text are required";return;} try { await post("/api/admin/ads", body); $("ad-text").value=""; loadAds(); } catch(e){$("notice").textContent=e.message;} });
   async function loadSafety() {
     try {
       const safety = await api("/api/admin/safety");
@@ -49,7 +62,7 @@
   $("file-report").addEventListener("click", async () => { const entity_id=$("report-entity-id").value.trim(), entity_type=$("report-entity-type").value, reason=$("report-reason").value.trim(); if(!entity_id||!reason){$("safety-result").textContent="Entity ID and reason are required";return;} try { await post("/api/admin/reports", {entity_id, entity_type, reason}); $("report-reason").value=""; loadSafety(); } catch(e){$("safety-result").textContent=e.message;} });
   async function refresh() {
     $("notice").textContent = "Loading authenticated dashboard…";
-    try { const query = new URLSearchParams(); if ($("category").value) query.set("task_category", $("category").value); if ($("broadcast-status").value) query.set("broadcast_status", $("broadcast-status").value); const data = await api(`/api/admin/dashboard?${query}`); render(data); await loadSecondary(data); await loadSafety(); $("notice").textContent = "Authenticated dashboard"; }
+    try { const query = new URLSearchParams(); if ($("category").value) query.set("task_category", $("category").value); if ($("broadcast-status").value) query.set("broadcast_status", $("broadcast-status").value); const data = await api(`/api/admin/dashboard?${query}`); render(data); await loadSecondary(data); await loadSafety(); await loadAds(); $("notice").textContent = "Authenticated dashboard"; }
     catch (error) { $("notice").textContent = `Unable to load dashboard: ${error.message}`; }
   }
   $("create-broadcast").addEventListener("click", async () => { const title = $("broadcast-title").value.trim(), text = $("broadcast-text").value.trim(); if (!title || !text) { $("notice").textContent = "Campaign title and text are required"; return; } const scheduled = $("broadcast-scheduled").value ? Math.floor(new Date($("broadcast-scheduled").value).getTime()/1000) : null; try { await api("/api/admin/broadcasts", {method:"POST",headers:{"Content-Type":"application/json","X-Idempotency-Key":crypto.randomUUID()},body:JSON.stringify({title,text,scheduled_at:scheduled})}); $("broadcast-text").value=""; refresh(); } catch (error) { $("notice").textContent = error.message; } });

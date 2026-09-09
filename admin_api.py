@@ -11,7 +11,7 @@ class AdminAuthorizationError(PermissionError):
 class AdminReadAPI:
     """Application service independent of HTTP framework or Telegram web server."""
     def __init__(self, *, bot_token, owner_id, roles, channels, marketplace,
-                 snapshots, broadcasts, ledger=None, enforcement=None):
+                 snapshots, broadcasts, ledger=None, enforcement=None, ads=None):
         self.bot_token = bot_token
         self.owner_id = int(owner_id)
         self.roles = roles
@@ -21,12 +21,90 @@ class AdminReadAPI:
         self.broadcasts = broadcasts
         self.ledger = ledger
         self.enforcement = enforcement
+        self.ads = ads
 
     def authenticate(self, init_data: str):
         identity = validate_init_data(init_data, self.bot_token)
         if identity.user_id != self.owner_id and not self.roles.is_admin(identity.user_id):
             raise AdminAuthorizationError("admin access required")
         return identity
+
+    # -- advertising (separate model, separate role) -------------------------
+    def _ads_manager(self, init_data: str):
+        """Ads Manager = owner or an admin holding the 'ads' scope. Network
+        moderators without that scope cannot touch advertising, and vice versa."""
+        identity = self.authenticate(init_data)
+        if self.ads is None:
+            raise RuntimeError("advertising store required")
+        if identity.user_id != self.owner_id and not self.roles.is_admin(identity.user_id, "ads"):
+            raise AdminAuthorizationError("Ads Manager scope required")
+        return identity
+
+    def ads_overview(self, init_data: str) -> dict:
+        self.authenticate(init_data)   # read-only summary is visible to any admin
+        if self.ads is None:
+            raise RuntimeError("advertising store required")
+        campaigns = self.ads.recent_campaigns(limit=50)
+        return {"enabled": self.ads.enabled, "terms": self.ads.current_terms(),
+                "consents": len(self.ads.consenting_destinations()),
+                "campaigns": [{**{k: c[k] for k in ("campaign_id", "title", "advertiser_label", "category", "status", "terms_version", "review_reason")},
+                               "deliveries": self.ads.summary(c["campaign_id"])["deliveries"]} for c in campaigns]}
+
+    def publish_ad_terms(self, init_data: str, text: str) -> dict:
+        identity = self.authenticate(init_data)
+        if identity.user_id != self.owner_id:
+            raise AdminAuthorizationError("owner approval required to publish advertising terms")
+        if self.ads is None:
+            raise RuntimeError("advertising store required")
+        terms = self.ads.publish_terms(text, published_by=identity.user_id)
+        self._audit(identity.user_id, "AD_TERMS_PUBLISHED", "ad_terms", str(terms["version"]), text[:200])
+        return terms
+
+    def create_ad_campaign(self, init_data: str, title: str, advertiser_label: str, category: str,
+                           text: str, scheduled_at=None) -> dict:
+        identity = self._ads_manager(init_data)
+        campaign_id = self.ads.create_campaign(title=title, advertiser_label=advertiser_label, category=category,
+                                               text=text, created_by=identity.user_id, scheduled_at=scheduled_at)
+        self._audit(identity.user_id, "AD_CAMPAIGN_CREATED", "ad_campaign", campaign_id, advertiser_label)
+        return {"campaign_id": campaign_id, "status": "draft"}
+
+    def update_ad_draft(self, init_data: str, campaign_id: str, title=None, text=None, category=None, scheduled_at=None) -> dict:
+        identity = self._ads_manager(init_data)
+        if not self.ads.update_draft(campaign_id, title=title, text=text, category=category, scheduled_at=scheduled_at):
+            raise ValueError("only a draft or rejected campaign can be edited")
+        self._audit(identity.user_id, "AD_CAMPAIGN_EDITED", "ad_campaign", campaign_id, "Mini App edit")
+        return {"campaign_id": campaign_id, "status": "draft"}
+
+    def ad_campaign_action(self, init_data: str, campaign_id: str, action: str, reason: str = "") -> dict:
+        if action in {"approve", "reject"}:
+            # Safety review is the OWNER's call, and it always carries a reason.
+            identity = self.authenticate(init_data)
+            if identity.user_id != self.owner_id:
+                raise AdminAuthorizationError("owner approval required for ad safety review")
+            if self.ads is None:
+                raise RuntimeError("advertising store required")
+            result = self.ads.review(campaign_id, approved=(action == "approve"), reviewer_id=identity.user_id, reason=reason)
+            self._audit(identity.user_id, f"AD_CAMPAIGN_{action.upper()}D", "ad_campaign", campaign_id, reason)
+            return {"campaign_id": campaign_id, "status": result["status"]}
+        identity = self._ads_manager(init_data)
+        if action == "submit":
+            ok = self.ads.submit_for_review(campaign_id, actor_id=identity.user_id)
+        elif action == "queue":
+            inserted = self.ads.queue(campaign_id, actor_id=identity.user_id)
+            self._audit(identity.user_id, "AD_CAMPAIGN_QUEUED", "ad_campaign", campaign_id, f"{inserted} consenting destinations")
+            return {"campaign_id": campaign_id, "status": "queued", "new_deliveries": inserted}
+        elif action == "pause":
+            ok = self.ads.pause(campaign_id, actor_id=identity.user_id)
+        elif action == "resume":
+            ok = self.ads.resume(campaign_id, actor_id=identity.user_id)
+        elif action == "cancel":
+            ok = self.ads.cancel(campaign_id, actor_id=identity.user_id, reason=reason)
+        else:
+            raise ValueError("unsupported ad campaign action")
+        if not ok:
+            raise ValueError("ad campaign action not available in its current state")
+        self._audit(identity.user_id, f"AD_CAMPAIGN_{action.upper()}", "ad_campaign", campaign_id, reason or "Mini App action")
+        return {"campaign_id": campaign_id, "action": action, "status": "applied"}
 
     def _audit(self, actor_id: int, action: str, object_type: str, object_id: str, reason: str):
         if self.ledger is not None and hasattr(self.ledger, "tx"):

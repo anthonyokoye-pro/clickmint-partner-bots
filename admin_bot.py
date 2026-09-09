@@ -322,6 +322,7 @@ async def show_admins(cb):
         [InlineKeyboardButton(text="🔑 Invite code — reward", callback_data="inv:reward")],
         [InlineKeyboardButton(text="🔑 Invite code — partnership", callback_data="inv:partnership")],
         [InlineKeyboardButton(text="🔑 Invite code — both", callback_data="inv:both")],
+        [InlineKeyboardButton(text="🔑 Invite code — Ads Manager", callback_data="inv:ads")],
         [_back("dash:back")],
     ]
     await _safe_edit(cb, "\n".join(lines), _kb(rows))
@@ -334,7 +335,10 @@ async def gen_invite(cb: types.CallbackQuery):
         return
     scope = cb.data.split(":")[1]
     scopes = {"reward": ["reward"], "partnership": ["partnership"],
-              "both": ["reward", "partnership"]}[scope]
+              "both": ["reward", "partnership"], "ads": ["ads"]}.get(scope)
+    if scopes is None:
+        await cb.answer("Unknown scope.", show_alert=True)
+        return
     # A 'reward' code goes into the reward store's invite list; 'partnership' into the
     # partner store; 'both' into both — so /adminlogin works in whichever bot they use.
     created = []
@@ -345,6 +349,10 @@ async def gen_invite(cb: types.CallbackQuery):
         created.append(("reward", gen_r.create_invite(["reward"], created_by=int(OWNER_USER_ID))))
     if "partnership" in scopes:
         created.append(("partnership", gen_p.create_invite(["partnership"], created_by=int(OWNER_USER_ID))))
+    if "ads" in scopes:
+        # Ads Manager is a role in the reward store (where the Mini App reads
+        # roles from). It grants NO network moderation power — only ad drafting.
+        created.append(("ads (redeem in the reward bot)", gen_r.create_invite(["ads"], created_by=int(OWNER_USER_ID))))
     lines = ["🔑 One-time admin invite code(s) generated:", ""]
     for sc, code in created:
         lines.append(f"• {sc}:  {code}")

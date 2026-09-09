@@ -164,6 +164,20 @@ POST /api/admin/safety/emergency
 Linking `related_report_id` to an enforcement action closes that report with the
 matching outcome. `duration_seconds` must be 1 s – 365 days.
 
+### Advertising (consent-aware; see docs/ADVERTISING.md)
+
+```http
+GET  /api/admin/ads                                   # any admin (read-only)
+POST /api/admin/ads/terms        {"text": "…"}        # OWNER — invalidates all consents
+POST /api/admin/ads              {"title","advertiser_label","category","text","scheduled_at"?}   # Ads Manager scope
+POST /api/admin/ads/{id}/edit    {"title"?,"text"?,"category"?,"scheduled_at"?}                    # draft/rejected only
+POST /api/admin/ads/{id}/submit
+POST /api/admin/ads/{id}/approve {"reason": "…"}      # OWNER, reason required
+POST /api/admin/ads/{id}/reject  {"reason": "…"}      # OWNER, reason required
+POST /api/admin/ads/{id}/queue                        # approved only; ADS_ENABLED; ≥1 consenting destination
+POST /api/admin/ads/{id}/pause | resume | cancel
+```
+
 ## Deliberately unavailable operations
 
 This API does not expose endpoints for:
@@ -174,5 +188,6 @@ This API does not expose endpoints for:
 - External payouts.
 - Mint balance transfers.
 - Boost purchases.
+- Ad billing or pricing of any kind.
 
 Those boundaries remain disabled until their separate economic, payment, compliance, and reconciliation phases are completed.

@@ -12,6 +12,7 @@ from admin_idempotency import IdempotencyStore
 from admin_service import build_admin_app
 from broadcast_queue import BroadcastQueue
 from enforcement import EnforcementStore
+from ad_campaigns import AdCampaignStore
 from channel_registry import ChannelRegistry
 from governance import RoleRegistry
 from mint_ledger import TransactionalMintLedger
@@ -38,6 +39,7 @@ def build_runtime_app(*, dev: bool = False):
     broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
     ledger = _LedgerFacade(TransactionalMintLedger(config.MINT_DB_PATH))
     enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
+    ads = AdCampaignStore(config.ADS_DB_PATH, enabled=config.ADS_ENABLED)
     api = AdminReadAPI(
         bot_token=config.ADMIN_BOT_TOKEN,
         owner_id=config.OWNER_USER_ID,
@@ -48,6 +50,7 @@ def build_runtime_app(*, dev: bool = False):
         broadcasts=broadcasts,
         ledger=ledger,
         enforcement=enforcement,
+        ads=ads,
     )
     app = build_admin_app(
         api,

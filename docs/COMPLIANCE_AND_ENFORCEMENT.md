@@ -82,10 +82,13 @@ Implemented:
 - final appeal decisions (UPHELD / OVERTURNED / WITHDRAWN) are sent to the appellant
   through the durable outbox; interim states are silent.
 
-Not yet implemented:
+- **consent-aware advertising** — separate model, kill switch, versioned terms, per-destination
+  consent, Ads Manager scope, owner safety review, labelled delivery. See `docs/ADVERTISING.md`;
+- **group-scoped reports** — `/report <reason>` as a reply inside a registered group files a
+  report against the group with the replied message as evidence (no CLICKMINT account needed);
+  `/report @target <reason>` in private targets any registered channel/group (never your own).
 
-- consent-aware advertising;
-- report entry points for *group* entities from inside Telegram groups.
+Not yet implemented: nothing from the 2026-09 audit list remains; further work is product-driven.
 
 ## Safe mode semantics
 
