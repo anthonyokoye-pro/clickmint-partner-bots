@@ -87,6 +87,11 @@ class ChannelRegistry:
     def get(self, chat_id) -> dict | None:
         return self._items().get(str(chat_id))
 
+    @staticmethod
+    def telegram_reference(row: dict):
+        """Prefer immutable Telegram chat IDs after the first successful lookup."""
+        return row.get("canonical_chat_id") or row.get("chat_id") or row.get("username")
+
     def participation_allowed(self, chat_id) -> bool:
         row = self.get(chat_id)
         return bool(row and row.get("verified_state") == "VERIFIED"

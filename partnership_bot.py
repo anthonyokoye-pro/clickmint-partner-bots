@@ -208,7 +208,7 @@ async def scan_cmd(msg: types.Message):
     lines = ["🔍 PARTNERSHIP DESTINATION SCAN", ""]
     for row in rows:
         try:
-            result = await telegram_verification.verify(_uid(msg), row.get("chat_id") or row.get("username"))
+            result = await telegram_verification.verify(_uid(msg), channels.telegram_reference(row))
             if not result.eligible:
                 channels.update(_uid(msg), row.get("chat_id") or row.get("username"),
                                 bot_added=False, status=result.state,
@@ -246,7 +246,7 @@ async def stats_all_callback(cb: types.CallbackQuery):
     lines = ["📊 <b>TELEGRAM STATISTICS</b>", ""]
     for row in rows:
         try:
-            result = await telegram_verification.verify(cb.from_user.id, row.get("chat_id") or row.get("username"))
+            result = await telegram_verification.verify(cb.from_user.id, channels.telegram_reference(row))
             if result.member_count is None:
                 lines.append(f"⚠️ {row.get('username')}: member count unavailable")
                 continue

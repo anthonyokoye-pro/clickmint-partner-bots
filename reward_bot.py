@@ -1069,7 +1069,7 @@ async def choose_task_channel(cb: types.CallbackQuery):
 
 async def _verify_task_channel(row: dict):
     """Recheck the destination with its owner's bot, never the shared bot."""
-    chat_id = row.get("chat_id") or row.get("username")
+    chat_id = channels.telegram_reference(row)
     if not chat_id:
         return None, "destination has no Telegram chat id"
     try:
@@ -1286,7 +1286,7 @@ async def stats_cmd(msg: types.Message):
         await msg.answer("Usage: /stats @destination")
         return
     try:
-        result = await telegram_verification.verify(msg.from_user.id, row.get("chat_id") or row.get("username"))
+        result = await telegram_verification.verify(msg.from_user.id, channels.telegram_reference(row))
     except CredentialError:
         await msg.answer("❌ Connect your own Telegram bot first with /connectbot.")
         return
@@ -1312,7 +1312,7 @@ async def stats_all_callback(cb: types.CallbackQuery):
     lines = ["📊 <b>TELEGRAM STATISTICS</b>", ""]
     for row in rows:
         try:
-            result = await telegram_verification.verify(cb.from_user.id, row.get("chat_id") or row.get("username"))
+            result = await telegram_verification.verify(cb.from_user.id, channels.telegram_reference(row))
             if result.member_count is None:
                 lines.append(f"⚠️ {escape(str(row.get('username')))}: member count unavailable")
                 continue
@@ -1343,7 +1343,7 @@ async def scan_cmd(msg: types.Message):
     lines = ["🔎 CHANNEL SCAN", ""]
     for row in rows:
         try:
-            result = await telegram_verification.verify(msg.from_user.id, row.get("chat_id") or row.get("username"))
+            result = await telegram_verification.verify(msg.from_user.id, channels.telegram_reference(row))
             lines.append(f"🔍 Verifying {row['username']}")
             lines.append("✅ Resolving Telegram destination")
             lines.append(f"{'✅' if result.member_status not in {'left', 'kicked', 'unknown'} else '❌'} Checking bot membership")
