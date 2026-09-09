@@ -63,7 +63,8 @@ async def _register_from_telegram(msg, destination: str, kind: str = "channel") 
     result = await telegram_verification.verify(owner, destination)
     if not result.eligible:
         channels.update(owner, destination, status=result.state, bot_added=False,
-                        verified_state=result.state, verification_reasons=list(result.reasons))
+                        verified_state=result.state, verification_reasons=list(result.reasons),
+                                verification_checks=result.checks or {})
         return "❌ Verification failed: " + "; ".join(result.reasons) + "\nAdd your bot as administrator and try again."
     size = result.member_count or 0
     channels.update(owner, destination, size=size, bot_added=True, status="ACTIVE",
@@ -71,7 +72,8 @@ async def _register_from_telegram(msg, destination: str, kind: str = "channel") 
                     telegram_member_count_source="telegram_api",
                     telegram_member_count_checked_at=result.checked_at,
                     canonical_chat_id=result.chat_id,
-                    permissions=result.permissions or {})
+                    permissions=result.permissions or {}, verification_checks=result.checks or {},
+                    last_verified_at=result.checked_at)
     ledger.register(destination, size, is_partner=True); ledger.set_user_id(destination, owner)
     return f"✅ Verified {destination}; Telegram reports {size:,} members/subscribers."
 
@@ -266,7 +268,8 @@ async def scan_cmd(msg: types.Message):
                 channels.update(_uid(msg), row.get("chat_id") or row.get("username"),
                                 bot_added=False, status=result.state,
                                 verified_state=result.state,
-                                verification_reasons=list(result.reasons))
+                                verification_reasons=list(result.reasons),
+                                verification_checks=result.checks or {})
                 lines.append(f"❌ {row.get('username')}: {'; '.join(result.reasons)}")
                 continue
             lines.extend([
@@ -309,7 +312,8 @@ async def stats_all_callback(cb: types.CallbackQuery):
                 channels.update(cb.from_user.id, row.get("chat_id") or row.get("username"),
                                 bot_added=False, status=result.state,
                                 verified_state=result.state,
-                                verification_reasons=list(result.reasons))
+                                verification_reasons=list(result.reasons),
+                                verification_checks=result.checks or {})
                 lines.append(f"❌ {row.get('username')}: {'; '.join(result.reasons)}")
                 continue
             if result.member_count is None:
@@ -320,7 +324,9 @@ async def stats_all_callback(cb: types.CallbackQuery):
                             telegram_member_count=result.member_count,
                             telegram_member_count_source="telegram_api",
                             telegram_member_count_checked_at=result.checked_at,
-                            canonical_chat_id=result.chat_id)
+                            canonical_chat_id=result.chat_id,
+                            verification_checks=result.checks or {},
+                            last_verified_at=result.checked_at)
             lines.append(f"✅ {row.get('username')}: <b>{result.member_count:,}</b> members · Telegram API")
         except CredentialError:
             lines.append("❌ Connect your own bot first with /connectbot.")

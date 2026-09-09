@@ -61,7 +61,7 @@ class ChannelRegistry:
         allowed = {"username", "categories", "size", "bot_added", "status", "band",
                    "verified_state", "telegram_member_count", "telegram_member_count_source",
                    "telegram_member_count_checked_at", "telegram_chat_type", "telegram_bot_id", "canonical_chat_id",
-                   "permissions", "verification_reasons", "last_verified_at"}
+                   "permissions", "verification_checks", "verification_reasons", "last_verified_at"}
         unknown = set(changes) - allowed
         if unknown:
             raise ValueError(f"unsupported fields: {sorted(unknown)}")

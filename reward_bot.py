@@ -237,7 +237,8 @@ async def _register_from_telegram(msg, destination: str, kind: str = "channel") 
                     telegram_chat_type=result.chat_type,
                     canonical_chat_id=result.chat_id,
                     telegram_bot_id=bot_credentials.public(owner)["bot_id"],
-                    permissions=result.permissions or {})
+                    permissions=result.permissions or {}, verification_checks=result.checks or {},
+                    last_verified_at=result.checked_at)
     ledger.set_user_id(destination, owner)
     cap = daily_post_cap(size, perf.score(destination)["band"], m.get("status", "ACTIVE"),
                          m.get("is_owner", False), connected=True)
@@ -1337,7 +1338,8 @@ async def stats_cmd(msg: types.Message):
     if not result.eligible:
         channels.update(msg.from_user.id, row["chat_id"], bot_added=False,
                         status=result.state, verified_state=result.state,
-                        verification_reasons=list(result.reasons))
+                        verification_reasons=list(result.reasons),
+                                verification_checks=result.checks or {})
         await msg.answer("❌ <b>Verification failed</b>\n" + "\n".join(result.reasons), parse_mode="HTML")
         return
     if result.member_count is not None:
@@ -1366,7 +1368,8 @@ async def stats_all_callback(cb: types.CallbackQuery):
             if not result.eligible:
                 channels.update(cb.from_user.id, row["chat_id"], bot_added=False,
                                 status=result.state, verified_state=result.state,
-                                verification_reasons=list(result.reasons))
+                                verification_reasons=list(result.reasons),
+                                verification_checks=result.checks or {})
                 lines.append(f"❌ {escape(str(row.get('username')))}: {'; '.join(result.reasons)}")
                 continue
             if result.member_count is None:
@@ -1411,7 +1414,8 @@ async def scan_cmd(msg: types.Message):
                 previous = row.get("status", "ACTIVE")
                 channels.update(msg.from_user.id, row["chat_id"], bot_added=False,
                                 status=result.state, verified_state=result.state,
-                                verification_reasons=list(result.reasons))
+                                verification_reasons=list(result.reasons),
+                                verification_checks=result.checks or {})
                 if previous != result.state:
                     _record_channel_state_change(row, previous, result.state, "; ".join(result.reasons))
                 lines.append(f"❌ {row['username']}: {'; '.join(result.reasons)}")
@@ -1428,7 +1432,8 @@ async def scan_cmd(msg: types.Message):
                             telegram_member_count_source="telegram_api",
                             telegram_member_count_checked_at=result.checked_at,
                             canonical_chat_id=result.chat_id,
-                            permissions=result.permissions or {}, last_verified_at=result.checked_at)
+                            permissions=result.permissions or {}, verification_checks=result.checks or {},
+                    last_verified_at=result.checked_at)
             ledger.register(row["username"], count)
             lines.append(f"✅ {row['username']}: verified; {count:,} members/subscribers (Telegram API)")
         except Exception as exc:
