@@ -2078,9 +2078,14 @@ async def on_forward(msg: types.Message):
                          m.get("is_owner", False), connected=_is_connected(u))
     left = ledger.cap_left(u, cap)
     if left == 0:
-        await msg.answer(f"⛔ Daily post cap reached ({cap}). "
-                         "Your cap is based on size × performance and resets at "
-                         "00:00 UTC.")
+        reason = channels.participation_block_reason(u)
+        if reason:
+            await msg.answer("⛔ Participation blocked: " + reason +
+                             "\nRun /scan after correcting the Telegram setup.")
+        else:
+            await msg.answer(f"⛔ Daily post cap reached ({cap}). "
+                             "Your cap is based on size × performance and resets at "
+                             "00:00 UTC.")
         return
     # 4) submission gate. Category validity + terms are checked here; the
     #    per-target category match is enforced again at matching time, because

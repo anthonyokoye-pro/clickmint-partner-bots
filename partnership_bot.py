@@ -451,7 +451,10 @@ async def on_partner_forward(msg: types.Message):
     cap = daily_post_cap(m.get("size", 0), band, m.get("status", "ACTIVE"),
                          m.get("is_owner", False), connected=_is_connected(username))
     if cap == 0:
-        await msg.answer("⛔ Your channel is not currently active in the network.")
+        await msg.answer("⛔ Participation blocked: " +
+                         (channels.participation_block_reason(username) or
+                          "destination is not currently eligible") +
+                         "\nRun /scan after correcting the Telegram setup.")
         return
     left = ledger.cap_left(username, cap)
     if left == 0:
