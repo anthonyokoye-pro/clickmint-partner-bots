@@ -6,6 +6,7 @@ multiple destinations without overwriting another destination's status.
 """
 from __future__ import annotations
 
+import os
 import time
 
 
@@ -92,11 +93,16 @@ class ChannelRegistry:
         """Prefer immutable Telegram chat IDs after the first successful lookup."""
         return row.get("canonical_chat_id") or row.get("chat_id") or row.get("username")
 
-    def participation_allowed(self, chat_id) -> bool:
+    def participation_allowed(self, chat_id, *, now: int | None = None) -> bool:
         row = self.get(chat_id)
-        return bool(row and row.get("verified_state") == "VERIFIED"
-                    and row.get("bot_added") is True
-                    and row.get("status") == "ACTIVE")
+        if not row or row.get("verified_state") != "VERIFIED" \
+                or row.get("bot_added") is not True or row.get("status") != "ACTIVE":
+            return False
+        checked = row.get("last_verified_at") or row.get("telegram_member_count_checked_at")
+        if not checked:
+            return False
+        max_age = int(os.environ.get("VERIFICATION_MAX_AGE_SECONDS", "86400"))
+        return int(now if now is not None else time.time()) - int(checked) <= max_age
 
     def set_bot_access(self, chat_id, added: bool) -> dict:
         row = self.get(chat_id)

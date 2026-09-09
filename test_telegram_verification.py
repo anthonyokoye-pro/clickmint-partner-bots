@@ -6,6 +6,7 @@ import os
 import tempfile
 
 from store import JsonStore
+from channel_registry import ChannelRegistry
 from telegram_verification import BotCredentialStore, TelegramVerificationService, CredentialError
 
 
@@ -49,7 +50,19 @@ def test_token_is_round_tripped_without_plaintext_record():
     assert c.public(10)["bot_id"] == 77
 
 
+def test_verified_destination_expires():
+    os.environ["VERIFICATION_MAX_AGE_SECONDS"] = "60"
+    s = store(); registry = ChannelRegistry(s)
+    registry.add(10, "@example", "@example", "channel", size=100, bot_added=True)
+    registry.update(10, "@example", verified_state="VERIFIED", status="ACTIVE",
+                    last_verified_at=1000)
+    assert registry.participation_allowed("@example", now=1059)
+    assert not registry.participation_allowed("@example", now=1061)
+    os.environ.pop("VERIFICATION_MAX_AGE_SECONDS", None)
+
+
 def test_tampered_aes_credential_is_rejected():
+
     os.environ["CLICKMINT_CREDENTIAL_KEY"] = "test-secret"
     s = store(); c = BotCredentialStore(s)
     c.save(10, "123:secret-token", {"id": 77, "username": "owner_bot"})

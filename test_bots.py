@@ -262,7 +262,8 @@ def _register(module, username: str, uid: int, size: int, **flags):
     if registry is not None:
         registry.add(uid, handle, handle, "channel", ["General"], size=size, bot_added=True)
         registry.update(uid, handle, verified_state="VERIFIED", status="ACTIVE",
-                        telegram_member_count=size, telegram_member_count_source="telegram_api")
+                        telegram_member_count=size, telegram_member_count_source="telegram_api",
+                        last_verified_at=int(__import__('time').time()))
     return m
 
 
@@ -539,7 +540,8 @@ def test_partnership_offer_respects_receive_types_and_cap():
                                       size=2000, bot_added=True)
         partnership_bot.channels.update(owner, handle, verified_state="VERIFIED",
                                         status="ACTIVE", telegram_member_count=2000,
-                                        telegram_member_count_source="telegram_api")
+                                        telegram_member_count_source="telegram_api",
+                                        last_verified_at=int(__import__('time').time()))
     run(feed(partnership_bot, make_callback("terms:accept", 2010, "sender")))
     run(feed(partnership_bot, make_callback("cat:Airdrops", 2010, "sender")))
     s.reset()

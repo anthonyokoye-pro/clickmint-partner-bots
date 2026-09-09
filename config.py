@@ -49,6 +49,9 @@ BROADCAST_DB_PATH = env("BROADCAST_DB_PATH", os.path.join(STORE_DIR, "broadcast.
 ADMIN_API_DB_PATH = env("ADMIN_API_DB_PATH", os.path.join(STORE_DIR, "admin_api.sqlite3"))
 ENFORCEMENT_DB_PATH = env("ENFORCEMENT_DB_PATH", os.path.join(STORE_DIR, "enforcement.sqlite3"))
 ADMIN_ALLOWED_ORIGINS = [item.strip() for item in env("ADMIN_ALLOWED_ORIGINS", "").split(",") if item.strip()]
+# A successful Telegram verification is cached briefly, then participation
+# requires another real Bot API verification.
+VERIFICATION_MAX_AGE_SECONDS = int(env("VERIFICATION_MAX_AGE_SECONDS", "86400") or 86400)
 # Keep legacy mode until `python3 migrate_mint.py` has been run and the
 # transactional backend has been verified in staging.
 MINT_LEDGER_MODE = env("MINT_LEDGER_MODE", "legacy").strip().lower()
