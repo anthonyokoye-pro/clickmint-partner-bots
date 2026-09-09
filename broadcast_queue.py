@@ -195,14 +195,65 @@ class BroadcastQueue:
             return cur.rowcount == 1
 
     def fail(self, delivery_id: str, error: str, *, blocked: bool = False,
-             retry_seconds: int = 60) -> bool:
+             retry_seconds: int = 60, max_attempts: int = 8) -> bool:
+        """Record a delivery failure with a bounded retry budget.
+
+        Permanent blocks remain terminal. Transient failures become terminal
+        ``failed`` after ``max_attempts`` so one broken destination cannot create
+        an infinite retry loop or hide operational debt.
+        """
+        if int(max_attempts) < 1:
+            raise ValueError("max_attempts must be positive")
         with self._tx() as conn:
+            row = conn.execute(
+                "SELECT attempts FROM broadcast_recipients WHERE delivery_id=? AND status='processing'",
+                (delivery_id,),
+            ).fetchone()
+            if not row:
+                return False
+            attempts = int(row["attempts"])
+            terminal = blocked or attempts >= int(max_attempts)
+            status = "blocked" if blocked else ("failed" if terminal else "pending")
             cur = conn.execute(
                 "UPDATE broadcast_recipients SET status=?,last_error=?,next_attempt_at=? WHERE delivery_id=? AND status='processing'",
-                ("blocked" if blocked else "pending", str(error)[:500],
-                 int(time.time()) + (0 if blocked else max(1, retry_seconds)), delivery_id),
+                (status, str(error)[:500],
+                 int(time.time()) + (0 if terminal else max(1, retry_seconds)), delivery_id),
             )
             return cur.rowcount == 1
+
+    def recover_stale_processing(self, *, older_than_seconds: int = 900,
+                                 retry_seconds: int = 60, max_attempts: int = 8) -> dict:
+        """Recover deliveries abandoned by a crashed worker.
+
+        ``claim`` has no external lease column, so this uses the attempt timestamp
+        as the recovery boundary. Processing rows older than the threshold are
+        returned to the queue or made terminal when their retry budget is spent.
+        """
+        if int(older_than_seconds) < 1 or int(max_attempts) < 1:
+            raise ValueError("recovery thresholds must be positive")
+        cutoff = int(time.time()) - int(older_than_seconds)
+        with self._tx() as conn:
+            rows = conn.execute(
+                "SELECT delivery_id,attempts FROM broadcast_recipients "
+                "WHERE status='processing' AND next_attempt_at<=?",
+                (cutoff,),
+            ).fetchall()
+            recovered = terminal = 0
+            for row in rows:
+                is_terminal = int(row["attempts"]) >= int(max_attempts)
+                conn.execute(
+                    "UPDATE broadcast_recipients SET status=?,last_error=?,next_attempt_at=? "
+                    "WHERE delivery_id=? AND status='processing'",
+                    ("failed" if is_terminal else "pending",
+                     "worker lease expired; delivery recovered",
+                     int(time.time()) + (0 if is_terminal else max(1, int(retry_seconds))),
+                     row["delivery_id"]),
+                )
+                if is_terminal:
+                    terminal += 1
+                else:
+                    recovered += 1
+            return {"recovered": recovered, "terminal": terminal}
 
     def campaign_summary(self, campaign_id: str) -> dict | None:
         with self._connect() as conn:

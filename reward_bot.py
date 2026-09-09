@@ -3000,6 +3000,8 @@ def _entities_from_payload(text: str, payload: dict) -> list | None:
 
 async def _process_reward_broadcasts():
     """Deliver only Reward-scope campaigns through the shared durable queue."""
+    # Recover claims abandoned by a crashed poll tick before taking new work.
+    broadcasts.recover_stale_processing(older_than_seconds=900, retry_seconds=60)
     if enforcement_gate.safe_mode():
         # Safe mode pauses the machine: leave deliveries pending, claim nothing.
         return

@@ -328,6 +328,17 @@ class TaskMarketplace:
                 "UPDATE task_claims SET status='released' WHERE claim_id=? AND status='claimed'",
                 (claim_id,),
             )
+            if cur.rowcount == 1:
+                # Re-open a task whose last slot was held by this claim. This is
+                # essential after a delivery failure: released capacity must not
+                # strand a task in ``full`` forever.
+                conn.execute(
+                    "UPDATE tasks SET status='published' WHERE task_id=(SELECT task_id FROM task_claims WHERE claim_id=?) "
+                    "AND status='full' AND (expires_at IS NULL OR expires_at>?) "
+                    "AND (SELECT COUNT(*) FROM task_claims c WHERE c.task_id=tasks.task_id "
+                    "AND c.status IN ('claimed','completed')) < required_performers",
+                    (claim_id, self._now()),
+                )
             return cur.rowcount == 1
 
     def user_claim_count_since(self, user_id, since: int, destination_id=None) -> int:

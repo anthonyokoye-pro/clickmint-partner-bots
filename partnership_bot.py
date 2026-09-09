@@ -832,6 +832,7 @@ async def _notify_review_sender(item: dict):
 
 async def _process_partnership_broadcasts():
     """Deliver only Partnership-scope campaigns through the shared queue."""
+    broadcasts.recover_stale_processing(older_than_seconds=900, retry_seconds=60)
     if enforcement_gate.safe_mode():
         # Safe mode pauses the machine: leave deliveries pending, claim nothing.
         return

@@ -35,6 +35,23 @@ def test_draft_delete_prevents_queueing():
             raise AssertionError("deleted draft remained queueable")
 
 
+def test_retry_budget_becomes_terminal_and_stale_workers_are_recovered():
+    with tempfile.TemporaryDirectory() as directory:
+        queue = BroadcastQueue(Path(directory) / "broadcast.sqlite3")
+        campaign_id = queue.create_campaign(bot_scope="reward", created_by=1, payload={"text": "hi"})
+        queue.queue_campaign(campaign_id, [10, 11])
+        claimed = sorted(queue.claim(limit=5), key=lambda row: row["recipient_id"])
+        assert queue.fail(claimed[0]["delivery_id"], "temporary", max_attempts=1)
+        assert queue.campaign_summary(campaign_id)["deliveries"]["failed"] == 1
+        # Simulate a crashed worker by making the second processing lease old.
+        with queue._tx() as conn:
+            conn.execute("UPDATE broadcast_recipients SET next_attempt_at=1 WHERE delivery_id=?",
+                         (claimed[1]["delivery_id"],))
+        result = queue.recover_stale_processing(older_than_seconds=1, max_attempts=8)
+        assert result == {"recovered": 1, "terminal": 0}
+        assert queue.campaign_summary(campaign_id)["deliveries"]["pending"] == 1
+
+
 def test_release_returns_delivery_without_burning_an_attempt():
     with tempfile.TemporaryDirectory() as directory:
         queue = BroadcastQueue(Path(directory) / "broadcast.sqlite3")

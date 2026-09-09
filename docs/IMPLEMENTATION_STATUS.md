@@ -17,19 +17,11 @@ This document is a status register, not a roadmap. A requirement is marked **imp
 
 ## Repository synchronization state
 
-The current checkout is based at `c7e4b8e`. The fetched remote tip is available as `FETCH_HEAD` and is `d9fcb6d` (`Apply verification gate to scheduled delivery`). The working tree contains many modified and untracked files. The files below were compared against `FETCH_HEAD` and matched byte-for-byte for the sampled implementation and documentation files:
-
-- `admin_api.py`
-- `admin_http.py`
-- `broadcast_queue.py`
-- `telegram_verification.py`
-- `docs/MASTER_SYSTEM_DOCUMENTATION.md`
-
-The current checkout's committed history and its working tree therefore must not be treated as the same thing. No destructive reset was performed.
+The current implementation is on branch `arena/01a0713e-clickmint-partner-bots` at commit `8e4954b`, rebased onto upstream commit `31b8faf`. The working tree was clean after the Phase 7 hardening pass. The upstream entity, advertising, onboarding, relay, shared SQLite audit/roles, platform-store, and scheduled-delivery verification work is retained.
 
 ## 2026-09-10 implementation pass
 
-Completed in the current continuous Phase 0–6 pass:
+Completed in the Phase 0–6 reliability pass and Phase 7 hardening pass:
 
 - Added `audience.py` as an explicit Reward audience boundary.
 - Fixed Admin broadcast queueing so it resolves known Reward Bot user IDs instead of reading an empty compatibility ledger facade.
@@ -39,9 +31,12 @@ Completed in the current continuous Phase 0–6 pass:
 - Removed raw HTML parse mode from automated Reward and Partnership broadcast/task delivery paths until entity-based editing is available.
 - Made Admin bind host configurable, defaulting to `0.0.0.0` for container/live-preview compatibility.
 - Added audience and Admin queue regression tests.
+- Added bounded broadcast retries and stale-worker recovery.
+- Added task claim release recovery so full tasks reopen when capacity is released.
+- Added regression coverage for retry exhaustion, crashed-worker recovery, and task reopening.
 - Installed repository dependencies in `/tmp/cmvenv` and completed the broad test runner successfully.
 
-Remaining items from the original Phase 0–6 roadmap are documented as partial where they require larger product work: full Telegram entity editor, complete Ad Campaign model, complete Admin capability parity, full Task service extraction, and comprehensive verification scan UX.
+Phase 7 remains focused on production hardening: authoritative storage migration, complete verification scan UX, final Telegram-native editing, unified worker operations, and full Admin capability parity. Payments, withdrawals, advanced AI, attribution, and multi-platform expansion remain deferred.
 
 ## Core systems
 

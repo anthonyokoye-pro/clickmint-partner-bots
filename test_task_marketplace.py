@@ -112,6 +112,27 @@ def test_recovery_expires_claim_and_reopens_capacity():
         directory.cleanup()
 
 
+def test_releasing_last_claim_reopens_full_task():
+    directory, repo = fresh()
+    try:
+        task_id = repo.create_task(creator_user_id=1, category="Guides", title="Reopen", required_performers=1)
+        repo.publish(task_id)
+        claim = repo.claim(task_id, user_id=10, destination_id="channel-a")
+        repo.complete(claim["claim_id"], telegram_chat_id="-1001", telegram_message_id=1)
+        assert repo.progress(task_id)["status"] == "full"
+        # A completed claim is intentionally immutable; use a second task to
+        # verify the release transition itself from a full state.
+        task_id = repo.create_task(creator_user_id=1, category="Guides", title="Release", required_performers=1)
+        repo.publish(task_id)
+        claim = repo.claim(task_id, user_id=11, destination_id="channel-b")
+        with repo._tx() as conn:
+            conn.execute("UPDATE tasks SET status='full' WHERE task_id=?", (task_id,))
+        assert repo.release_claim(claim["claim_id"], reason="delivery failed")
+        assert repo.get_task(task_id)["status"] == "published"
+    finally:
+        directory.cleanup()
+
+
 def test_expired_claim_cannot_complete():
     directory, repo = fresh()
     try:
