@@ -392,7 +392,7 @@ async def mychannels_cmd(msg: types.Message):
     for row in rows:
         access = "✅ bot added" if row.get("bot_added") else "⚠️ add bot for accurate stats"
         lines.append(f"• {row.get('username')} · {row.get('kind')} · "
-                     f"band {row.get('band')} · {row.get('status')} · {access}")
+                     f"performance tier {row.get('band')} · {row.get('status')} · {access}")
     await msg.answer("\n".join(lines), reply_markup=_menu("user", msg.from_user.id))
 
 
@@ -543,7 +543,7 @@ async def join_ref_cmd(msg: types.Message):
 async def available_cmd(msg: types.Message):
     rows = available.available(msg.from_user.id, limit=10)
     if not rows:
-        await msg.answer("📭 No posts are currently available for your band/category.")
+        await msg.answer("📭 No posts are currently available for your performance tier/category.")
         return
     lines = [f"📬 {len(rows)} post(s) available:"]
     for row in rows:
@@ -1847,7 +1847,7 @@ async def menu_nav(cb: types.CallbackQuery):
             text = "📂 <b>MY CHANNELS / GROUPS</b>\n\nNo destinations registered yet."
         else:
             text = "📂 <b>MY CHANNELS / GROUPS</b>\n\n" + "\n".join(
-                f"• {r.get('username')} · {r.get('kind')} · band {r.get('band')} · "
+                f"• {r.get('username')} · {r.get('kind')} · performance tier {r.get('band')} · "
                 f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}"
                 for r in rows)
         await cb.message.edit_text(
@@ -1884,7 +1884,7 @@ async def menu_nav(cb: types.CallbackQuery):
             f"📜 Your contract ({_uname(cb)}):\n"
             f"  Accept: {m.get('accept_types') or 'not set'}\n"
             f"  Receive: {m.get('receive_types') or 'not set'}\n"
-            f"  Size: {m.get('size',0)}  Band: {perf.score(_uname(cb))['band']}\n"
+            f"  Size: {m.get('size',0)}  Performance tier: {perf.score(_uname(cb))['band']}\n"
             f"  Daily cap: {daily_post_cap(m.get('size',0), perf.score(_uname(cb))['band'], m.get('status','ACTIVE'), m.get('is_owner',False), connected=_is_connected(_uname(cb)))}")
         return
     elif which == "audit":
@@ -2008,7 +2008,7 @@ async def show_cap(cb: types.CallbackQuery):
         f"📈 <b>Performance tier:</b> {s['band']} · <b>Status:</b> {m.get('status','ACTIVE')}\n"
         f"📤 <b>Available today:</b> {cap if cap != -1 else 'UNLIMITED'} post(s)\n\n"
         "Your limit reflects audience size and real performance.\n"
-        "Better delivery and engagement can improve your band.",
+        "Better delivery and engagement can improve your performance tier.",
         parse_mode="HTML",
         reply_markup=back_btn_q("menu:hub"))
     await cb.answer()
@@ -2224,7 +2224,7 @@ async def pick_spend(cb: types.CallbackQuery):
         # only 2 matching channels exist used to burn the difference for nothing.
         targets = perf.match(sender, want_channels=n, post_type=post_type)
         if not targets:
-            await cb.answer("No matching channel in your performance band accepts "
+            await cb.answer("No matching channel in your performance tier accepts "
                             f"'{post_type}' right now. Nothing was charged.",
                             show_alert=True)
             return
@@ -2294,7 +2294,7 @@ async def pick_spend(cb: types.CallbackQuery):
             try:
                 await bot.send_message(target,
                                        f"{sender} has a {style} post ({post_type}) "
-                                       f"for your band. Agree to forward, skip, or report.",
+                                       f"for your performance tier. Agree to forward, skip, or report.",
                                        reply_markup=kb)
             except Exception as e:
                 # One unreachable channel must not abort the whole distribution.

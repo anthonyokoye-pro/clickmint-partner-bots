@@ -194,7 +194,7 @@ async def mychannels_cmd(msg: types.Message):
         await msg.answer("📂 No registered channels/groups. Connect your bot with /connectbot, then use /start @name.")
         return
     await msg.answer("📂 MY CHANNELS / GROUPS\n\n" + "\n".join(
-        f"• {r.get('username')} · {r.get('kind')} · band {r.get('band')} · "
+        f"• {r.get('username')} · {r.get('kind')} · performance tier {r.get('band')} · "
         f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}" for r in rows))
 
 
@@ -347,7 +347,7 @@ async def menu_nav(cb: types.CallbackQuery):
     if which == "channels":
         rows = channels.mine(uid)
         text = "📂 <b>MY CHANNELS / GROUPS</b>\n\n" + ("\n".join(
-            f"• {r.get('username')} · {r.get('kind')} · band {r.get('band')} · "
+            f"• {r.get('username')} · {r.get('kind')} · performance tier {r.get('band')} · "
             f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}" for r in rows)
             if rows else "No destinations registered yet.")
         await cb.message.edit_text(text, parse_mode="HTML",
