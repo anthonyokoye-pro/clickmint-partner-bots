@@ -334,6 +334,22 @@ async def stats_all_callback(cb: types.CallbackQuery):
     await cb.answer()
 
 
+async def _send_offer_with_owner_bot(target: str, text: str, reply_markup):
+    """Send a partnership offer with the destination owner's verified bot."""
+    row = channels.get(target)
+    if not row or not channels.participation_allowed(target):
+        raise CredentialError("destination is not currently verified")
+    from aiogram import Bot as TelegramBot
+    token = telegram_verification.credentials.token(int(row["owner_id"]))
+    owned_bot = (telegram_verification.bot_factory(token)
+                 if telegram_verification.bot_factory else TelegramBot(token=token))
+    try:
+        return await owned_bot.send_message(
+            channels.telegram_reference(row), text, reply_markup=reply_markup)
+    finally:
+        await owned_bot.session.close()
+
+
 @dp.message(Command("adminlogin"))
 async def admin_login(msg: types.Message):
     parts = msg.text.split()
@@ -538,8 +554,8 @@ async def on_partner_forward(msg: types.Message):
             [InlineKeyboardButton(text="🚩 Report", callback_data=f"chk:report:{username}")],
         ])
         try:
-            await bot.send_message(target, f"{username} shared a '{cat}' post. Post it?",
-                                   reply_markup=kb)
+            await _send_offer_with_owner_bot(
+                target, f"{username} shared a '{cat}' post. Post it?", kb)
         except Exception as e:
             # one unreachable partner must not abort the rest of the offer
             logging.warning("offer to %s failed: %s", target, e)

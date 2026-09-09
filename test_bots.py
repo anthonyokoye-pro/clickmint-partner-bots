@@ -32,6 +32,7 @@ os.environ["STORE_DIR"] = _TMP
 os.environ["REWARD_BOT_TOKEN"] = "111111:TESTTOKENTESTTOKENTESTTOKENTESTTOKEN"
 os.environ["PARTNER_BOT_TOKEN"] = "222222:TESTTOKENTESTTOKENTESTTOKENTESTTOKEN"
 os.environ["ADMIN_BOT_TOKEN"] = "333333:TESTTOKENTESTTOKENTESTTOKENTESTTOKEN"
+os.environ["CLICKMINT_CREDENTIAL_KEY"] = "test-only-credential-key-please-change"
 OWNER_ID = 555000555
 os.environ["OWNER_USER_ID"] = str(OWNER_ID)
 
@@ -542,6 +543,10 @@ def test_partnership_offer_respects_receive_types_and_cap():
                                         status="ACTIVE", telegram_member_count=2000,
                                         telegram_member_count_source="telegram_api",
                                         last_verified_at=int(__import__('time').time()))
+    for owner, bot_id in ((2010, 9010), (2020, 9020), (2030, 9030)):
+        partnership_bot.bot_credentials.save(owner, f"{bot_id}:test-token", {
+            "id": bot_id, "username": f"bot_{owner}"})
+    partnership_bot.telegram_verification.bot_factory = lambda token: partnership_bot.bot
     run(feed(partnership_bot, make_callback("terms:accept", 2010, "sender")))
     run(feed(partnership_bot, make_callback("cat:Airdrops", 2010, "sender")))
     s.reset()
