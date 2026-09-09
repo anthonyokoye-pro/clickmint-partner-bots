@@ -4,7 +4,7 @@ Three bots (reward · partnership · owner admin panel) sharing one verified eng
 (`core.py` + `governance.py`). Zero budget, free hosting, JSON store.
 
 **Status:** `python3 test_core.py` 28/28 · `python3 test_governance.py` 33/33 ·
-`python3 test_bots.py` 26/26 (bot wiring) · `python3 simulate.py` clean dry run.
+`python3 test_bots.py` 37/37 (bot wiring) · `python3 simulate.py` clean dry run.
 See `docs/AUDIT_REPORT.md` and the readable transcript in `docs/DRY_RUN.md`.
 
 **New here / not comfortable with the terminal?** Read **[START_HERE.md](START_HERE.md)** —

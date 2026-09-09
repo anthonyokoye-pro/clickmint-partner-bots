@@ -64,6 +64,11 @@ posts* is the signal, not raw subscriber count.
 
 ## PART 2 — BOT SYSTEM DESIGN (directory library)
 
+> ⚠️ **HISTORICAL (2026-09-04).** Parts 2 and 3 describe the original three-bot/JSON design and the
+> audit of that date. Storage, verification, delivery routing, admin surface and test counts have all
+> changed since; see **`docs/STATUS.md`** for the current state. Part 1 (growth strategy) and Part 4
+> (handoff) remain valid.
+
 This is how the codebase is structured, so the next AI session can read it fast and
 accurately (no wasted session/limit).
 

@@ -1,5 +1,11 @@
 # CLICKMINT Partner Bots — Master System Documentation
 
+> ⚠️ **HISTORICAL SNAPSHOT (2026-09-04).** This document describes the codebase as it was before the
+> September 2026 compliance, verification, relay and storage work. Statements such as "no SQLite",
+> "no REST/API server", "no browser admin console", "JSON only" and the listed test counts are **no
+> longer true**. The canonical, maintained sources are **`docs/STATUS.md`** and the topic documents it
+> links. This file is kept for its explanations of the original flows and formulas.
+
 > **Source of truth:** this document describes the code currently in this repository. It does not describe a planned SaaS backend, database service, commission system, webhook service, or analytics platform unless the source code actually contains one.
 >
 > **Audit basis:** Python modules, shell scripts, service files, tests, current configuration templates, and the existing project documentation were inspected. Where the repository does not determine an answer, it is marked **UNKNOWN / NOT DETERMINABLE FROM AVAILABLE SOURCE**.
