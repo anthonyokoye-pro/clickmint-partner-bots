@@ -2242,6 +2242,9 @@ def owner_targets(post_type: str = "General", sender: str | None = None) -> list
             continue
         if m.get("status") in ("RESTRICTED", "REMOVED"):
             continue
+        # Owner exemption removes economic limits, not Telegram safety gates.
+        if not _is_connected(username):
+            continue
         if not allows_receive(m, post_type):
             continue
         out.append(username)
