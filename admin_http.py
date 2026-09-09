@@ -176,6 +176,19 @@ class AdminWSGI:
             if method == "GET" and path.startswith("/api/admin/referrals/"):
                 period = unquote(path.split("/api/admin/referrals/", 1)[1])
                 return self._response(start_response, "200 OK", self.api.referral_snapshot(init_data, period), correlation_id)
+            if method == "GET" and path == "/api/admin/safety":
+                return self._response(start_response, "200 OK", self.api.safety_overview(init_data), correlation_id)
+            if method == "GET" and path == "/api/admin/reports":
+                query = parse_qs(environ.get("QUERY_STRING", ""))
+                payload = {"reports": self.api.list_reports(init_data, query.get("status", [None])[0], int(query.get("limit", [50])[0]))}
+                return self._response(start_response, "200 OK", payload, correlation_id)
+            if method == "GET" and path.startswith("/api/admin/reports/"):
+                report_id = unquote(path.split("/api/admin/reports/", 1)[1])
+                return self._response(start_response, "200 OK", self.api.report_details(init_data, report_id), correlation_id)
+            if method == "GET" and path == "/api/admin/appeals":
+                query = parse_qs(environ.get("QUERY_STRING", ""))
+                payload = {"appeals": self.api.list_appeals(init_data, query.get("status", [None])[0], int(query.get("limit", [50])[0]))}
+                return self._response(start_response, "200 OK", payload, correlation_id)
             if method == "GET" and path.startswith("/api/admin/enforcement/"):
                 parts = [unquote(item) for item in path.strip("/").split("/")]
                 if len(parts) != 5:
@@ -212,10 +225,25 @@ class AdminWSGI:
                 if parts[:4] == ["api", "admin", "safety", "emergency"] and len(parts) == 4:
                     result = self.api.emergency_mode(init_data, bool(body.get("enabled")), body.get("reason", ""))
                     return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts == ["api", "admin", "reports"]:
+                    result = self.api.file_report(init_data, body.get("entity_id", ""), body.get("entity_type", ""),
+                                                  body.get("reason", ""), body.get("subject", ""))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts[:3] == ["api", "admin", "reports"] and len(parts) == 5 and parts[4] == "review":
+                    result = self.api.review_report(init_data, parts[3], body.get("status", ""), body.get("notes", ""))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts == ["api", "admin", "evidence"]:
+                    result = self.api.add_evidence(init_data, body.get("entity_id", ""), body.get("entity_type", ""),
+                                                   body.get("evidence_type", ""), body.get("reference", ""),
+                                                   body.get("report_id"), body.get("notes", ""))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts[:3] == ["api", "admin", "appeals"] and len(parts) == 5 and parts[4] == "decide":
+                    result = self.api.decide_appeal(init_data, parts[3], body.get("decision", ""), body.get("notes", ""))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts[:3] == ["api", "admin", "enforcement"] and len(parts) == 6:
                     result = self.api.enforce_entity(
                         init_data, parts[4], parts[3], parts[5], body.get("reason", ""),
-                        body.get("duration_seconds"), body.get("notes", ""))
+                        body.get("duration_seconds"), body.get("notes", ""), body.get("related_report_id"))
                     return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts[:3] == ["api", "admin", "referrals"] and len(parts) == 5 and parts[4] == "approve":
                     result = self.api.approve_referral_ranking(init_data, parts[3], body.get("reason", ""))
@@ -242,7 +270,7 @@ class AdminWSGI:
         except AdminAuthorizationError as exc:
             self._security_audit("ADMIN_AUTH_REJECTED", str(exc), correlation_id)
             return self._response(start_response, "403 Forbidden", {"error": str(exc)}, correlation_id)
-        except (ValueError, KeyError) as exc:
+        except (ValueError, KeyError, TypeError) as exc:
             return self._response(start_response, "400 Bad Request", {"error": str(exc)}, correlation_id)
         except Exception:
             return self._response(start_response, "500 Internal Server Error", {"error": "internal error"}, correlation_id)

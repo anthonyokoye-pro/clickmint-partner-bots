@@ -28,6 +28,7 @@ from mint_ledger import TransactionalMintLedger
 from governance import ReviewQueue, RoleRegistry, daily_post_cap
 from features import category_counts
 from channel_registry import ChannelRegistry
+from enforcement import EnforcementStore, EnforcementError
 import config
 
 logging.basicConfig(level=logging.INFO)
@@ -41,6 +42,9 @@ PARTNER_STORE_PATH = config.PARTNER_STORE_PATH
 
 def load_stores():
     return JsonStore(REWARD_STORE_PATH), JsonStore(PARTNER_STORE_PATH)
+
+
+enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
 
 
 def _kb(rows):
@@ -133,6 +137,7 @@ def _dashboard_kb():
          InlineKeyboardButton(text="🧾 Review queue — partner", callback_data="dash:rev:partnership")],
         [InlineKeyboardButton(text="🤝 Partnership contracts", callback_data="dash:contracts")],
         [InlineKeyboardButton(text="👤 Admin logins", callback_data="dash:admins")],
+        [InlineKeyboardButton(text="🛡 Trust & safety", callback_data="dash:safety")],
     ])
 
 
@@ -162,6 +167,8 @@ async def dash(cb: types.CallbackQuery):
         await show_contracts(cb)
     elif which == "admins":
         await show_admins(cb)
+    elif which == "safety":
+        await show_safety(cb)
     await cb.answer()
 
 
@@ -344,6 +351,59 @@ async def gen_invite(cb: types.CallbackQuery):
     lines += ["", "Send the code(s) to the trusted person. They run:",
               "   /adminlogin <CODE>", "in that bot. Each code is single-use."]
     await _safe_edit(cb, "\n".join(lines), _kb([[_back("dash:admins")]]))
+
+
+# --- trust & safety (compliance store) ---
+def _safety_text():
+    st = enforcement.safety_status()
+    safe = st["safe_mode"]
+    states = st["entities_by_state"] or {}
+    lines = ["🛡 TRUST & SAFETY",
+             f"  • Emergency safe mode: {'ON ⛔' if safe.get('enabled') else 'off'}" +
+             (f" — {safe.get('reason')}" if safe.get('enabled') else ""),
+             f"  • Open reports: {st['open_reports']}   • Open appeals: {st['open_appeals']}",
+             "  • Entities: " + (", ".join(f"{k} {v}" for k, v in sorted(states.items())) or "none"),
+             ""]
+    reports = enforcement.list_reports("PENDING", limit=5)
+    if reports:
+        lines.append("Latest pending reports:")
+        lines += [f"  #{r['report_id'][-6:]} {r['entity_type']} {r['entity_id']} — {r['reason'][:60]}" for r in reports]
+    appeals = enforcement.list_appeals("OPEN", limit=5)
+    if appeals:
+        lines.append("Open appeals:")
+        lines += [f"  {a['appeal_id'][-6:]} {a['entity_type']} {a['entity_id']} — {a['statement'][:60]}" for a in appeals]
+    lines += ["", "Reports and appeals are decided by a human in the Admin Mini App.",
+              "Nothing here is automatic; this bot only toggles emergency safe mode."]
+    return "\n".join(lines)
+
+
+def _safety_kb():
+    on = enforcement.emergency_enabled("safe_mode")
+    return _kb([
+        [InlineKeyboardButton(text=("🟢 Disable safe mode" if on else "🔴 Enable safe mode"),
+                              callback_data="safety:" + ("off" if on else "on"))],
+        [_back("dash:back")],
+    ])
+
+
+async def show_safety(cb):
+    await _safe_edit(cb, _safety_text(), _safety_kb())
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("safety:"))
+async def safety_toggle(cb: types.CallbackQuery):
+    if not is_owner(cb.from_user.id):
+        await cb.answer("Owner only.", show_alert=True)
+        return
+    enable = cb.data == "safety:on"
+    try:
+        enforcement.set_emergency(enable, actor_id=cb.from_user.id,
+                                  reason="toggled from admin bot by owner")
+    except EnforcementError as exc:
+        await cb.answer(str(exc), show_alert=True)
+        return
+    await show_safety(cb)
+    await cb.answer("Safe mode " + ("enabled — member automation is paused." if enable else "disabled."))
 
 
 async def _safe_edit(cb, text, kb):

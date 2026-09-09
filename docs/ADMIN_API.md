@@ -132,6 +132,38 @@ POST /api/admin/performance/{destination_id}/clear
 {"reason": "manual review completed"}
 ```
 
+### Trust & safety (reports, evidence, appeals)
+
+```http
+GET  /api/admin/safety                       # safe-mode status, open reports, open appeals
+GET  /api/admin/reports?status=PENDING&limit=50
+GET  /api/admin/reports/{report_id}          # report + evidence + current entity state
+GET  /api/admin/appeals?status=OPEN
+GET  /api/admin/enforcement/{entity_type}/{entity_id}
+
+POST /api/admin/reports
+{"entity_id": "@chan", "entity_type": "channel", "reason": "repeated scam links"}
+
+POST /api/admin/reports/{report_id}/review
+{"status": "UNDER_REVIEW|DISMISSED|WARNED|RESOLVED", "notes": "…"}   # never changes state
+
+POST /api/admin/evidence
+{"entity_id": "@chan", "entity_type": "channel", "evidence_type": "link|message|screenshot|log|note",
+ "reference": "https://t.me/chan/12", "report_id": "rpt_…"}
+
+POST /api/admin/enforcement/{entity_type}/{entity_id}/{flagged|restricted|suspended|banned|removed|restore}
+{"reason": "…", "duration_seconds": 3600, "related_report_id": "rpt_…"}   # OWNER only
+
+POST /api/admin/appeals/{appeal_id}/decide
+{"decision": "UNDER_REVIEW|UPHELD|WITHDRAWN|OVERTURNED", "notes": "…"}   # OVERTURNED is OWNER only
+
+POST /api/admin/safety/emergency
+{"enabled": true, "reason": "…"}                                        # OWNER only
+```
+
+Linking `related_report_id` to an enforcement action closes that report with the
+matching outcome. `duration_seconds` must be 1 s – 365 days.
+
 ## Deliberately unavailable operations
 
 This API does not expose endpoints for:

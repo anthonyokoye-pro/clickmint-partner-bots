@@ -589,7 +589,7 @@ def test_admin_dashboard_owner_only_and_back_works():
     assert "ADMIN DASHBOARD" in session.texts()
     # every dashboard panel, including the Back button that used to be shadowed
     for data in ("dash:cap", "dash:rev:reward", "dash:rev:partnership",
-                 "dash:contracts", "dash:admins", "dash:back"):
+                 "dash:contracts", "dash:admins", "dash:safety", "dash:back"):
         session.reset()
         errs = run(feed(admin_bot, make_callback(data, OWNER_ID, "owner")))
         assert_no_errors(errs, f"admin panel {data}")
@@ -645,6 +645,138 @@ def test_owner_broadcast_is_not_offered_to_the_owner():
     print("OK the owner's broadcast is never offered back to the owner")
 
 
+# ---------------------------------------------------------------------------
+# Shared enforcement gate is wired into every participation path
+# ---------------------------------------------------------------------------
+def _clean_enforcement(module):
+    """Start every enforcement test from an ACTIVE world with safe mode off."""
+    import sqlite3
+    with sqlite3.connect(module.enforcement.path) as conn:
+        for table in ("enforcement_entities", "enforcement_events", "compliance_reports",
+                      "compliance_evidence", "compliance_appeals", "safety_controls"):
+            conn.execute(f"DELETE FROM {table}")
+
+
+def test_restricted_member_cannot_distribute_but_can_appeal():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    reward_bot.ledger.earn("@alice")
+    run(feed(reward_bot, make_callback("terms:accept", 1001, "alice")))
+    run(feed(reward_bot, make_callback("cat:Airdrops", 1001, "alice")))
+    reward_bot.enforcement.enforce(1001, "user", "RESTRICTED", actor_id="owner",
+                                   reason="human-reviewed report")
+    s.reset()
+    errs = run(feed(reward_bot, make_message("A verified airdrop guide.", uid=1001,
+                                             username="alice", forwarded=True)))
+    assert_no_errors(errs, "forward while restricted")
+    assert "restricted" in s.texts().lower(), s.texts()
+    assert "How many" not in s.texts(), "a restricted member must not reach the funnel"
+    # The member can put their side on record; nothing changes by itself.
+    s.reset()
+    errs = run(feed(reward_bot, make_message("/appeal I was flagged by mistake", uid=1001, username="alice")))
+    assert_no_errors(errs, "/appeal")
+    assert "Appeal apl_" in s.texts(), s.texts()
+    assert reward_bot.enforcement.get(1001, "user")["state"] == "RESTRICTED"
+    # A second appeal while one is open is refused politely.
+    s.reset()
+    run(feed(reward_bot, make_message("/appeal again", uid=1001, username="alice")))
+    assert "already open" in s.texts()
+    # Only an explicit human decision (overturn) restores the member.
+    appeal = reward_bot.enforcement.list_appeals("OPEN")[0]
+    reward_bot.enforcement.decide_appeal(appeal["appeal_id"], "OVERTURNED", decided_by="owner", notes="mistake")
+    assert reward_bot.enforcement.get(1001, "user")["state"] == "ACTIVE"
+    s.reset()
+    errs = run(feed(reward_bot, make_message("A verified airdrop guide.", uid=1001,
+                                             username="alice", forwarded=True)))
+    assert_no_errors(errs, "forward after restore")
+    assert "restricted" not in s.texts().lower()
+    _clean_enforcement(reward_bot)
+    print("OK restricted members are blocked at the shared gate and can appeal to a human")
+
+
+def test_safe_mode_pauses_members_but_never_the_owner_panel():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    run(feed(reward_bot, make_callback("terms:accept", 1001, "alice")))
+    run(feed(reward_bot, make_callback("cat:Airdrops", 1001, "alice")))
+    reward_bot.enforcement.set_emergency(True, actor_id="owner", reason="incident")
+    s.reset()
+    errs = run(feed(reward_bot, make_message("A verified airdrop guide.", uid=1001,
+                                             username="alice", forwarded=True)))
+    assert_no_errors(errs, "forward during safe mode")
+    assert "safe mode" in s.texts().lower(), s.texts()
+    # Owner panels keep working during an incident — that is when they matter.
+    s.reset()
+    errs = run(feed(reward_bot, make_message("/start", uid=OWNER_ID, username="owner")))
+    assert_no_errors(errs, "owner /start in safe mode")
+    assert "Welcome, Owner" in s.texts()
+    reward_bot.enforcement.set_emergency(False, actor_id="owner", reason="resolved")
+    _clean_enforcement(reward_bot)
+    print("OK safe mode pauses member automation without locking the owner out")
+
+
+def test_bot_reports_are_mirrored_into_the_compliance_store():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    _register(reward_bot, "bob", 1002, 2500)
+    errs = run(feed(reward_bot, make_callback("report:@alice:@bob", 1002, "bob")))
+    assert_no_errors(errs, "reporting a post")
+    mirrored = reward_bot.enforcement.list_reports("PENDING")
+    assert len(mirrored) == 1 and mirrored[0]["entity_id"] == "@alice", mirrored
+    assert reward_bot.enforcement.get("@alice", "channel")["state"] == "ACTIVE"  # never auto-banned
+    # partnership bot too
+    ps = _fresh_bot(partnership_bot)
+    _register(partnership_bot, "alice", 1001, 2500, is_partner=True)
+    _register(partnership_bot, "bob", 1002, 2500, is_partner=True)
+    errs = run(feed(partnership_bot, make_callback("chk:report:@alice", 1002, "bob")))
+    assert_no_errors(errs, "partner report")
+    assert len(partnership_bot.enforcement.list_reports("PENDING")) == 2
+    _clean_enforcement(reward_bot)
+    print("OK in-bot reports land in the durable compliance store, still pending a human")
+
+
+def test_admin_bot_safe_mode_toggle_is_owner_only():
+    session = MockSession()
+    admin_bot.bot.session = session
+    _clean_enforcement(admin_bot)
+    errs = run(feed(admin_bot, make_callback("safety:on", 1001, "alice")))
+    assert_no_errors(errs, "member toggles safe mode")
+    assert not admin_bot.enforcement.emergency_enabled("safe_mode"), "a member enabled safe mode"
+    session.reset()
+    errs = run(feed(admin_bot, make_callback("safety:on", OWNER_ID, "owner")))
+    assert_no_errors(errs, "owner enables safe mode")
+    assert admin_bot.enforcement.emergency_enabled("safe_mode")
+    assert "ON" in session.texts()
+    run(feed(admin_bot, make_callback("safety:off", OWNER_ID, "owner")))
+    assert not admin_bot.enforcement.emergency_enabled("safe_mode")
+    _clean_enforcement(admin_bot)
+    print("OK admin bot safe-mode toggle is owner-only and reversible")
+
+
+def test_enforced_partner_is_never_offered_a_post():
+    s = _fresh_bot(partnership_bot)
+    _clean_enforcement(partnership_bot)
+    for name, uid in (("alice", 1001), ("bob", 1002), ("carol", 1003)):
+        m = _register(partnership_bot, name, uid, 2500, is_partner=True)
+        m["receive_types"] = ["Airdrops"]
+        partnership_bot.bot_credentials.save(uid, f"{uid + 8000}:test-token", {"id": uid + 8000, "username": f"bot_{uid}"})
+    partnership_bot.ledger.save()
+    partnership_bot.telegram_verification.bot_factory = lambda token: partnership_bot.bot
+    partnership_bot.enforcement.enforce("@carol", "channel", "SUSPENDED", actor_id="owner", reason="reviewed")
+    run(feed(partnership_bot, make_callback("terms:accept", 1001, "alice")))
+    run(feed(partnership_bot, make_callback("cat:Airdrops", 1001, "alice")))
+    s.reset()
+    errs = run(feed(partnership_bot, make_message("Airdrop guide", uid=1001, username="alice", forwarded=True)))
+    assert_no_errors(errs, "partner forward")
+    targets = {d.get("chat_id") for d in s.sent() if str(d.get("chat_id", "")).startswith("@")}
+    assert "@bob" in targets and "@carol" not in targets, (targets, s.texts())
+    _clean_enforcement(partnership_bot)
+    print("OK a suspended partner is skipped by the shared gate")
+
+
 ALL_TESTS = [
     test_all_handlers_are_coroutines,
     test_expected_callbacks_are_registered,
@@ -673,6 +805,12 @@ ALL_TESTS = [
     # --- added after the dry-run simulation ---
     test_owner_is_recognised_before_ever_forwarding,
     test_owner_broadcast_is_not_offered_to_the_owner,
+    # --- shared enforcement gate (2026-09 audit item 1) ---
+    test_restricted_member_cannot_distribute_but_can_appeal,
+    test_safe_mode_pauses_members_but_never_the_owner_panel,
+    test_bot_reports_are_mirrored_into_the_compliance_store,
+    test_enforced_partner_is_never_offered_a_post,
+    test_admin_bot_safe_mode_toggle_is_owner_only,
 ]
 
 

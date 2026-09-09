@@ -34,7 +34,7 @@ Tiered network, strict 1:1 credits, accept/reject chain.
 - **Owner (CLICKMINT) is exempt** — no funnel, no credits, no cap; can route anywhere.
 
 Commands: `/start @chan 1200` · `/register @chan 1200` · `/balance` · `/rank` · `/audit` ·
-`/reports` · `/schedule` · `/adminlogin <CODE>` · or just **forward a post** to distribute.
+`/reports` · `/schedule` · `/appeal <why>` · `/adminlogin <CODE>` · or just **forward a post** to distribute.
 (There is no `/agree` command — agreeing happens on the offer's buttons, so the credit
 goes to the channel that actually shares someone else's post.)
 

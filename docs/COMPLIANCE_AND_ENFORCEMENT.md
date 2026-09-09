@@ -58,21 +58,37 @@ Human review is required for serious enforcement, borderline content, appeals, p
 
 ## Current status
 
-Implemented in this audit pass:
+Implemented:
 
 - durable enforcement state store;
 - reports, evidence, event timeline;
 - temporary enforcement expiry;
 - safe-mode control;
-- eligibility fail-closed integration and regression tests.
+- eligibility fail-closed integration and regression tests;
+- **shared gate (`enforcement_gate.py`)** consulted by the reward bot (registration,
+  forward/distribution, task claims, scheduled direct delivery), the partnership bot
+  (registration, offers — both the sender and every target partner) and the admin bot.
+  The gate only reads states a human recorded; it fails closed if the store is unreachable;
+  the owner is exempt from per-entity state but **not** from safe mode;
+- **appeals** (`compliance_appeals`): a restricted member files `/appeal <text>` in the
+  reward bot. Filing changes nothing. Admins may mark an appeal UNDER_REVIEW / UPHELD /
+  WITHDRAWN; only the **owner** may OVERTURN, which performs an audited `restore()`;
+- in-bot 🚩 reports are mirrored into `compliance_reports` (still PENDING a human);
+- Admin Mini App **Reports & appeals** panel and API (`/api/admin/safety`,
+  `/api/admin/reports…`, `/api/admin/evidence`, `/api/admin/appeals/{id}/decide`);
+- admin bot **Trust & safety** panel with an owner-only safe-mode toggle.
 
 Not yet implemented:
 
-- Admin Mini App enforcement panels;
-- bot report submission integration for every entity type;
-- appeals UI/workflow;
-- full safe-mode wiring into all workers;
-- consent-aware advertising.
+- consent-aware advertising;
+- report entry points for *group* entities from inside Telegram groups.
+
+## Safe mode semantics
+
+When safe mode is on: member forwards, task claims, partnership offers and new
+registrations are refused with a "paused" message; scheduled direct deliveries are
+**retried later** rather than dropped; owner panels and the Admin Mini App keep working
+so the incident can be handled.
 
 ## Human verification and risk
 

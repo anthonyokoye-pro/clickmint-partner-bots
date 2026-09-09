@@ -48,6 +48,8 @@ from credibility import tier_for_score
 from performance_snapshots import PerformanceSnapshotRepository
 from referral_ranking import ReferralRecord, rank_referrers, allocate_monthly_rewards
 from broadcast_queue import BroadcastQueue
+from enforcement import EnforcementStore, EnforcementError
+from enforcement_gate import EnforcementGate
 from currency import MINT_ICON, MINT_NAME, amount, amount_short, balance_line
 from store import JsonStore
 from scheduler import Scheduler
@@ -87,6 +89,10 @@ reroutes = ReroutePlanner(store)
 marketplace = TaskMarketplace(config.TASK_DB_PATH)
 credibility_snapshots = PerformanceSnapshotRepository(config.CREDIBILITY_DB_PATH)
 broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
+# Shared compliance boundary: every participation path asks this ONE gate.
+# It only reads states a human recorded; it never decides guilt.
+enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
+enforcement_gate = EnforcementGate(enforcement, owner_user_id=config.OWNER_USER_ID)
 # PerformanceEngine consumes real observations when available; absent fields stay absent.
 perf.views_provider = stats.provider
 
@@ -100,6 +106,19 @@ def _menu(role: str, uid: int | None = None):
 def _is_connected(username: str) -> bool:
     """Fail-closed destination gate used by every participation path."""
     return channels.participation_allowed(username)
+
+
+def _enforcement_block(uid: int, capability: str, *destinations) -> str | None:
+    """Return a user-facing block message, or None when the actor may proceed.
+
+    Checks the acting user AND every destination they act through, so a
+    restricted channel cannot be used by an unrestricted owner (or vice versa).
+    """
+    subjects = [(uid, "user")] + [(d, "channel") for d in destinations if d]
+    decision = enforcement_gate.check_many(subjects, capability, is_owner=roles.is_owner(uid))
+    if decision:
+        return None
+    return enforcement_gate.block_message(decision)
 
 
 def _audit_counts() -> dict[str, int]:
@@ -219,6 +238,9 @@ def _parse_registration(text: str):
 async def _register_from_telegram(msg, destination: str, kind: str = "channel") -> str:
     """Resolve, verify, and register a destination with the user's own bot."""
     owner = msg.from_user.id
+    blocked = _enforcement_block(owner, "registration", destination)
+    if blocked:
+        return blocked
     channels.add(owner, destination, destination, kind, ["General"], size=0, bot_added=False)
     row = channels.get(destination)
     channels.update(owner, destination, status="VERIFYING")
@@ -1192,6 +1214,10 @@ async def claim_task(cb: types.CallbackQuery):
     if not task:
         await cb.answer("That task no longer exists.", show_alert=True)
         return
+    blocked = _enforcement_block(cb.from_user.id, "tasks", selected_chat_id)
+    if blocked:
+        await cb.answer(blocked[:200], show_alert=True)
+        return
     rows = channels.mine(cb.from_user.id)
     selected = next((row for row in rows
                      if (row.get("chat_id") or row.get("username")) == selected_chat_id), None)
@@ -2130,6 +2156,10 @@ async def on_forward(msg: types.Message):
         await owner_forward(msg, u)
         return
 
+    blocked = _enforcement_block(uid, "distribution", u)
+    if blocked:
+        await msg.answer(blocked)
+        return
     sess = _session(uid)
     # 1) terms accepted? (per user — never a single global flag)
     if not sess.get("accepted_terms"):
@@ -2532,6 +2562,13 @@ async def report_post(cb: types.CallbackQuery):
     item = reports.report(sender=sender, reporter=reporter,
                           reported_post={"target_channel": target},
                           reason="receiver flagged as inappropriate/scam/fraud")
+    # Mirror into the durable compliance store so the Admin Mini App sees it.
+    try:
+        enforcement.report(cb.from_user.id, sender, "channel",
+                           "receiver flagged as inappropriate/scam/fraud",
+                           subject=f"legacy_report:{item['id']}")
+    except EnforcementError as exc:
+        logging.warning("compliance report mirror failed: %s", exc)
     audit.record(bot="reward", sender=sender, target_channel=target,
                  mode="chain", status="skipped", forward_valid=True)
     await cb.message.answer(f"🚩 Report #{item['id']} logged against {sender}. "
@@ -3572,6 +3609,39 @@ async def audit_view(msg: types.Message):
     await msg.answer("\n".join(lines[:55]))
 
 
+@dp.message(Command("appeal"))
+async def appeal_cmd(msg: types.Message):
+    """Let a restricted member put their side on the record. Filing an appeal
+    changes nothing by itself — a human decides, and only the owner can
+    overturn an enforcement action."""
+    uid = _uid(msg)
+    statement = (msg.text or "").split(maxsplit=1)[1].strip() if len((msg.text or "").split(maxsplit=1)) > 1 else ""
+    if not statement:
+        await msg.answer("Usage: /appeal <your explanation>\n"
+                         "Tell us why the restriction is a mistake. A human reviews every appeal.")
+        return
+    if len(statement) > 1500:
+        await msg.answer("Please keep your appeal under 1500 characters.")
+        return
+    # Appeal against whichever of the member's records is currently enforced.
+    subjects = [(uid, "user")] + [(row.get("username") or row.get("chat_id"), "channel")
+                                  for row in channels.mine(uid)]
+    target = next(((eid, etype) for eid, etype in subjects
+                   if eid and enforcement.get(eid, etype)["state"] != "ACTIVE"), None)
+    if target is None:
+        await msg.answer("✅ Nothing to appeal — your account and channels are active.")
+        return
+    try:
+        item = enforcement.appeal(target[0], target[1], submitted_by=uid, statement=statement)
+    except EnforcementError as exc:
+        await msg.answer(f"⚠ {exc}")
+        return
+    await msg.answer(f"📨 Appeal {item['appeal_id']} filed for {target[1]} {target[0]}. "
+                     "A human will review it; you'll be notified of the decision.")
+    owner_notify(f"📨 New appeal {item['appeal_id']} from {_uname(msg)} ({target[1]} {target[0]}). "
+                 "Review it in the Admin Mini App.")
+
+
 @dp.message(Command("reports"))
 async def view_reports(msg: types.Message):
     if not _can_panel(msg.from_user.id, "reward"):
@@ -3636,6 +3706,19 @@ async def schedule_direct(msg: types.Message):
 async def run_due():
     for rec in sched.due():
         try:
+            sender_uid = ledger._m(rec["sender"]).get("user_id") if rec.get("sender") else None
+            subjects = [(rec["target"], "channel")] + ([(sender_uid, "user")] if sender_uid else [])
+            decision = enforcement_gate.check_many(subjects, "automated_posting",
+                                                   is_owner=bool(sender_uid and roles.is_owner(int(sender_uid))))
+            if not decision:
+                if decision.safe_mode:
+                    # Safe mode pauses the machine; the slot is retried later.
+                    continue
+                sched.mark_done(rec["id"], note="blocked by enforcement — skipped")
+                audit.record(bot="reward", sender=rec["sender"], target_channel=rec["target"],
+                             mode="direct", status="failed", forward_valid=False,
+                             error="blocked by enforcement: " + decision.reason[:100])
+                continue
             if rec.get("from_chat_id") is not None and rec.get("from_message_id") is not None:
                 await bot.forward_message(chat_id=rec["target"],
                                           from_chat_id=rec["from_chat_id"],

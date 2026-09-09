@@ -116,7 +116,8 @@ class AdminReadAPI:
                 "timeline": self.enforcement.timeline(entity_id, entity_type)}
 
     def enforce_entity(self, init_data: str, entity_id, entity_type: str,
-                       action: str, reason: str, duration_seconds=None, notes="") -> dict:
+                       action: str, reason: str, duration_seconds=None, notes="",
+                       related_report_id=None) -> dict:
         identity = self.authenticate(init_data)
         if identity.user_id != self.owner_id:
             raise AdminAuthorizationError("owner approval required for enforcement")
@@ -125,10 +126,85 @@ class AdminReadAPI:
         if action == "restore":
             result = self.enforcement.restore(entity_id, entity_type, actor_id=identity.user_id, reason=reason, notes=notes)
         else:
+            if action.upper() not in {"FLAGGED", "RESTRICTED", "SUSPENDED", "BANNED", "REMOVED"}:
+                raise ValueError("unsupported enforcement action")
+            if duration_seconds is not None:
+                duration_seconds = int(duration_seconds)
+                if duration_seconds <= 0 or duration_seconds > 365 * 86400:
+                    raise ValueError("duration_seconds must be between 1 second and 365 days")
             result = self.enforcement.enforce(entity_id, entity_type, action.upper(), actor_id=identity.user_id,
-                                              reason=reason, duration_seconds=duration_seconds, notes=notes)
+                                              reason=reason, duration_seconds=duration_seconds, notes=notes,
+                                              related_report_id=related_report_id)
+            if related_report_id:
+                self.enforcement.review_report(related_report_id, action.upper() if action.upper() in {"RESTRICTED", "SUSPENDED", "BANNED"} else "RESOLVED",
+                                               reviewer_id=identity.user_id, notes=notes or reason)
         self._audit(identity.user_id, f"ENFORCEMENT_{action.upper()}", "enforcement_entity", str(entity_id), reason)
         return result
+
+    # -- reports / evidence / appeals (human-in-the-loop only) ---------------
+    def _require_enforcement(self):
+        if self.enforcement is None:
+            raise RuntimeError("enforcement store required")
+        return self.enforcement
+
+    def safety_overview(self, init_data: str) -> dict:
+        self.authenticate(init_data)
+        store = self._require_enforcement()
+        return {"status": store.safety_status(),
+                "reports": store.list_reports("PENDING", limit=20) + store.list_reports("UNDER_REVIEW", limit=20),
+                "appeals": store.list_appeals("OPEN", limit=20) + store.list_appeals("UNDER_REVIEW", limit=20)}
+
+    def list_reports(self, init_data: str, status: str | None = None, limit: int = 50) -> list[dict]:
+        self.authenticate(init_data)
+        return self._require_enforcement().list_reports(status, limit=limit)
+
+    def report_details(self, init_data: str, report_id: str) -> dict:
+        self.authenticate(init_data)
+        store = self._require_enforcement()
+        report = store.report_by_id(report_id)
+        if not report:
+            raise ValueError("report not found")
+        return {"report": report,
+                "evidence": store.evidence_for(report["entity_id"], report["entity_type"], report_id=report_id),
+                "entity": store.get(report["entity_id"], report["entity_type"])}
+
+    def file_report(self, init_data: str, entity_id, entity_type: str, reason: str, subject: str = "") -> dict:
+        identity = self.authenticate(init_data)
+        if entity_type not in {"user", "channel", "group"}:
+            raise ValueError("entity_type must be user, channel or group")
+        report = self._require_enforcement().report(identity.user_id, entity_id, entity_type, reason, subject=subject)
+        self._audit(identity.user_id, "COMPLIANCE_REPORT_FILED", "compliance_report", report["report_id"], reason)
+        return report
+
+    def review_report(self, init_data: str, report_id: str, status: str, notes: str = "") -> dict:
+        """Record a human decision on a report. Never changes enforcement state:
+        an action, if warranted, is a separate explicit enforce_entity() call."""
+        identity = self.authenticate(init_data)
+        report = self._require_enforcement().review_report(report_id, status, reviewer_id=identity.user_id, notes=notes)
+        self._audit(identity.user_id, f"COMPLIANCE_REPORT_{status.upper()}", "compliance_report", report_id, notes or "Mini App review")
+        return report
+
+    def add_evidence(self, init_data: str, entity_id, entity_type: str, evidence_type: str,
+                     reference: str, report_id: str | None = None, notes: str = "") -> dict:
+        identity = self.authenticate(init_data)
+        if evidence_type not in {"message", "screenshot", "link", "log", "note"}:
+            raise ValueError("evidence_type must be message, screenshot, link, log or note")
+        item = self._require_enforcement().add_evidence(entity_id, entity_type, evidence_type, reference,
+                                                        captured_by=identity.user_id, report_id=report_id, notes=notes)
+        self._audit(identity.user_id, "COMPLIANCE_EVIDENCE_ADDED", "compliance_evidence", item["evidence_id"], reference[:200])
+        return item
+
+    def list_appeals(self, init_data: str, status: str | None = None, limit: int = 50) -> list[dict]:
+        self.authenticate(init_data)
+        return self._require_enforcement().list_appeals(status, limit=limit)
+
+    def decide_appeal(self, init_data: str, appeal_id: str, decision: str, notes: str = "") -> dict:
+        identity = self.authenticate(init_data)
+        if decision.upper() == "OVERTURNED" and identity.user_id != self.owner_id:
+            raise AdminAuthorizationError("owner approval required to overturn enforcement")
+        appeal = self._require_enforcement().decide_appeal(appeal_id, decision, decided_by=identity.user_id, notes=notes)
+        self._audit(identity.user_id, f"APPEAL_{decision.upper()}", "compliance_appeal", appeal_id, notes or "Mini App decision")
+        return appeal
 
     def emergency_mode(self, init_data: str, enabled: bool, reason: str) -> dict:
         identity = self.authenticate(init_data)

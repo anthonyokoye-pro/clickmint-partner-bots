@@ -20,6 +20,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from core import (Contract, CreditLedger, DeliveryLog, ReportRegistry,
                   PerformanceEngine, POST_TYPES, is_forward, forward_source)
 from broadcast_queue import BroadcastQueue
+from enforcement import EnforcementStore, EnforcementError
+from enforcement_gate import EnforcementGate
 from channel_registry import ChannelRegistry
 from telegram_verification import BotCredentialStore, TelegramVerificationService, CredentialError
 from features import StatsBook
@@ -53,11 +55,22 @@ perf.views_provider = stats.provider
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
 roles = RoleRegistry(store, owner_user_id=OWNER_USER_ID)
+enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
+enforcement_gate = EnforcementGate(enforcement, owner_user_id=config.OWNER_USER_ID)
+
+
+def _enforcement_block(uid: int, capability: str, *destinations) -> str | None:
+    subjects = [(uid, "user")] + [(d, "channel") for d in destinations if d]
+    decision = enforcement_gate.check_many(subjects, capability, is_owner=roles.is_owner(uid))
+    return None if decision else enforcement_gate.block_message(decision)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
 async def _register_from_telegram(msg, destination: str, kind: str = "channel") -> str:
+    blocked = _enforcement_block(msg.from_user.id, "registration", destination)
+    if blocked:
+        return blocked
     owner = msg.from_user.id
     channels.add(owner, destination, destination, kind, ["General"], size=0, bot_added=False)
     channels.update(owner, destination, status="VERIFYING")
@@ -526,6 +539,10 @@ async def on_partner_forward(msg: types.Message):
     username = _uname(msg)
     uid = _uid(msg)
     ledger.set_user_id(username, uid)   # remember id to DM later
+    blocked = _enforcement_block(uid, "partnerships", username)
+    if blocked:
+        await msg.answer(blocked)
+        return
     sess = _session(uid)
     if not sess.get("accepted_terms"):
         await msg.answer("Accept the posting terms first (/start → Submit a post).")
@@ -568,6 +585,9 @@ async def on_partner_forward(msg: types.Message):
         if other == username or not om.get("is_partner"):
             continue
         if om.get("status") in ("RESTRICTED", "REMOVED"):
+            continue
+        # Enforced partners are never offered anything (shared gate).
+        if not enforcement_gate.check(other, "channel", "partnerships"):
             continue
         # Partnership offers cannot target an unverified destination.
         if not _is_connected(other):
@@ -621,6 +641,11 @@ async def chain_choice(cb: types.CallbackQuery):
         item = reports.report(sender=sender, reporter=target,
                               reported_post={"target_channel": target},
                               reason="partner flagged the post")
+        try:
+            enforcement.report(cb.from_user.id, sender, "channel", "partner flagged the post",
+                               subject=f"legacy_report:{item['id']}")
+        except EnforcementError as exc:
+            logging.warning("compliance report mirror failed: %s", exc)
         audit.record(bot="partnership", sender=sender, target_channel=target,
                      mode="chain", status="skipped", forward_valid=True)
         await cb.message.answer(f"🚩 Report #{item['id']} filed against {sender}. "

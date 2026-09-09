@@ -10,6 +10,21 @@ class API:
         assert init == "signed"
         return {"ok": True}
 
+    def safety_overview(self, init):
+        return {"status": {"open_reports": 0}}
+
+    def file_report(self, init, entity_id, entity_type, reason, subject=""):
+        self.last = ("file", entity_id, entity_type, reason)
+        return {"report_id": "rpt_1"}
+
+    def review_report(self, init, report_id, status, notes=""):
+        self.last = ("review", report_id, status)
+        return {"report_id": report_id, "status": status}
+
+    def decide_appeal(self, init, appeal_id, decision, notes=""):
+        self.last = ("appeal", appeal_id, decision)
+        return {"appeal_id": appeal_id, "status": decision}
+
     def approve_referral_ranking(self, init, period, reason):
         self.approvals += 1
         return {"period": period, "status": "approved"}
@@ -62,6 +77,30 @@ def test_mutation_requires_key_and_replays():
     assert api.approvals == 1
 
 
+
+
+def test_compliance_routes_are_wired():
+    import json
+    api = API()
+    app = AdminWSGI(api)
+    def call(method, path, body=None, key="k"):
+        result = {}
+        raw = json.dumps(body or {}).encode()
+        environ = {"REQUEST_METHOD": method, "PATH_INFO": path, "HTTP_X_TELEGRAM_INIT_DATA": "signed",
+                   "CONTENT_TYPE": "application/json", "CONTENT_LENGTH": str(len(raw)),
+                   "wsgi.input": io.BytesIO(raw), "HTTP_X_IDEMPOTENCY_KEY": key + path}
+        response = app(environ, lambda status, values: result.update(status=status))
+        return result["status"], json.loads(response[0])
+    status, body = call("GET", "/api/admin/safety")
+    assert status == "200 OK" and body["status"]["open_reports"] == 0
+    status, _ = call("POST", "/api/admin/reports", {"entity_id": "@x", "entity_type": "channel", "reason": "spam"})
+    assert status == "200 OK" and api.last == ("file", "@x", "channel", "spam")
+    status, _ = call("POST", "/api/admin/reports/rpt_1/review", {"status": "DISMISSED"})
+    assert status == "200 OK" and api.last == ("review", "rpt_1", "DISMISSED")
+    status, _ = call("POST", "/api/admin/appeals/apl_1/decide", {"decision": "UPHELD"})
+    assert status == "200 OK" and api.last == ("appeal", "apl_1", "UPHELD")
+
+
 if __name__ == "__main__":
     test_dashboard_transport()
     test_transport_security_controls()
@@ -69,3 +108,5 @@ if __name__ == "__main__":
     print("PASS test_dashboard_transport")
     print("PASS test_transport_security_controls")
     print("PASS test_mutation_requires_key_and_replays")
+    test_compliance_routes_are_wired()
+    print("PASS test_compliance_routes_are_wired")

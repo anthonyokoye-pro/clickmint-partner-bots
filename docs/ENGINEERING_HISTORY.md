@@ -1,5 +1,25 @@
 # CLICKMINT Engineering History
 
+## 2026-09-09 — Shared enforcement gate, appeals, and admin compliance surface
+
+**Problem:** `enforcement.py` existed but nothing in the running bots consulted it; a
+banned channel could still forward, claim tasks and receive partnership offers. Reports
+filed in Telegram lived only in the legacy JSON registry, invisible to the Mini App, and a
+restricted member had no way to be heard.
+
+**Decision:** One `EnforcementGate` object (fail-closed, owner exempt from entity state but
+not from safe mode) injected into every participation path instead of per-handler checks.
+Appeals are a separate table: filing is inert; only an owner OVERTURN restores. In-bot
+reports are mirrored into the compliance store rather than migrated, so the legacy panel
+keeps working.
+
+**Result:** `enforcement_gate.py`; gate calls in reward (register, forward, claim, scheduled
+delivery), partnership (register, forward, target filter) and admin bots; `/appeal`
+command; Reports & appeals panel + 9 new Admin API routes; admin-bot Trust & safety panel;
+CI now runs the full suite. Tests: bots 26→31, enforcement 4→7, admin api/http +2.
+
+**Remaining:** consent-aware advertising; group-scoped report entry points.
+
 ## 2026-09-08 — Compliance enforcement foundation
 
 **Problem:** Existing channel status and review queues did not provide a durable, system-wide way to flag, restrict, suspend, ban, restore, or remove users, channels, and groups. Reports and evidence could not be tied to an enforcement timeline, and there was no emergency safe mode.
