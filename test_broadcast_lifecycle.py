@@ -69,6 +69,7 @@ def test_release_returns_delivery_without_burning_an_attempt():
 if __name__ == "__main__":
     for test_case in (test_named_draft_edit_delete_and_queue_boundaries,
                       test_draft_delete_prevents_queueing,
+                      test_retry_budget_becomes_terminal_and_stale_workers_are_recovered,
                       test_release_returns_delivery_without_burning_an_attempt):
         test_case()
         print(f"PASS {test_case.__name__}")

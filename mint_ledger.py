@@ -224,7 +224,20 @@ class TransactionalMintLedger:
     def _id(prefix: str) -> str:
         return f"{prefix}_{secrets.token_hex(12)}"
 
-    def ensure_account(self, user_id: int | str, *, status: str = "active") -> None:
+    def active_user_ids(self, *, limit: int = 100000) -> list[str]:
+        """Return active Reward users from the authoritative SQLite account table.
+
+        Audience resolution uses this boundary instead of reaching into a legacy
+        JSON ledger. Member metadata and campaign delivery state remain separate.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT user_id FROM mint_accounts WHERE lower(COALESCE(status, 'active')) IN ('active', 'provisional') "
+                "ORDER BY user_id LIMIT ?", (max(1, int(limit)),),
+            ).fetchall()
+        return [str(row["user_id"]) for row in rows]
+
+    def ensure_account(self, user_id: int | str, *, status: str = "active"):
         uid = str(user_id)
         stamp = self._now()
         with self._tx() as conn:

@@ -25,12 +25,19 @@ class AudienceDirectory:
     migration can replace this adapter without changing campaign services.
     """
 
-    def __init__(self, reward_store):
+    def __init__(self, reward_store=None, *, authoritative=None):
         self.reward_store = reward_store
+        self.authoritative = authoritative
 
     def recipient_ids(self, query: AudienceQuery | None = None) -> list[str]:
         query = query or AudienceQuery()
         if query.scope != "reward":
+            return []
+        if self.authoritative is not None and hasattr(self.authoritative, "active_user_ids"):
+            result = list(dict.fromkeys(str(value) for value in self.authoritative.active_user_ids()))
+            requested = {str(value) for value in (query.user_ids or ())}
+            return [value for value in result if not requested or value in requested]
+        if self.reward_store is None:
             return []
         self.reward_store.reload()
         ledger = self.reward_store.get("ledger", {})

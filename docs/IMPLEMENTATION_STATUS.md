@@ -33,7 +33,11 @@ Completed in the Phase 0–6 reliability pass and Phase 7 hardening pass:
 - Added audience and Admin queue regression tests.
 - Added bounded broadcast retries and stale-worker recovery.
 - Added task claim release recovery so full tasks reopen when capacity is released.
-- Added regression coverage for retry exhaustion, crashed-worker recovery, and task reopening.
+- Added bounded broadcast retry recovery to the Admin control room and wired the same recovery into both delivery workers.
+- Added an authoritative SQLite account boundary for production audience resolution; the legacy JSON audience adapter is now compatibility-only.
+- Added real Admin Telegram verification scans backed by `TelegramVerificationService`, including structured check results and failure reasons.
+- Added optional Telegram entity payload validation/preservation for Admin campaign creation and editing.
+- Added regression coverage for retry exhaustion, crashed-worker recovery, task reopening, and authoritative audience selection.
 - Installed repository dependencies in `/tmp/cmvenv` and completed the broad test runner successfully.
 
 Phase 7 remains focused on production hardening: authoritative storage migration, complete verification scan UX, final Telegram-native editing, unified worker operations, and full Admin capability parity. Payments, withdrawals, advanced AI, attribution, and multi-platform expansion remain deferred.
@@ -86,7 +90,7 @@ Phase 7 remains focused on production hardening: authoritative storage migration
 | Dedicated Ad Campaign model | Not implemented as complete feature | No complete distinct service/UI/API lifecycle established |
 | Ad Campaign edit/cancel/delete/queue | Pending | Future implementation after data-model decision |
 | Visual queue management | Pending/partial | View/edit/cancel/delete/retry/reschedule parity is not complete |
-| Telegram-oriented visual editor | Not implemented | Current composer was identified as plain textarea; Telegram entity/parse validation remains pending |
+| Telegram-oriented visual editor | Partial | Admin accepts validated Telegram entity JSON and preserves captured entities; a full visual rich editor is still pending |
 | Unsupported markup prevention | Constraint | Must use Telegram-supported entities/parse modes; do not invent markup |
 
 ## Channel and verification requirements
@@ -99,7 +103,7 @@ Phase 7 remains focused on production hardening: authoritative storage migration
 | Official Telegram destination metadata | Approved requirement | Manual authoritative counts are prohibited |
 | Manual member/subscriber count as authority | Rejected | Use official Telegram API responses where available |
 | Verification failure reasons | Implemented foundation | Verification/admin reporting additions and docs |
-| Verification scan UI showing real checks | Pending | Must not be cosmetic; each displayed check needs a backend operation |
+| Verification scan UI showing real checks | Implemented foundation | Admin UI calls `TelegramVerificationService.verify`; structured checks and failure reasons are displayed; live Telegram staging remains required |
 | Channel stats refresh UX | Partial | Stats-related paths exist; complete user-facing flow requires verification |
 | Participation without required bot/channel setup | Rejected | No bypass path is permitted |
 

@@ -251,6 +251,9 @@ class AdminWSGI:
                     return self._response(start_response, "404 Not Found", {"error": "not found"}, correlation_id)
                 payload = self.api.enforcement_details(init_data, parts[4], parts[3])
                 return self._response(start_response, "200 OK", payload, correlation_id)
+            if method == "GET" and path.startswith("/api/admin/verification/"):
+                destination_id = unquote(path.split("/api/admin/verification/", 1)[1])
+                return self._response(start_response, "200 OK", self.api.verification_scan(init_data, destination_id), correlation_id)
             if method == "GET" and path.startswith("/api/admin/performance/"):
                 destination_id = unquote(path.split("/api/admin/performance/", 1)[1])
                 query = parse_qs(environ.get("QUERY_STRING", ""))
@@ -278,6 +281,10 @@ class AdminWSGI:
                 if replay is not None:
                     return replay
                 parts = [unquote(item) for item in path.strip("/").split("/")]
+                if parts == ["api", "admin", "broadcasts", "recover"]:
+                    result = self.api.recover_broadcast_deliveries(
+                        init_data, older_than_seconds=int(body.get("older_than_seconds", 900)))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts[:4] == ["api", "admin", "safety", "emergency"] and len(parts) == 4:
                     result = self.api.emergency_mode(init_data, bool(body.get("enabled")), body.get("reason", ""))
                     return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
@@ -318,10 +325,10 @@ class AdminWSGI:
                     result = self.api.approve_referral_ranking(init_data, parts[3], body.get("reason", ""))
                     return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts[:3] == ["api", "admin", "broadcasts"] and len(parts) == 3:
-                    result = self.api.create_reward_campaign(init_data, body.get("text", ""), body.get("scheduled_at"), body.get("title", ""))
+                    result = self.api.create_reward_campaign(init_data, body.get("text", ""), body.get("scheduled_at"), body.get("title", ""), body.get("entities") or [])
                     return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts[:3] == ["api", "admin", "broadcasts"] and len(parts) == 5 and parts[4] == "edit":
-                    result = self.api.update_reward_draft(init_data, parts[3], body.get("title", ""), body.get("text", ""), body.get("scheduled_at"))
+                    result = self.api.update_reward_draft(init_data, parts[3], body.get("title", ""), body.get("text", ""), body.get("scheduled_at"), body.get("entities") or [])
                     return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts[:3] == ["api", "admin", "broadcasts"] and len(parts) == 5 and parts[4] == "delete":
                     result = self.api.delete_reward_draft(init_data, parts[3])

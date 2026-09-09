@@ -49,6 +49,8 @@ def build_runtime_app(*, dev: bool = False):
     ledger = _LedgerFacade(TransactionalMintLedger(config.MINT_DB_PATH))
     enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
     ads = AdCampaignStore(config.ADS_DB_PATH, enabled=config.ADS_ENABLED)
+    credentials = BotCredentialStore(verification_store)
+    verification = TelegramVerificationService(credentials)
     api = AdminReadAPI(
         bot_token=config.ADMIN_BOT_TOKEN,
         owner_id=config.OWNER_USER_ID,
@@ -58,11 +60,13 @@ def build_runtime_app(*, dev: bool = False):
         snapshots=snapshots,
         broadcasts=broadcasts,
         ledger=ledger,
-        audience=AudienceDirectory(shared_store),
+        # Production audience reads authoritative SQLite accounts; the legacy
+        # JSON adapter remains available only for migration/tests.
+        audience=AudienceDirectory(shared_store, authoritative=ledger.tx),
         enforcement=enforcement,
         ads=ads,
+        verification=verification,
     )
-    credentials = BotCredentialStore(verification_store)
     onboarding = OnboardingAPI(
         # Members open the onboarding page from the REWARD bot, so its token signs initData.
         platform_bot_token=config.REWARD_BOT_TOKEN,

@@ -151,3 +151,16 @@ def test_expired_claim_cannot_complete():
             raise AssertionError("expired claim was completed")
     finally:
         directory.cleanup()
+
+if __name__ == "__main__":
+    for test_case in (
+        test_capacity_allows_multiple_users_and_closes_at_full,
+        test_completion_records_telegram_evidence_and_updates_progress,
+        test_user_cannot_claim_same_task_twice,
+        test_claim_count_since_supports_daily_limits,
+        test_recovery_expires_claim_and_reopens_capacity,
+        test_releasing_last_claim_reopens_full_task,
+        test_expired_claim_cannot_complete,
+    ):
+        test_case()
+        print(f"PASS {test_case.__name__}")

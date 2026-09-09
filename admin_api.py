@@ -1,6 +1,8 @@
 """Read-only authenticated Admin Mini App application boundary."""
 from __future__ import annotations
 
+import asyncio
+
 from webapp_auth import validate_init_data
 
 
@@ -22,7 +24,7 @@ def _safe_preview(payload: dict) -> str:
 class AdminReadAPI:
     """Application service independent of HTTP framework or Telegram web server."""
     def __init__(self, *, bot_token, owner_id, roles, channels, marketplace,
-                 snapshots, broadcasts, ledger=None, audience=None, enforcement=None, ads=None):
+                 snapshots, broadcasts, ledger=None, audience=None, enforcement=None, ads=None, verification=None):
         self.bot_token = bot_token
         self.owner_id = int(owner_id)
         self.roles = roles
@@ -34,6 +36,7 @@ class AdminReadAPI:
         self.audience = audience
         self.enforcement = enforcement
         self.ads = ads
+        self.verification = verification
 
     def authenticate(self, init_data: str):
         identity = validate_init_data(init_data, self.bot_token)
@@ -144,13 +147,18 @@ class AdminReadAPI:
         return {"period": period, "status": "approved"}
 
     def create_reward_campaign(self, init_data: str, text: str,
-                               scheduled_at: int | None = None, title: str = "") -> dict:
+                               scheduled_at: int | None = None, title: str = "",
+                               entities: list[dict] | None = None) -> dict:
         identity = self.authenticate(init_data)
         if not text or len(text) > 4000:
             raise ValueError("explicit text is required and must be at most 4000 characters")
+        entities = list(entities or [])
+        if entities:
+            from tg_entities import to_html
+            to_html(text, entities)  # validates UTF-16 ranges and supported entities
         campaign_id = self.broadcasts.create_campaign(
             bot_scope="reward", created_by=identity.user_id,
-            payload={"text": text, "entities": [], "audience": "known_reward_members", "composed_in": "mini_app"},
+            payload={"text": text, "entities": entities, "audience": "known_reward_members", "composed_in": "telegram" if entities else "mini_app"},
             scheduled_at=scheduled_at, title=title or "Untitled Reward broadcast",
         )
         self._audit(identity.user_id, "REWARD_BROADCAST_CREATED", "broadcast_campaign", campaign_id, "Mini App campaign creation")
@@ -170,13 +178,15 @@ class AdminReadAPI:
         self._audit(identity.user_id, "REWARD_BROADCAST_QUEUED", "broadcast_campaign", campaign_id, f"{inserted} recipients")
         return {"campaign_id": campaign_id, "status": "queued", "new_deliveries": inserted}
 
-    def update_reward_draft(self, init_data: str, campaign_id: str, title: str, text: str, scheduled_at=None) -> dict:
+    def update_reward_draft(self, init_data: str, campaign_id: str, title: str, text: str, scheduled_at=None, entities: list[dict] | None = None) -> dict:
         identity = self.authenticate(init_data)
         if not title.strip() or not text.strip() or len(text) > 4000:
             raise ValueError("title and text are required; text must be at most 4000 characters")
-        # Editing in the Mini App drops captured formatting on purpose: the text box
-        # is plain text and we never reconstruct entities from typed markup.
-        if not self.broadcasts.update_draft(campaign_id, title=title, payload={"text": text, "entities": [], "audience": "known_reward_members", "composed_in": "mini_app"}, scheduled_at=scheduled_at):
+        entities = list(entities or [])
+        if entities:
+            from tg_entities import to_html
+            to_html(text, entities)
+        if not self.broadcasts.update_draft(campaign_id, title=title, payload={"text": text, "entities": entities, "audience": "known_reward_members", "composed_in": "telegram" if entities else "mini_app"}, scheduled_at=scheduled_at):
             raise ValueError("only an existing draft can be edited")
         self._audit(identity.user_id, "REWARD_BROADCAST_EDITED", "broadcast_campaign", campaign_id, "Mini App draft edit")
         return {"campaign_id": campaign_id, "status": "draft"}
@@ -358,6 +368,31 @@ class AdminReadAPI:
             "interventions": self.snapshots.intervention_history(destination_id, limit=max(1, min(int(limit), 100))),
             "control": self.snapshots.control(destination_id),
         }
+
+    def recover_broadcast_deliveries(self, init_data: str, *, older_than_seconds: int = 900) -> dict:
+        identity = self.authenticate(init_data)
+        result = self.broadcasts.recover_stale_processing(older_than_seconds=older_than_seconds)
+        self._audit(identity.user_id, "BROADCAST_DELIVERIES_RECOVERED", "broadcast_queue", "all", str(result))
+        return result
+
+    def verification_scan(self, init_data: str, destination_id) -> dict:
+        """Run a real Telegram verification scan for an owned destination.
+
+        The result is deliberately the structured service result: the UI may only
+        display checks that Telegram or a named policy evaluation actually ran.
+        """
+        identity = self.authenticate(init_data)
+        if self.verification is None:
+            raise RuntimeError("Telegram verification service is not configured")
+        row = self.channels.get(destination_id)
+        if not row:
+            raise ValueError("destination not found")
+        owner_id = int(row.get("owner_id", identity.user_id))
+        if owner_id != identity.user_id and identity.user_id != self.owner_id:
+            raise AdminAuthorizationError("destination owner or owner admin required")
+        result = asyncio.run(self.verification.verify(owner_id, destination_id))
+        return {"destination": str(destination_id), "owner_id": owner_id,
+                "scan": result.as_dict() if hasattr(result, "as_dict") else result}
 
     def dashboard(self, init_data: str, *, task_limit: int = 20,
                   task_category: str | None = None,
