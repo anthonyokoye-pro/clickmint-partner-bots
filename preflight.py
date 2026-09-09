@@ -96,7 +96,14 @@ def check_local() -> None:
         good(f"OWNER_USER_ID = {config.OWNER_USER_ID} — exempt from credits/caps, "
              "sole grantor of admin invites")
 
-    print("\n\033[1m3. Storage\033[0m")
+    print("\n\033[1m3. User-owned bot credential security\033[0m")
+    if not config.CLICKMINT_CREDENTIAL_KEY or len(config.CLICKMINT_CREDENTIAL_KEY) < 32:
+        bad("CLICKMINT_CREDENTIAL_KEY is missing or too short",
+            "set a random secret of at least 32 characters in the deployment secret manager")
+    else:
+        good("CLICKMINT_CREDENTIAL_KEY is configured")
+
+    print("\n\033[1m4. Storage\033[0m")
     store_dir = os.path.abspath(config.STORE_DIR)
     if not os.path.isdir(store_dir):
         bad(f"STORE_DIR does not exist: {store_dir}", f"mkdir -p {store_dir}")
@@ -112,7 +119,7 @@ def check_local() -> None:
 
 
 async def check_live() -> None:
-    print("\n\033[1m4. Telegram\033[0m")
+    print("\n\033[1m5. Telegram\033[0m")
     try:
         from aiogram import Bot
     except ImportError:
