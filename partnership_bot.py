@@ -242,7 +242,7 @@ async def mychannels_cmd(msg: types.Message):
         return
     await msg.answer("📂 MY CHANNELS / GROUPS\n\n" + "\n".join(
         f"• {r.get('username')} · {r.get('kind')} · performance tier {r.get('band')} · "
-        f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}" for r in rows))
+        f"{('✅ VERIFIED' if r.get('verified_state') == 'VERIFIED' else '⚠️ ' + str(r.get('verified_state', 'REGISTERED')))}" for r in rows))
 
 
 @dp.message(Command("scan"))
@@ -437,7 +437,7 @@ async def menu_nav(cb: types.CallbackQuery):
         rows = channels.mine(uid)
         text = "📂 <b>MY CHANNELS / GROUPS</b>\n\n" + ("\n".join(
             f"• {r.get('username')} · {r.get('kind')} · performance tier {r.get('band')} · "
-            f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}" for r in rows)
+            f"{('✅ VERIFIED' if r.get('verified_state') == 'VERIFIED' else '⚠️ ' + str(r.get('verified_state', 'REGISTERED')))}" for r in rows)
             if rows else "No destinations registered yet.")
         await cb.message.edit_text(text, parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[

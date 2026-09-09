@@ -436,7 +436,8 @@ async def mychannels_cmd(msg: types.Message):
         return
     lines = ["📂 MY CHANNELS / GROUPS", ""]
     for row in rows:
-        access = "✅ bot added" if row.get("bot_added") else "⚠️ add bot for accurate stats"
+        access = ("✅ VERIFIED" if row.get("verified_state") == "VERIFIED"
+                 else "⚠️ " + str(row.get("verified_state", "REGISTERED")))
         lines.append(f"• {row.get('username')} · {row.get('kind')} · "
                      f"performance tier {row.get('band')} · {row.get('status')} · {access}")
     await msg.answer("\n".join(lines), reply_markup=_menu("user", msg.from_user.id))
@@ -1913,7 +1914,7 @@ async def menu_nav(cb: types.CallbackQuery):
         else:
             text = "📂 <b>MY CHANNELS / GROUPS</b>\n\n" + "\n".join(
                 f"• {r.get('username')} · {r.get('kind')} · performance tier {r.get('band')} · "
-                f"{('✅ bot added' if r.get('bot_added') else '⚠️ bot not added')}"
+                f"{('✅ VERIFIED' if r.get('verified_state') == 'VERIFIED' else '⚠️ ' + str(r.get('verified_state', 'REGISTERED')))}"
                 for r in rows)
         await cb.message.edit_text(
             text, parse_mode="HTML",
