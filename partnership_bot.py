@@ -267,6 +267,13 @@ async def stats_all_callback(cb: types.CallbackQuery):
     for row in rows:
         try:
             result = await telegram_verification.verify(cb.from_user.id, channels.telegram_reference(row))
+            if not result.eligible:
+                channels.update(cb.from_user.id, row.get("chat_id") or row.get("username"),
+                                bot_added=False, status=result.state,
+                                verified_state=result.state,
+                                verification_reasons=list(result.reasons))
+                lines.append(f"❌ {row.get('username')}: {'; '.join(result.reasons)}")
+                continue
             if result.member_count is None:
                 lines.append(f"⚠️ {row.get('username')}: member count unavailable")
                 continue

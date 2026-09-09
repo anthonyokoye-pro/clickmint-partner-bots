@@ -1296,6 +1296,12 @@ async def stats_cmd(msg: types.Message):
     except CredentialError:
         await msg.answer("❌ Connect your own Telegram bot first with /connectbot.")
         return
+    if not result.eligible:
+        channels.update(msg.from_user.id, row["chat_id"], bot_added=False,
+                        status=result.state, verified_state=result.state,
+                        verification_reasons=list(result.reasons))
+        await msg.answer("❌ <b>Verification failed</b>\n" + "\n".join(result.reasons), parse_mode="HTML")
+        return
     if result.member_count is not None:
         channels.update(msg.from_user.id, row["chat_id"], size=result.member_count,
                         telegram_member_count=result.member_count,
@@ -1319,6 +1325,12 @@ async def stats_all_callback(cb: types.CallbackQuery):
     for row in rows:
         try:
             result = await telegram_verification.verify(cb.from_user.id, channels.telegram_reference(row))
+            if not result.eligible:
+                channels.update(cb.from_user.id, row["chat_id"], bot_added=False,
+                                status=result.state, verified_state=result.state,
+                                verification_reasons=list(result.reasons))
+                lines.append(f"❌ {escape(str(row.get('username')))}: {'; '.join(result.reasons)}")
+                continue
             if result.member_count is None:
                 lines.append(f"⚠️ {escape(str(row.get('username')))}: member count unavailable")
                 continue
