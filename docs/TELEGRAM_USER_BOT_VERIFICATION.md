@@ -76,6 +76,16 @@ target state so failures are actionable instead of "DEGRADED with an error strin
 `backoff_seconds(kind, attempt, retry_after)` gives 30 s → 1 h exponential backoff and
 honours Telegram's `retry_after` for floods. `last_error_kind` is stored on the row.
 
+## Storage
+
+Destinations and encrypted bot credentials live in **one SQLite database shared by the
+Reward and Partnership bots** (`VERIFICATION_DB_PATH`, default `verification.sqlite3`,
+WAL mode). This is what makes "one Telegram bot per ClickMint account" true across both
+products: connecting bot X in Reward makes it visible in Partnership, and a second account
+cannot claim it in either. Legacy JSON rows are migrated automatically on first start and a
+`*_migrated` copy is left in the JSON file. Include this file in backups alongside the other
+`*.sqlite3` databases.
+
 ## Security operations
 
 Set `CLICKMINT_CREDENTIAL_KEY` to a long random secret in the deployment secret

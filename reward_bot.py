@@ -38,6 +38,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from core import (CreditLedger, TransactionalCreditLedger, DeliveryLog, ReportRegistry,
                   PerformanceEngine, is_forward, forward_source, allows_receive)
 from channel_registry import ChannelRegistry
+from verification_store import VerificationStore
 from features import (ReferralLedger, AvailablePostQueue, BubbleNotifier,
                       AnnouncementBoard, RankVisibility, StatsBook, ReroutePlanner,
                       category_counts)
@@ -78,9 +79,12 @@ audit = DeliveryLog(store)
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 sched = Scheduler(store)
-channels = ChannelRegistry(store)
+# Destinations + bot credentials live in the SQLite verification DB shared with
+# the other bot; every other key still goes to this bot's JsonStore.
+verification_store = VerificationStore(config.VERIFICATION_DB_PATH, legacy=store)
+channels = ChannelRegistry(verification_store)
 destination_states = DestinationStateMachine(channels)   # the ONLY writer of verified_state/status
-bot_credentials = BotCredentialStore(store)
+bot_credentials = BotCredentialStore(verification_store)
 telegram_verification = TelegramVerificationService(bot_credentials)
 referrals = ReferralLedger(store, ledger)
 available = AvailablePostQueue(store)
@@ -3700,9 +3704,10 @@ async def _background_reverify(*, now: int | None = None) -> list[str]:
     """
     if enforcement_gate.safe_mode():
         return []
-    rows = list(channels._items().values())
-    due = destination_states.due_for_recheck(rows, now=now)
-    due.sort(key=lambda r: int(r.get("last_recheck_at") or r.get("last_verified_at") or 0))
+    # Index-served candidate set (ix_dest_next), then the state machine's own
+    # schedule rule as the authority — two views that must agree.
+    candidates = verification_store.destinations_due(now=now, limit=_REVERIFY_BATCH * 4)
+    due = destination_states.due_for_recheck(candidates, now=now)
     notes = []
     for row in due[:_REVERIFY_BATCH]:
         key = row.get("chat_id") or row.get("username")

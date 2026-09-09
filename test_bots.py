@@ -108,6 +108,10 @@ def _fresh_bot(module) -> MockSession:
     module.bot.session = session
     module.store._data = {}
     module.store._dirty = set()
+    vs = getattr(module, "verification_store", None)
+    if vs is not None:                       # shared SQLite: wipe both tables too
+        vs._conn.execute("DELETE FROM destinations"); vs._conn.execute("DELETE FROM bot_credentials")
+        vs.reload()
     if hasattr(module, "ledger"):
         module.ledger.ledger = {}
         module.ledger.store["ledger"] = {}

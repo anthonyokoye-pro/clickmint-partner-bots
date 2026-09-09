@@ -48,6 +48,8 @@ CREDIBILITY_DB_PATH = env("CREDIBILITY_DB_PATH", os.path.join(STORE_DIR, "credib
 BROADCAST_DB_PATH = env("BROADCAST_DB_PATH", os.path.join(STORE_DIR, "broadcast.sqlite3"))
 ADMIN_API_DB_PATH = env("ADMIN_API_DB_PATH", os.path.join(STORE_DIR, "admin_api.sqlite3"))
 ENFORCEMENT_DB_PATH = env("ENFORCEMENT_DB_PATH", os.path.join(STORE_DIR, "enforcement.sqlite3"))
+# Shared by Reward AND Partnership: one bot per ClickMint account, one destination truth.
+VERIFICATION_DB_PATH = env("VERIFICATION_DB_PATH", os.path.join(STORE_DIR, "verification.sqlite3"))
 ADS_DB_PATH = env("ADS_DB_PATH", os.path.join(STORE_DIR, "ads.sqlite3"))
 # Advertising kill switch. OFF by default: consents/terms/drafts/review can be
 # prepared, but nothing queues or delivers until the owner flips this on.

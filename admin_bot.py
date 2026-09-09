@@ -23,6 +23,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from store import JsonStore
+from verification_store import VerificationStore
 from core import CreditLedger, PerformanceEngine, ReportRegistry
 from mint_ledger import TransactionalMintLedger
 from governance import ReviewQueue, RoleRegistry, daily_post_cap
@@ -41,7 +42,10 @@ PARTNER_STORE_PATH = config.PARTNER_STORE_PATH
 
 
 def load_stores():
-    return JsonStore(REWARD_STORE_PATH), JsonStore(PARTNER_STORE_PATH)
+    rstore, pstore = JsonStore(REWARD_STORE_PATH), JsonStore(PARTNER_STORE_PATH)
+    # Destinations/credentials moved to the shared SQLite verification DB; wrap
+    # the reward store so its managed_channels reads hit the live table.
+    return VerificationStore(config.VERIFICATION_DB_PATH, legacy=rstore), pstore
 
 
 enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)

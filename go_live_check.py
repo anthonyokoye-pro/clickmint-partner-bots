@@ -52,6 +52,7 @@ def main() -> int:
             "admin_api": config.ADMIN_API_DB_PATH,
             "enforcement": config.ENFORCEMENT_DB_PATH,
             "ads": config.ADS_DB_PATH,
+            "verification": config.VERIFICATION_DB_PATH,
         },
     )
     print(json.dumps(report, indent=2, sort_keys=True))

@@ -96,3 +96,9 @@ appeal decisions are delivered to the member via the outbox.
 **Finding:** Owner-bot delivery paths forwarded from the member's private chat with the *platform* bot. A bot cannot read another bot's private chats, so every owner-bot forward would fail live with "message to forward not found". The offline mock accepted every `ForwardMessage`, hiding it.
 
 **Decision:** `relay.py` resolves one legal route per destination — platform bot forwards its inbox copy when it administers the destination; owner's bot forwards from the origin channel only when it administers that channel; otherwise fail closed with audit. No `copyMessage`, no rebuilt posts, no MTProto. The mock session now enforces Telegram's read rule so this class of bug cannot regress silently. See `docs/RELAY_ARCHITECTURE.md`.
+
+## 2026-09-09 — Shared verification database (SQLite)
+
+**Finding:** Reward and Partnership each kept `managed_channels` and `telegram_bot_credentials` in their own JSON file. The "one bot per ClickMint account" rule was only enforced within one bot, and every destination update rewrote the whole JSON file with a merge-on-sync that races across processes.
+
+**Decision:** `verification_store.py` — one SQLite (WAL) database, `VERIFICATION_DB_PATH`, opened by both bots (and the admin bot read-side). `ChannelRegistry` and `BotCredentialStore` are unchanged; they now sit on the shared store. Legacy JSON rows are migrated once on first open and kept as `*_migrated`. The background re-verifier now queries `ix_dest_next` instead of loading every row. All other keys (ledger, audit, roles, sessions) stay in the per-bot JsonStore for now; they are the next migration candidate, not this one.
