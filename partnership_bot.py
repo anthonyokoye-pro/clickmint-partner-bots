@@ -215,6 +215,15 @@ async def scan_cmd(msg: types.Message):
     for row in rows:
         try:
             result = await telegram_verification.verify(_uid(msg), channels.telegram_reference(row))
+            checks = result.checks or {}
+            icon = lambda name: "✅" if checks.get(name) == "passed" else ("⚠️" if checks.get(name) == "unavailable" else "❌")
+            lines.extend([
+                f"🔍 Verifying {row.get('username')}",
+                f"{icon('destination')} Resolving Telegram destination",
+                f"{icon('bot_membership')} Checking bot membership",
+                f"{icon('administrator')} Checking administrator status",
+                f"{icon('permissions')} Checking required permissions",
+            ])
             if not result.eligible:
                 channels.update(_uid(msg), row.get("chat_id") or row.get("username"),
                                 bot_added=False, status=result.state,
@@ -222,6 +231,11 @@ async def scan_cmd(msg: types.Message):
                                 verification_reasons=list(result.reasons))
                 lines.append(f"❌ {row.get('username')}: {'; '.join(result.reasons)}")
                 continue
+            lines.extend([
+                f"{icon('accessibility')} Checking destination accessibility",
+                f"{icon('member_count')} Retrieving member count",
+                f"{icon('eligibility')} Checking eligibility",
+            ])
             count = result.member_count or 0
             channels.update(_uid(msg), row.get("chat_id") or row.get("username"),
                             bot_added=True, status="ACTIVE", verified_state="VERIFIED",
