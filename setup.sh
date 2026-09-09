@@ -133,6 +133,16 @@ if [ "${KEEP_ENV:-0}" != "1" ]; then
   chmod 600 .env 2>/dev/null
   say ""
   ok "Saved to .env (readable only by you)."
+else
+  # Existing installations created before user-owned bot credentials were
+  # introduced may not have an encryption key. Add one without replacing any
+  # existing tokens or settings.
+  if ! grep -q '^CLICKMINT_CREDENTIAL_KEY=' .env 2>/dev/null; then
+    CREDENTIAL_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+    printf '\nCLICKMINT_CREDENTIAL_KEY=%s\n' "$CREDENTIAL_KEY" >> .env
+    chmod 600 .env 2>/dev/null
+    ok "Generated and added the missing credential encryption key."
+  fi
 fi
 
 # ---------------------------------------------------------------- deps
