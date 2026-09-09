@@ -26,14 +26,11 @@ jobs:
       - name: Compile-check all modules
         run: python -m py_compile *.py
 
-      - name: Run core engine tests
-        run: python test_core.py          # expect ALL TESTS PASSED (23)
-
-      - name: Run governance tests
-        run: python test_governance.py    # expect 33/33
-
-      - name: Run bot wiring tests
-        run: python test_bots.py          # expect 24/24 (handlers, menus, funnel, roles)
+      - name: Run the complete offline suite
+        # Same entry point as `python run_all_tests.py` locally: engine, governance,
+        # bot wiring (real aiogram Dispatchers against a mocked session), dry-run
+        # simulation, enforcement, marketplace, ledger, Admin API/HTTP and branding.
+        run: python run_all_tests.py
 
       - name: Check branding copy against Telegram's limits
         run: python branding.py --check
