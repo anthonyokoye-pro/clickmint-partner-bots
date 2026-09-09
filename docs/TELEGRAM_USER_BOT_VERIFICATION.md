@@ -31,9 +31,10 @@ currently permitted.
 Set `CLICKMINT_CREDENTIAL_KEY` to a long random secret in the deployment secret
 manager. Never commit it or print it. Replacing the key intentionally makes
 stored credentials unreadable. `/disconnectbot` removes the encrypted record.
-A production deployment should prefer a managed KMS/AEAD implementation for
-credential encryption; the repository's provider-neutral store is the local
-fallback.
+Credentials use authenticated AES-GCM encryption with associated owner data.
+A managed KMS should still protect `CLICKMINT_CREDENTIAL_KEY` in production.
+Legacy HMAC-stream records remain read-compatible so operators can rotate them
+by reconnecting the bot.
 
 ## Supported checks
 

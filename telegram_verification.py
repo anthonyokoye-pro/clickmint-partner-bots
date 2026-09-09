@@ -15,6 +15,9 @@ import secrets
 import time
 from dataclasses import dataclass, asdict
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
 
 class CredentialError(ValueError):
     pass
@@ -50,9 +53,9 @@ class BotCredentialStore:
     def save(self, owner_id: int, token: str, bot: dict) -> dict:
         if not token or ":" not in token:
             raise CredentialError("Telegram bot token is invalid")
-        key = _key(); nonce = secrets.token_bytes(16)
-        ciphertext = _crypt_bytes(token.encode(), nonce, key)
-        mac = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+        key = _key(); nonce = secrets.token_bytes(12)
+        aad = f"clickmint:telegram-bot:{int(owner_id)}".encode()
+        ciphertext = AESGCM(key).encrypt(nonce, token.encode(), aad)
         items = self.store.get(self.key, {})
         bot_id = int(bot["id"])
         for existing_owner, existing in items.items():
@@ -61,9 +64,9 @@ class BotCredentialStore:
         record = {
             "owner_id": int(owner_id), "bot_id": bot_id,
             "username": bot.get("username"), "name": bot.get("first_name"),
+            "encryption": "aes-gcm-v1",
             "nonce": base64.b64encode(nonce).decode(),
             "ciphertext": base64.b64encode(ciphertext).decode(),
-            "mac": base64.b64encode(mac).decode(),
             "updated_at": int(time.time()),
         }
         items = self.store.get(self.key, {})
@@ -76,11 +79,20 @@ class BotCredentialStore:
         if not record:
             raise CredentialError("no Telegram bot is connected")
         key = _key()
-        nonce = base64.b64decode(record["nonce"]); ciphertext = base64.b64decode(record["ciphertext"])
-        actual = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
-        if not hmac.compare_digest(actual, base64.b64decode(record["mac"])):
-            raise CredentialError("stored Telegram bot credential failed integrity validation")
-        return _crypt_bytes(ciphertext, nonce, key).decode()
+        nonce = base64.b64decode(record["nonce"])
+        ciphertext = base64.b64decode(record["ciphertext"])
+        try:
+            if record.get("encryption") == "aes-gcm-v1":
+                aad = f"clickmint:telegram-bot:{int(owner_id)}".encode()
+                return AESGCM(key).decrypt(nonce, ciphertext, aad).decode()
+            # Legacy records are read-only compatible and should be rotated by
+            # reconnecting the bot; they remain authenticated by their HMAC.
+            actual = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+            if not hmac.compare_digest(actual, base64.b64decode(record["mac"])):
+                raise CredentialError("stored Telegram bot credential failed integrity validation")
+            return _crypt_bytes(ciphertext, nonce, key).decode()
+        except (InvalidTag, ValueError, KeyError, TypeError) as exc:
+            raise CredentialError("stored Telegram bot credential failed integrity validation") from exc
 
     def remove(self, owner_id: int) -> bool:
         items = self.store.get(self.key, {})

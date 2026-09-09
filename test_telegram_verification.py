@@ -49,6 +49,21 @@ def test_token_is_round_tripped_without_plaintext_record():
     assert c.public(10)["bot_id"] == 77
 
 
+def test_tampered_aes_credential_is_rejected():
+    os.environ["CLICKMINT_CREDENTIAL_KEY"] = "test-secret"
+    s = store(); c = BotCredentialStore(s)
+    c.save(10, "123:secret-token", {"id": 77, "username": "owner_bot"})
+    record = s.get("telegram_bot_credentials")["10"]
+    record["ciphertext"] = record["ciphertext"][:-2] + "AA"
+    s.mark_dirty("telegram_bot_credentials"); s.sync()
+    try:
+        c.token(10)
+    except CredentialError:
+        pass
+    else:
+        raise AssertionError("tampered AES credential must be rejected")
+
+
 def test_one_bot_cannot_be_assigned_to_two_owners():
     os.environ["CLICKMINT_CREDENTIAL_KEY"] = "test-secret"
     c = BotCredentialStore(store())
