@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import time
+from html import escape
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -243,6 +244,34 @@ async def mychannels_cmd(msg: types.Message):
     await msg.answer("📂 MY CHANNELS / GROUPS\n\n" + "\n".join(
         f"• {r.get('username')} · {r.get('kind')} · performance tier {r.get('band')} · "
         f"{('✅ VERIFIED' if r.get('verified_state') == 'VERIFIED' else '⚠️ ' + str(r.get('verified_state', 'REGISTERED')))}" for r in rows))
+
+
+@dp.message(Command("verification"))
+async def verification_cmd(msg: types.Message):
+    parts = (msg.text or "").split()
+    target = parts[1] if len(parts) > 1 else None
+    row = next((r for r in channels.mine(_uid(msg))
+                if not target or r.get("username") == target
+                or str(r.get("chat_id")) == target), None)
+    if not row:
+        await msg.answer("Usage: /verification @destination")
+        return
+    checks = row.get("verification_checks") or {}
+    labels = {"destination": "Telegram destination", "bot_membership": "Bot membership",
+              "administrator": "Administrator status", "permissions": "Required permissions",
+              "accessibility": "Destination accessibility", "member_count": "Member count",
+              "eligibility": "Eligibility"}
+    lines = [f"🔍 <b>VERIFICATION DETAILS</b> — {escape(str(row.get('username')))}", "",
+             f"State: <b>{escape(str(row.get('verified_state', 'REGISTERED')))}</b>"]
+    for key, label in labels.items():
+        value = checks.get(key, "not checked")
+        icon = "✅" if value == "passed" else "⚠️" if value == "unavailable" else "❌"
+        lines.append(f"{icon} {label}: {escape(str(value))}")
+    reasons = row.get("verification_reasons") or []
+    if reasons:
+        lines.extend(["", "<b>Corrective action:</b>", *[f"• {escape(str(reason))}" for reason in reasons]])
+    lines.extend(["", "Run /scan to perform fresh Telegram checks."])
+    await msg.answer("\n".join(lines), parse_mode="HTML")
 
 
 @dp.message(Command("scan"))
