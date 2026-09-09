@@ -39,7 +39,7 @@ audit logs, governance, safety, consent, anti-abuse preserved · no auto-ban fro
 | Consent-aware advertising, kill switch default off, labelled delivery | Implemented | `ad_campaigns.py` |
 | Ads billing / pricing / payouts | **Rejected for now** (approval-gated) | — |
 | Broadcast lifecycle; cancelled campaigns cannot be queued/claimed | Implemented | `broadcast_queue.py` |
-| Broadcast drafts with Telegram entities (compose in Telegram, send with `entities=`) | Approved → in progress | decision #3 |
+| Broadcast drafts with Telegram entities (owner composes in Telegram → admin bot captures `text`+`entities` → worker sends with `entities=`, no parse_mode; Mini App preview) | Implemented | `tg_entities.py`, `admin_bot._capture_broadcast_draft`, `test_tg_entities.py`, `test_bots.py` |
 | Rich formatting for ads | **Rejected** | decision #3 |
 | Economics model | Implemented (modelling only) | `economics.py` |
 | Deposits / withdrawals / Boost purchase / Stars / TON / payouts | Pending, approval-gated — **not implemented** | `ECONOMICS.md` |
@@ -62,5 +62,5 @@ audit logs, governance, safety, consent, anti-abuse preserved · no auto-ban fro
    this file + topic docs are canonical.
 
 ## Test counts (offline, `run_all_tests.py`)
-core 28 · governance 34 · bot wiring 37 · ads 6 · destination state 5 · relay 9 · verification store 4 · platform store 3 ·
+core 28 · governance 34 · bot wiring 38 · ads 6 · destination state 5 · relay 9 · verification store 4 · platform store 3 · tg entities 2 ·
 onboarding 5 · transactional mint 10 · plus admin/enforcement/feature/economics/credibility suites · `simulate.py` clean.

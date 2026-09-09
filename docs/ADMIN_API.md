@@ -125,6 +125,21 @@ POST /api/admin/broadcasts/{campaign_id}/cancel
 {"reason": "safety review"}
 ```
 
+### Broadcast formatting (decision 2026-09-09 #3)
+
+Formatting is never typed as markup. Two ways to create a Reward broadcast draft:
+
+| Composed in | How | Payload |
+|---|---|---|
+| **Telegram** | Owner sends the formatted message to the admin bot | `text` + `entities[]` exactly as Telegram parsed them (unsupported entity types dropped, ranges validated in UTF-16 units, `text_link` limited to http(s)/tg URLs) |
+| Mini App | Plain-text box, `POST /api/admin/broadcasts` | `text`, `entities: []` |
+
+Delivery calls `send_message(text, entities=…)` with **no `parse_mode`**, so a typed `<b>` is
+delivered as literal text. Editing a Telegram-composed draft in the Mini App drops its
+formatting on purpose (the editor is plain text). Each dashboard broadcast row carries
+`composed_in`, `entity_count` and an escaped `preview_html` for display only. Ads are excluded
+from this feature by decision.
+
 ### Clear performance cooldown
 
 ```http

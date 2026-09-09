@@ -955,6 +955,41 @@ def test_broadcast_worker_honours_safe_mode_and_blocked_recipients():
     print("OK broadcast worker pauses in safe mode and never messages a banned member")
 
 
+def test_broadcast_draft_captures_telegram_entities_and_replays_them():
+    """Decision #3: the owner composes in Telegram; the admin bot stores text+entities
+    verbatim; the reward worker sends with entities= and NO parse_mode. Members and
+    non-owners cannot create drafts. Typed '<b>' stays literal text."""
+    from aiogram.types import MessageEntity
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    admin_session = MockSession(); admin_bot.bot.session = admin_session
+    text = "Update: <b>not markup</b> and real bold"
+    ents = [MessageEntity(type="bold", offset=34, length=4),
+            MessageEntity(type="custom_emoji", offset=0, length=1, custom_emoji_id="9")]
+    msg = make_message(text, uid=OWNER_ID, username="owner").model_copy(update={"entities": ents})
+    before = {c["campaign_id"] for c in reward_bot.broadcasts.recent_campaigns(bot_scope="reward", limit=100)}
+    # A non-owner sending the same thing gets the lock screen and no draft.
+    run(feed(admin_bot, make_message(text, uid=1001, username="alice").model_copy(update={"entities": ents})))
+    assert "owner's admin panel" in admin_session.texts()
+    errs = run(feed(admin_bot, msg)); assert_no_errors(errs, "capture draft")
+    new = [c for c in reward_bot.broadcasts.recent_campaigns(bot_scope="reward", limit=100) if c["campaign_id"] not in before]
+    assert len(new) == 1 and new[0]["status"] == "draft", new
+    payload = new[0]["payload"]
+    assert payload["text"] == text and payload["entities"] == [{"type": "bold", "offset": 34, "length": 4}], payload
+    assert "bold" in admin_session.texts() and "DRAFT" in admin_session.texts()
+    # Deliver: entities travel, parse_mode does not.
+    reward_bot.broadcasts.queue_campaign(new[0]["campaign_id"], [1001])
+    run(reward_bot._process_reward_broadcasts())
+    sent = s.sent()
+    assert len(sent) == 1 and sent[0]["text"] == text and sent[0].get("parse_mode") in (None, "None"), sent
+    assert sent[0]["entities"] == [{"type": "bold", "offset": 34, "length": 4}], sent[0]
+    # Owner can delete only while it is a draft (it is queued now).
+    cid = new[0]["campaign_id"]
+    run(feed(admin_bot, make_callback(f"bcdel:{cid}", OWNER_ID, "owner")))
+    assert reward_bot.broadcasts.get_campaign(cid) is not None
+    print("OK broadcast drafts capture Telegram entities verbatim and replay them without parse_mode")
+
+
 def _group_message(text, chat_id, uid, username="member", reply_to=None, chat_username=None):
     _uid_seq[0] += 1
     return Message(message_id=_uid_seq[0], date=dt.datetime.now(dt.timezone.utc),
@@ -1121,6 +1156,7 @@ ALL_TESTS = [
     test_bot_reports_are_mirrored_into_the_compliance_store,
     test_enforced_partner_is_never_offered_a_post,
     test_broadcast_worker_honours_safe_mode_and_blocked_recipients,
+    test_broadcast_draft_captures_telegram_entities_and_replays_them,
     test_group_report_files_with_evidence_and_private_report_targets_registered_only,
     test_ads_consent_is_per_destination_and_delivery_is_labelled,
     test_admin_bot_safe_mode_toggle_is_owner_only,

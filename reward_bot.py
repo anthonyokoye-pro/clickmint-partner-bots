@@ -62,6 +62,7 @@ from scheduler import Scheduler
 from governance import (SubmissionGate, ReviewQueue, PartnerContractRegistry,
                         RoleRegistry, POST_CATEGORIES, TERMS_TEXT, daily_post_cap)
 import config
+import tg_entities
 import ui
 from platform_store import DeliveryAudit, SharedKV
 
@@ -2991,6 +2992,12 @@ async def _process_mint_outbox():
             tx.fail_outbox(event["event_id"], str(exc), retry_delay=delay)
 
 
+def _entities_from_payload(text: str, payload: dict) -> list | None:
+    from aiogram.types import MessageEntity
+    ents = tg_entities.sanitize_entities(text, payload.get("entities") or [])
+    return [MessageEntity(**e) for e in ents] or None
+
+
 async def _process_reward_broadcasts():
     """Deliver only Reward-scope campaigns through the shared durable queue."""
     if enforcement_gate.safe_mode():
@@ -3007,7 +3014,14 @@ async def _process_reward_broadcasts():
             if not text:
                 broadcasts.fail(delivery["delivery_id"], "campaign has no explicit text payload", blocked=True)
                 continue
-            sent = await bot.send_message(int(delivery["recipient_id"]), text, parse_mode="HTML")
+            if "entities" in payload:
+                # Composed in Telegram or the Mini App: replay Telegram's own entities,
+                # no parse_mode, so nothing typed can be misread as markup.
+                sent = await bot.send_message(int(delivery["recipient_id"]), text, parse_mode=None,
+                                              entities=_entities_from_payload(text, payload))
+            else:
+                # Legacy drafts created before entities were captured.
+                sent = await bot.send_message(int(delivery["recipient_id"]), text, parse_mode="HTML")
             broadcasts.complete(delivery["delivery_id"], sent.message_id)
         except Exception as exc:
             blocked = any(token in str(exc).lower() for token in ("blocked", "chat not found", "deactivated"))

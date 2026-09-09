@@ -28,6 +28,8 @@ from core import CreditLedger, PerformanceEngine, ReportRegistry
 from mint_ledger import TransactionalMintLedger
 from governance import ReviewQueue, RoleRegistry, daily_post_cap
 from platform_store import SharedKV
+from broadcast_queue import BroadcastQueue
+from tg_entities import sanitize_entities, to_html
 from features import category_counts
 from channel_registry import ChannelRegistry
 from enforcement import EnforcementStore, EnforcementError
@@ -95,11 +97,50 @@ async def start(msg: types.Message):
 
 @dp.message()
 async def any_message(msg: types.Message):
-    """Owner-only panel: any other message just re-opens the dashboard."""
+    """Owner-only panel. A plain text message from the owner becomes a Reward
+    broadcast DRAFT with its Telegram formatting captured verbatim
+    (text + entities, decision 2026-09-09 #3). Anything else re-opens the dashboard."""
     if not is_owner(msg.from_user.id):
         await msg.answer("🔒 This is the owner's admin panel.")
         return
+    text = msg.text or ""
+    if text and not text.startswith("/"):
+        await _capture_broadcast_draft(msg, text)
+        return
     await show_dashboard(msg)
+
+
+async def _capture_broadcast_draft(msg: types.Message, text: str):
+    """Store exactly what Telegram parsed: no markup is typed or interpreted here."""
+    try:
+        entities = sanitize_entities(text, msg.entities or [])
+    except ValueError as exc:
+        await msg.answer(f"Could not capture formatting: {exc}. Draft not saved.")
+        return
+    title = text.strip().splitlines()[0][:80]
+    campaign_id = BroadcastQueue(config.BROADCAST_DB_PATH).create_campaign(
+        bot_scope="reward", created_by=msg.from_user.id, title=title,
+        payload={"text": text, "entities": entities, "audience": "known_reward_members",
+                 "composed_in": "telegram"})
+    kinds = sorted({e["type"] for e in entities})
+    await msg.answer(
+        "📝 Saved as Reward broadcast DRAFT.\n"
+        f"  • id: {campaign_id}\n"
+        f"  • formatting captured: {', '.join(kinds) if kinds else 'none (plain text)'}\n\n"
+        "Nothing is sent yet. Preview and queue it in the Admin Mini App, or delete it below.",
+        reply_markup=_kb([[InlineKeyboardButton(text="🗑 Delete draft", callback_data=f"bcdel:{campaign_id}")],
+                          [_back("dash:back")]]))
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("bcdel:"))
+async def delete_draft(cb: types.CallbackQuery):
+    if not is_owner(cb.from_user.id):
+        await cb.answer("Owner only.", show_alert=True)
+        return
+    ok = BroadcastQueue(config.BROADCAST_DB_PATH).delete_draft(cb.data.split(":", 1)[1])
+    await cb.answer("Draft deleted." if ok else "Only a draft can be deleted (it may already be queued).", show_alert=not ok)
+    if ok:
+        await _safe_edit(cb, "🗑 Draft deleted.", _kb([[_back("dash:back")]]))
 
 
 def _dashboard_text():

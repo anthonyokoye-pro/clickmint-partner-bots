@@ -119,6 +119,6 @@ Recorded in full in `docs/STATUS.md § Decisions`. In short:
 
 1. **Direct mode is a destination capability.** The sender-side Forward/Direct chooser was removed; the receiving owner opts into "⚡ Auto-post" per destination, and only when `relay.auto_post_blocker` finds a legal route. Implemented.
 2. **Storage:** delivery audit + roles moved from JSON to one shared SQLite DB (`platform_store.py`, `PLATFORM_DB_PATH`): `DeliveryAudit` does targeted UPDATEs and indexed lookups instead of rewriting a JSON list; `RoleRegistry` runs unchanged on `SharedKV`, so one invite code now carries the whole scope list and works in either bot. Ledger via `MINT_LEDGER_MODE`; sessions stay JSON; Postgres rejected until a measured need exists. Implemented.
-3. **Formatting:** broadcast drafts only, captured as `text` + Telegram `MessageEntity[]` from a message the admin sends to the admin bot — never hand-typed markup, never for ads.
+3. **Formatting:** broadcast drafts only, captured as `text` + Telegram `MessageEntity[]` from a message the owner sends to the admin bot (`tg_entities.sanitize_entities`), replayed with `entities=` and no `parse_mode`; Mini App shows an escaped preview. Never hand-typed markup, never for ads. Implemented.
 4. **Views:** the honest proxy stays. Telethon/MTProto user-session observer (`views_provider.py`) is rejected for this stage and remains unwired.
 5. **Docs:** `docs/STATUS.md` is canonical and must change in the same commit as the code; `MASTER_SYSTEM_DOCUMENTATION.md` and `MASTER_PLAN.md` Parts 2–3 are historical.

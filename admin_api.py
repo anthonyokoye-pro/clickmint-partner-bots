@@ -8,6 +8,17 @@ class AdminAuthorizationError(PermissionError):
     pass
 
 
+def _safe_preview(payload: dict) -> str:
+    """Escaped HTML preview of a draft; falls back to escaped plain text."""
+    from html import escape
+    from tg_entities import to_html
+    text = payload.get("text") or ""
+    try:
+        return to_html(text, payload.get("entities") or [])
+    except ValueError:
+        return escape(text)
+
+
 class AdminReadAPI:
     """Application service independent of HTTP framework or Telegram web server."""
     def __init__(self, *, bot_token, owner_id, roles, channels, marketplace,
@@ -138,7 +149,7 @@ class AdminReadAPI:
             raise ValueError("explicit text is required and must be at most 4000 characters")
         campaign_id = self.broadcasts.create_campaign(
             bot_scope="reward", created_by=identity.user_id,
-            payload={"text": text, "audience": "known_reward_members"},
+            payload={"text": text, "entities": [], "audience": "known_reward_members", "composed_in": "mini_app"},
             scheduled_at=scheduled_at, title=title or "Untitled Reward broadcast",
         )
         self._audit(identity.user_id, "REWARD_BROADCAST_CREATED", "broadcast_campaign", campaign_id, "Mini App campaign creation")
@@ -160,7 +171,9 @@ class AdminReadAPI:
         identity = self.authenticate(init_data)
         if not title.strip() or not text.strip() or len(text) > 4000:
             raise ValueError("title and text are required; text must be at most 4000 characters")
-        if not self.broadcasts.update_draft(campaign_id, title=title, payload={"text": text, "audience": "known_reward_members"}, scheduled_at=scheduled_at):
+        # Editing in the Mini App drops captured formatting on purpose: the text box
+        # is plain text and we never reconstruct entities from typed markup.
+        if not self.broadcasts.update_draft(campaign_id, title=title, payload={"text": text, "entities": [], "audience": "known_reward_members", "composed_in": "mini_app"}, scheduled_at=scheduled_at):
             raise ValueError("only an existing draft can be edited")
         self._audit(identity.user_id, "REWARD_BROADCAST_EDITED", "broadcast_campaign", campaign_id, "Mini App draft edit")
         return {"campaign_id": campaign_id, "status": "draft"}
@@ -375,6 +388,9 @@ class AdminReadAPI:
                 "campaign_id": campaign["campaign_id"],
                 "title": campaign.get("title") or campaign.get("payload", {}).get("text", "")[:80],
                 "status": campaign["status"],
+                "composed_in": campaign.get("payload", {}).get("composed_in", "legacy"),
+                "entity_count": len(campaign.get("payload", {}).get("entities") or []),
+                "preview_html": _safe_preview(campaign.get("payload", {})),
                 "deliveries": self.broadcasts.campaign_summary(campaign["campaign_id"]).get("deliveries", {}),
             } for campaign in campaigns[:20]],
         }
