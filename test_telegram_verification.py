@@ -125,6 +125,9 @@ def test_verification_retrieves_telegram_count():
     assert result.state == "VERIFIED"
     assert result.member_count == 1234
     assert result.chat_type == "channel"
+    assert result.checks["destination"] == "passed"
+    assert result.checks["administrator"] == "passed"
+    assert result.checks["member_count"] == "passed"
 
 
 if __name__ == "__main__":

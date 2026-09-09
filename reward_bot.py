@@ -1350,11 +1350,13 @@ async def scan_cmd(msg: types.Message):
     for row in rows:
         try:
             result = await telegram_verification.verify(msg.from_user.id, channels.telegram_reference(row))
+            checks = result.checks or {}
+            icon = lambda name: "✅" if checks.get(name) == "passed" else ("⚠️" if checks.get(name) == "unavailable" else "❌")
             lines.append(f"🔍 Verifying {row['username']}")
-            lines.append("✅ Resolving Telegram destination")
-            lines.append(f"{'✅' if result.member_status not in {'left', 'kicked', 'unknown'} else '❌'} Checking bot membership")
-            lines.append(f"{'✅' if result.member_status in {'administrator', 'creator'} else '❌'} Checking administrator status")
-            lines.append(f"{'✅' if result.eligible else '❌'} Checking required permissions")
+            lines.append(f"{icon('destination')} Resolving Telegram destination")
+            lines.append(f"{icon('bot_membership')} Checking bot membership")
+            lines.append(f"{icon('administrator')} Checking administrator status")
+            lines.append(f"{icon('permissions')} Checking required permissions")
             if not result.eligible:
                 previous = row.get("status", "ACTIVE")
                 channels.update(msg.from_user.id, row["chat_id"], bot_added=False,
@@ -1364,9 +1366,9 @@ async def scan_cmd(msg: types.Message):
                     _record_channel_state_change(row, previous, result.state, "; ".join(result.reasons))
                 lines.append(f"❌ {row['username']}: {'; '.join(result.reasons)}")
                 continue
-            lines.append("✅ Checking destination accessibility")
-            lines.append("✅ Retrieving member count" if result.member_count is not None else "⚠️ Member count unavailable")
-            lines.append("✅ Checking eligibility")
+            lines.append(f"{icon('accessibility')} Checking destination accessibility")
+            lines.append(f"{icon('member_count')} Retrieving member count")
+            lines.append(f"{icon('eligibility')} Checking eligibility")
             previous = row.get("status", "ACTIVE")
             count = result.member_count or 0
             stats.record(row["chat_id"], subscribers=count)

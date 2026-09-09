@@ -121,6 +121,8 @@ class VerificationResult:
     checked_at: int = 0
     reasons: tuple[str, ...] = ()
     permissions: dict | None = None
+    # Each key corresponds to a real Bot API operation or policy evaluation.
+    checks: dict | None = None
 
     def as_dict(self):
         return asdict(self)
@@ -185,9 +187,18 @@ class TelegramVerificationService:
                 # Verification can pass while statistics are temporarily unavailable.
                 pass
             state = "VERIFIED" if not reasons else ("DISCONNECTED" if status in {"left", "kicked"} else "DEGRADED")
+            checks = {
+                "destination": "passed",
+                "bot_membership": "passed" if status not in {"left", "kicked", "unknown"} else "failed",
+                "administrator": "passed" if status in {"administrator", "creator"} else "failed",
+                "permissions": "passed" if not any("permission" in reason for reason in reasons) else "failed",
+                "accessibility": "passed",
+                "member_count": "passed" if count is not None else "unavailable",
+                "eligibility": "passed" if not reasons else "failed",
+            }
             return VerificationResult(state, not reasons, chat_id, chat_type,
                                      chat_data.get("title", ""), chat_data.get("username"),
-                                     status, count, checked, tuple(reasons), permissions)
+                                     status, count, checked, tuple(reasons), permissions, checks)
         except Exception as exc:
             text = str(exc).lower()
             if any(x in text for x in ("unauthorized", "invalid token", "token is invalid")):
