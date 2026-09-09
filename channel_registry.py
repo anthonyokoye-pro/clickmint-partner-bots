@@ -93,16 +93,27 @@ class ChannelRegistry:
         """Prefer immutable Telegram chat IDs after the first successful lookup."""
         return row.get("canonical_chat_id") or row.get("chat_id") or row.get("username")
 
-    def participation_allowed(self, chat_id, *, now: int | None = None) -> bool:
+    def participation_block_reason(self, chat_id, *, now: int | None = None) -> str | None:
         row = self.get(chat_id)
-        if not row or row.get("verified_state") != "VERIFIED" \
-                or row.get("bot_added") is not True or row.get("status") != "ACTIVE":
-            return False
+        if not row:
+            return "destination is not registered"
+        if row.get("verified_state") != "VERIFIED":
+            return f"verification state is {row.get('verified_state', 'UNKNOWN')}"
+        if row.get("bot_added") is not True:
+            return "your Telegram bot is not currently connected to this destination"
+        if row.get("status") != "ACTIVE":
+            return f"destination status is {row.get('status', 'UNKNOWN')}"
         checked = row.get("last_verified_at") or row.get("telegram_member_count_checked_at")
         if not checked:
-            return False
+            return "verification has no successful timestamp; run /scan"
         max_age = int(os.environ.get("VERIFICATION_MAX_AGE_SECONDS", "86400"))
-        return int(now if now is not None else time.time()) - int(checked) <= max_age
+        age = int(now if now is not None else time.time()) - int(checked)
+        if age > max_age:
+            return "verification has expired; run /scan to refresh Telegram permissions"
+        return None
+
+    def participation_allowed(self, chat_id, *, now: int | None = None) -> bool:
+        return self.participation_block_reason(chat_id, now=now) is None
 
     def set_bot_access(self, chat_id, added: bool) -> dict:
         row = self.get(chat_id)

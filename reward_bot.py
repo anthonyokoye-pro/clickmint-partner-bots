@@ -2006,6 +2006,7 @@ async def show_cap(cb: types.CallbackQuery):
     """Reached via menu_nav (which == 'cap'). Displays the user's daily post cap."""
     u = _uname(cb)
     m = ledger._m(u)
+    access_reason = channels.participation_block_reason(u)
     s = perf.score(u)
     cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"),
                          m.get("is_owner", False), connected=_is_connected(u))
@@ -2014,7 +2015,8 @@ async def show_cap(cb: types.CallbackQuery):
         f"📌 <b>Destination:</b> {u}\n"
         f"👥 <b>Audience:</b> {m.get('size',0):,}\n"
         f"📈 <b>Performance tier:</b> {s['band']} · <b>Status:</b> {m.get('status','ACTIVE')}\n"
-        f"📤 <b>Available today:</b> {cap if cap != -1 else 'UNLIMITED'} post(s)\n\n"
+        f"📤 <b>Available today:</b> {cap if cap != -1 else 'UNLIMITED'} post(s)\n"
+        f"{'⚠️ <b>Participation blocked:</b> ' + escape(access_reason) if access_reason else '✅ Verification is current.'}\n\n"
         "Your limit reflects audience size and real performance.\n"
         "Better delivery and engagement can improve your performance tier.",
         parse_mode="HTML",

@@ -58,6 +58,7 @@ def test_verified_destination_expires():
                     last_verified_at=1000)
     assert registry.participation_allowed("@example", now=1059)
     assert not registry.participation_allowed("@example", now=1061)
+    assert "expired" in registry.participation_block_reason("@example", now=1061)
     os.environ.pop("VERIFICATION_MAX_AGE_SECONDS", None)
 
 
