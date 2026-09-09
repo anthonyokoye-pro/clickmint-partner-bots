@@ -112,3 +112,13 @@ appeal decisions are delivered to the member via the outbox.
 ## 2026-09-09 — Final offline audit
 
 **Done:** secret redaction closed in three more places (partnership connect error, `ClassifiedError.message`, go-live check for onboarding URL). Full offline suite and simulation green. See `docs/FINAL_AUDIT_2026-09-09.md` for the executed checks, known limitations and the live-Telegram checklist that still needs real credentials.
+
+## 2026-09-09 — Five architecture decisions (approved)
+
+Recorded in full in `docs/STATUS.md § Decisions`. In short:
+
+1. **Direct mode is a destination capability.** The sender-side Forward/Direct chooser was removed; the receiving owner opts into "⚡ Auto-post" per destination, and only when `relay.auto_post_blocker` finds a legal route. Implemented.
+2. **Storage:** delivery audit + roles move from JSON to SQLite (verification-store pattern); ledger via `MINT_LEDGER_MODE`; sessions stay JSON; Postgres rejected until a measured need exists.
+3. **Formatting:** broadcast drafts only, captured as `text` + Telegram `MessageEntity[]` from a message the admin sends to the admin bot — never hand-typed markup, never for ads.
+4. **Views:** the honest proxy stays. Telethon/MTProto user-session observer (`views_provider.py`) is rejected for this stage and remains unwired.
+5. **Docs:** `docs/STATUS.md` is canonical and must change in the same commit as the code; `MASTER_SYSTEM_DOCUMENTATION.md` and `MASTER_PLAN.md` Parts 2–3 are historical.

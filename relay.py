@@ -148,3 +148,19 @@ def destination_from_registry(row: dict, *, platform_bot_id: int | None, owner_r
                        owner_id=int(row["owner_id"]) if row.get("owner_id") is not None else None,
                        platform_bot_admin=platform_admin,
                        owner_admin_chat_ids=frozenset(admin_ids))
+
+
+def auto_post_blocker(row: dict, *, platform_bot_id: int | None, owner_rows: list[dict]) -> str | None:
+    """Why a destination owner can NOT enable Auto-post right now; None if allowed.
+    Auto-post is a per-destination capability the receiving owner opts into
+    (decision 2026-09-09 #1). It is only offered when a legal relay route exists:
+    the platform bot administers the destination, or the owner's bot administers
+    at least one OTHER chat that can serve as an origin."""
+    if row.get("verified_state") != "VERIFIED":
+        return "the destination must be VERIFIED first (tap Re-verify)"
+    dest = destination_from_registry(row, platform_bot_id=platform_bot_id, owner_rows=owner_rows)
+    self_ids = {str(row.get(k)) for k in ("canonical_chat_id", "chat_id", "username") if row.get(k) is not None}
+    if dest.platform_bot_admin or (set(dest.owner_admin_chat_ids) - self_ids):
+        return None
+    return ("no legal route yet: either make the ClickMint bot an admin here, or posts must "
+            "originate from another channel your own bot administers")

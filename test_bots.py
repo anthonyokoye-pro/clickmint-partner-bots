@@ -456,7 +456,6 @@ def test_direct_delivery_uses_a_bot_that_can_read_the_source():
     reward_bot.ledger.earn("@alice")
     for u in ("@alice", "@bob"):
         reward_bot.perf.mark_offered(u); reward_bot.perf.mark_posted(u)
-    reward_bot.ledger.grant_direct("@bob")
     # bob's own bot (9002) is connected; the platform bot is 111111.
     reward_bot.bot_credentials.save(1002, "9002:test-token", {"id": 9002, "username": "bobbot"})
     from aiogram import Bot as TgBot
@@ -477,20 +476,26 @@ def test_direct_delivery_uses_a_bot_that_can_read_the_source():
         errs = run(feed(reward_bot, make_callback("s:1", 1001, "alice"))); assert_no_errors(errs, "route")
         return [(n, d) for n, d in s.calls if n == "ForwardMessage"]
 
-    # Case A — bob's destination verified with HIS bot, origin is a user forward:
-    # nobody can legally forward → no ForwardMessage succeeds, audit says why.
+    # Case A — bob's destination verified with HIS bot and no origin channel he
+    # administers: Auto-post cannot even be enabled (decision #1), and a submission
+    # becomes a chain OFFER — no ForwardMessage is attempted.
     reward_bot.channels.update(1002, "@bob", telegram_bot_id=9002)
+    errs = run(feed(reward_bot, make_callback("dest:auto:0", 1002, "bob")))
+    assert_no_errors(errs, "auto-post toggle without route")
+    assert not reward_bot.channels.get("@bob").get("auto_post"), "toggle must be refused without a legal route"
     fwds = submit_and_route()
     assert not fwds, f"a forward was attempted with no legal route: {fwds}"
     last = reward_bot.audit.all()[-1]
-    assert last["status"] == "failed" and last.get("relay") == "unavailable", last
-    assert "isn't possible" in s.texts()
+    assert last["mode"] == "chain" and last["status"] == "offered", last
 
     # Case B — origin is a channel bob's bot administers → bob's bot forwards from origin.
     reward_bot.channels.add(1002, "-100777", "@bobnews", "channel", ["General"], size=100, bot_added=True)
     reward_bot.channels.update(1002, "-100777", verified_state="VERIFIED", status="ACTIVE", canonical_chat_id=-100777)
     origin = MessageOriginChannel(type="channel", date=dt.datetime.now(dt.timezone.utc),
                                   chat=Chat(id=-100777, type="channel", title="Bob News"), message_id=9)
+    # Now bob administers -100777 → the owner may enable Auto-post on @bob.
+    run(feed(reward_bot, make_callback("dest:auto:0", 1002, "bob")))
+    assert reward_bot.channels.get("@bob").get("auto_post") is True
     reward_bot.ledger.earn("@alice")
     fwds = submit_and_route(origin)
     assert fwds and fwds[-1][1]["from_chat_id"] == -100777 and fwds[-1][1]["message_id"] == 9, fwds

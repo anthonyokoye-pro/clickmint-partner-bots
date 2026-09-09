@@ -95,7 +95,26 @@ def test_destination_from_registry():
     print("PASS registry rows map to Destination with fail-closed admin flags")
 
 
-TESTS = [test_platform_route_when_platform_bot_is_admin, test_owner_bot_never_forwards_from_platform_inbox,
+def test_auto_post_is_owner_opt_in_only_with_a_legal_route():
+    """Decision 2026-09-09 #1: Auto-post is a destination capability. It can only
+    be enabled when a legal route exists; the destination itself never counts as
+    its own origin route."""
+    dest = {"owner_id": 7, "chat_id": -100555, "username": "@d", "verified_state": "VERIFIED", "telegram_bot_id": 9002}
+    # Unverified → blocked, with the fix spelled out.
+    assert "VERIFIED" in relay.auto_post_blocker({**dest, "verified_state": "DEGRADED"}, platform_bot_id=111, owner_rows=[dest])
+    # Only its own row is verified → no origin route → blocked.
+    assert relay.auto_post_blocker(dest, platform_bot_id=111, owner_rows=[dest]) is not None
+    # Platform bot administers the destination → allowed.
+    assert relay.auto_post_blocker({**dest, "telegram_bot_id": 111}, platform_bot_id=111, owner_rows=[dest]) is None
+    # Owner's bot administers ANOTHER verified chat (an origin) → allowed.
+    origin = {"owner_id": 7, "chat_id": -100777, "verified_state": "VERIFIED", "telegram_bot_id": 9002}
+    assert relay.auto_post_blocker(dest, platform_bot_id=111, owner_rows=[dest, origin]) is None
+    # ...but not if that other chat is merely DEGRADED.
+    assert relay.auto_post_blocker(dest, platform_bot_id=111, owner_rows=[dest, {**origin, "verified_state": "DEGRADED"}]) is not None
+    print("PASS auto-post is owner opt-in and only offered with a legal route")
+
+
+TESTS = [test_auto_post_is_owner_opt_in_only_with_a_legal_route, test_platform_route_when_platform_bot_is_admin, test_owner_bot_never_forwards_from_platform_inbox,
          test_owner_origin_route_only_for_owner_administered_channel, test_platform_route_preferred_over_owner_origin, test_platform_may_try_never_licenses_owner_bot,
          test_no_source_fails_closed, test_source_round_trips_through_persisted_shapes, test_destination_from_registry]
 

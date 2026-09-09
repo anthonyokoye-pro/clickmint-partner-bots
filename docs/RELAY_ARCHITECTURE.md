@@ -56,9 +56,21 @@ origin_kind                           # channel | user | hidden_user | chat | No
 Legacy records with only `from_chat_id`/`source_chat_id` still load (`Source.from_record`) and
 resolve to route 1 or `unavailable`.
 
+## Who decides direct delivery (decision 2026-09-09 #1)
+
+Direct delivery is a **destination capability, not a sender choice**. The sender only picks
+category and loud/silent. The *receiving owner* toggles "⚡ Auto-post" per destination in
+`/mychannels` (both bots). `relay.auto_post_blocker` refuses the toggle unless the destination is
+VERIFIED and a legal route exists: the platform bot administers it, **or** the owner's bot
+administers at least one *other* verified chat (a possible origin — the destination never counts as
+its own origin). At delivery time `_auto_post_enabled` re-checks the same rule (rights can be lost),
+so an enabled destination silently degrades to a chain offer instead of a failed forward. The sender
+sees "⚡ auto-posted to N · 📨 offered to M". The legacy per-member `direct_mode` flag in the credit
+ledger is no longer consulted for routing.
+
 ## Paths now routed through `_relay_forward`
 
-- `direct_deliver` (member submission → direct-mode destination)
+- `direct_deliver` (member submission → destination with Auto-post enabled)
 - `_execute_task_payload` (marketplace task claim)
 - `chain:agree` (partner agrees to a chain offer)
 - scheduler `run_due`

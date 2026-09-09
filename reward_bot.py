@@ -138,7 +138,7 @@ def _audit_counts() -> dict[str, int]:
         "Review Queue": len(review.pending()),
         "Pending Posts": available.count(),
         "Scheduled Posts": sched.pending_count(),
-        "Direct Delivery": sum(1 for m in ledger.ledger.values() if m.get("direct_mode")),
+        "Auto-post destinations": sum(1 for r in channels._items().values() if r.get("auto_post")),
     }
 
 
@@ -497,6 +497,20 @@ async def mychannels_cmd(msg: types.Message):
     await _send_mychannels(msg, msg.from_user.id, edit=False)
 
 
+def _auto_post_enabled(target) -> bool:
+    """Direct delivery is a destination capability: the owner turned Auto-post on
+    AND a legal relay route still exists right now (rights can be lost later)."""
+    row = channels.get(target)
+    if not row or not row.get("auto_post") or not channels.participation_allowed(target):
+        return False
+    return _auto_post_explainer(row) is None
+
+
+def _auto_post_explainer(row: dict) -> str | None:
+    return relay.auto_post_blocker(row, platform_bot_id=_platform_bot_id(),
+                                   owner_rows=channels.mine(int(row["owner_id"])))
+
+
 def _dest_label(row: dict) -> str:
     icon = {"ACTIVE": "✅", "DEGRADED": "⚠️", "VERIFYING": "⏳", "REGISTERED": "🆕"}.get(row.get("status"), "⛔")
     return f"{icon} {row.get('username') or row.get('chat_id')} · {row.get('kind')} · {row.get('status')}"
@@ -514,10 +528,13 @@ def _mychannels_view(uid: int):
         if row.get("status") != "ACTIVE" and row.get("verification_reasons"):
             lines.append(f"    ↳ {row['verification_reasons'][0][:90]}")
         key = row.get("chat_id") or row.get("username")
+        auto = "⚡ Auto-post ON" if row.get("auto_post") else "⚡ Auto-post off"
         kb.append([InlineKeyboardButton(text=f"🔄 Re-verify {row.get('username') or key}"[:60], callback_data=f"dest:verify:{i}"),
                    InlineKeyboardButton(text="ℹ️", callback_data=f"dest:info:{i}"),
                    InlineKeyboardButton(text="🗑", callback_data=f"dest:remove:{i}")])
-    lines += ["", "Re-verify runs a live Telegram permission check with YOUR bot."]
+        kb.append([InlineKeyboardButton(text=auto, callback_data=f"dest:auto:{i}")])
+    lines += ["", "Re-verify runs a live Telegram permission check with YOUR bot.",
+              "⚡ Auto-post lets other members' forwards land here automatically (you choose per destination)."]
     return ("\n".join(lines),), {"reply_markup": InlineKeyboardMarkup(inline_keyboard=kb)}
 
 
@@ -563,6 +580,17 @@ async def destination_control(cb: types.CallbackQuery):
                 "", "Recent transitions:"] + [f"• {h['previous']} → {h['new']} ({h['source']}): {h['reason'][:60]}" for h in hist]
         await cb.message.answer("\n".join(text), parse_mode="HTML")
         await cb.answer(); return
+    if action == "auto":
+        if row.get("auto_post"):
+            channels.update(uid, key, auto_post=False)
+            await cb.answer("Auto-post off: you will get offers to accept instead.")
+        else:
+            why = _auto_post_explainer(row)
+            if why:
+                await cb.answer(f"Can't enable Auto-post: {why}"[:200], show_alert=True); return
+            channels.update(uid, key, auto_post=True)
+            await cb.answer("Auto-post on for this destination.")
+        await _send_mychannels(cb, uid, edit=True); return
     if action == "remove":
         try:
             destination_states.transition(uid, key, VState.REMOVED, reason="owner removed via /mychannels", source="owner")
@@ -2226,10 +2254,10 @@ async def pick_category(cb: types.CallbackQuery):
         await cb.answer("Unknown category.", show_alert=True)
         return
     _session_set(cb.from_user.id, cat=cat)
-    # Pinning forwarded posts is intentionally unavailable to both owners and users.
+    # Delivery style is NOT a sender choice: a destination auto-posts only if its
+    # owner enabled Auto-post and a legal relay route exists (decision 2026-09-09 #1).
+    # Pinning forwarded posts is intentionally unavailable.
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔁 Forward", callback_data="style:fwd"),
-         InlineKeyboardButton(text="⚡ Direct", callback_data="style:direct")],
         [InlineKeyboardButton(text="🔔 Loud", callback_data="ntf:loud"),
          InlineKeyboardButton(text="🔕 Silent", callback_data="ntf:silent")],
         [InlineKeyboardButton(text="✅ Submit (you must FORWARD the post next)",
@@ -2238,33 +2266,25 @@ async def pick_category(cb: types.CallbackQuery):
          InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")],
     ])
     await cb.message.edit_text(
-        f"Category: **{cat}**\n\nChoose post style & notification:\n\n"
-        "Loud delivery is for groups. Silent delivery can target either a group or a channel.",
-        reply_markup=kb)
+        f"Category: <b>{escape(cat)}</b>\n\nChoose notification:\n\n"
+        "Loud delivery is for groups. Silent delivery can target either a group or a channel.\n"
+        "Destinations whose owner enabled ⚡ Auto-post receive your forward automatically; "
+        "others get an offer to accept.",
+        reply_markup=kb, parse_mode="HTML")
     await cb.answer()
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("style:"))
 async def pick_style(cb: types.CallbackQuery):
-    parts = cb.data.split(":")
-    style = parts[1]
-    if style == "submit":
+    """Only `style:submit` remains; legacy style:fwd/direct taps are explained away."""
+    if cb.data.split(":")[1] == "submit":
         await cb.message.edit_text(
             "Now **forward** the post you want to distribute here (so its "
             "attribution stays intact).\n\n" + gate.attribution_tip())
         await cb.answer()
         return
-    if style not in ("fwd", "direct"):
-        await cb.answer("Only forward or direct delivery is available; pinning is disabled.", show_alert=True)
-        return
-    _session_set(cb.from_user.id, style=style)
-    await cb.answer(f"Style: {style}")
-    await cb.message.edit_text(f"Post style set to **{style}**. Choose notification:",
-                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                   [InlineKeyboardButton(text="🔔 Loud", callback_data="ntf:loud"),
-                                    InlineKeyboardButton(text="🔕 Silent", callback_data="ntf:silent")],
-                                   [InlineKeyboardButton(text="✅ Submit", callback_data="style:submit")],
-                               ]))
+    await cb.answer("Delivery style is decided per destination by its owner (⚡ Auto-post in /mychannels).",
+                    show_alert=True)
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("ntf:"))
@@ -2574,13 +2594,16 @@ async def pick_spend(cb: types.CallbackQuery):
             return
 
     _session_clear(uid, "pending")          # one submission = one distribution
-    await cb.message.answer(f"Distributing to {len(targets)} channel(s): {targets or 'none'}.")
     source = pending.get("source", "unknown")
     style = pending.get("style", "fwd")
     ntf = pending.get("ntf", "loud") == "silent"
+    auto_n = sum(1 for t in targets if _auto_post_enabled(t))
+    await cb.message.answer(
+        f"Distributing to {len(targets)} destination(s): "
+        f"⚡ auto-posted to {auto_n} · 📨 offered to {len(targets) - auto_n}")
     for target in targets:
         perf.mark_offered(target)
-        if ledger.is_direct(target):
+        if _auto_post_enabled(target):
             await direct_deliver(cb, sender, target, pending, style=style, silent=ntf)
         else:
             audit.record(bot="reward", sender=sender, source=source,
@@ -2910,8 +2933,8 @@ async def partner_username_capture(msg: types.Message):
         return
     m = ledger._m(u)
     other_m = ledger._m(other)
-    if not (m.get("direct_mode") and other_m.get("direct_mode")):
-        await msg.answer("Both channels must have added the bot as admin (Post Messages) "
+    if not (channels.participation_allowed(u) and channels.participation_allowed(other)):
+        await msg.answer("Both channels must be VERIFIED with their owner's bot as admin (Post Messages) "
                          "so you can post into each other. Fix that on both sides, then retry.")
         _session_clear(uid, "partner_phase")
         return
@@ -3465,7 +3488,7 @@ async def panel(cb: types.CallbackQuery):
         await cb.answer()
         return
     if which == "direct":
-        rows = [f"{u:<22} {'direct ✔' if m.get('direct_mode') else 'chain —'}"
+        rows = [f"{u:<22} {'auto ⚡' if (channels.get(u) or {}).get('auto_post') else 'offer —'}"
                 for u, m in ledger.ledger.items()]
         await _panel_edit(cb, "⚡ DELIVERY MODE PER CHANNEL\n\n" +
                           ("\n".join(rows[:40]) or "No channels registered yet."),
@@ -3533,7 +3556,7 @@ def _rank_text() -> str:
         s = perf.score(username)
         cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"), connected=_is_connected(username))
         lines.append(f"{username:<22} {s['band']}  {s['score']:.2f}  {s['status']}  "
-                     f"direct={'✔' if ledger.is_direct(username) else '—'}  "
+                     f"auto={'⚡' if (channels.get(username) or {}).get('auto_post') else '—'}  "
                      f"cap={cap}  ({m.get('size', 0)})")
     if len(lines) == 2:
         lines.append("No channels registered yet.")

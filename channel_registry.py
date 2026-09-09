@@ -60,7 +60,7 @@ class ChannelRegistry:
             raise KeyError("channel not found or not owned by this user")
         allowed = {"username", "categories", "size", "bot_added", "status", "band",
                    "verified_state", "telegram_member_count", "telegram_member_count_source",
-                   "telegram_member_count_checked_at", "telegram_chat_type", "telegram_bot_id", "canonical_chat_id",
+                   "telegram_member_count_checked_at", "telegram_chat_type", "telegram_bot_id", "canonical_chat_id", "auto_post",
                    "permissions", "verification_checks", "verification_reasons", "last_verified_at",
                    "state_history", "last_transition_at", "last_error_kind", "last_recheck_at"}
         unknown = set(changes) - allowed

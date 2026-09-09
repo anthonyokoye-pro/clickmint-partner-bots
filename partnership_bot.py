@@ -33,6 +33,7 @@ from store import JsonStore
 from governance import (SubmissionGate, ReviewQueue, RoleRegistry, POST_CATEGORIES,
                         TERMS_TEXT, daily_post_cap)
 import config
+import relay
 import ui
 
 logging.basicConfig(level=logging.INFO)
@@ -284,6 +285,13 @@ def _dest_label(row: dict) -> str:
     return f"{icon} {row.get('username') or row.get('chat_id')} · {row.get('kind')} · {row.get('status')}"
 
 
+def _platform_bot_id() -> int | None:
+    try:
+        return int(str(BOT_TOKEN).split(":", 1)[0])
+    except (ValueError, AttributeError):
+        return None
+
+
 def _mychannels_view(uid: int):
     rows = channels.mine(uid)
     if not rows:
@@ -297,8 +305,11 @@ def _mychannels_view(uid: int):
         kb.append([InlineKeyboardButton(text=f"🔄 Re-verify {row.get('username') or row.get('chat_id')}"[:60],
                                         callback_data=f"dest:verify:{i}"),
                    InlineKeyboardButton(text="🗑", callback_data=f"dest:remove:{i}")])
+        kb.append([InlineKeyboardButton(text="⚡ Auto-post ON" if row.get("auto_post") else "⚡ Auto-post off",
+                                        callback_data=f"dest:auto:{i}")])
     kb.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")])
-    lines += ["", "Re-verify runs a live Telegram permission check with YOUR bot."]
+    lines += ["", "Re-verify runs a live Telegram permission check with YOUR bot.",
+              "⚡ Auto-post lets partner forwards land here automatically (per destination, your call)."]
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -331,6 +342,17 @@ async def destination_control(cb: types.CallbackQuery):
         await cb.answer("That list is out of date — reopening.", show_alert=True)
         await _send_mychannels(cb, uid, edit=True); return
     key = row.get("chat_id") or row.get("username")
+    if action == "auto":
+        if row.get("auto_post"):
+            channels.update(uid, key, auto_post=False)
+            await cb.answer("Auto-post off: partners' posts arrive as offers instead.")
+        else:
+            why = relay.auto_post_blocker(row, platform_bot_id=_platform_bot_id(), owner_rows=rows)
+            if why:
+                await cb.answer(f"Can't enable Auto-post: {why}"[:200], show_alert=True); return
+            channels.update(uid, key, auto_post=True)
+            await cb.answer("Auto-post on for this destination.")
+        await _send_mychannels(cb, uid, edit=True); return
     if action == "remove":
         try:
             destination_states.transition(uid, key, VState.REMOVED, reason="owner removed via /mychannels", source="owner")
