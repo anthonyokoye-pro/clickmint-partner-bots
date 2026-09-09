@@ -18,6 +18,10 @@ delivery), partnership (register, forward, target filter) and admin bots; `/appe
 command; Reports & appeals panel + 9 new Admin API routes; admin-bot Trust & safety panel;
 CI now runs the full suite. Tests: bots 26→31, enforcement 4→7, admin api/http +2.
 
+**Follow-up (same day):** broadcast workers now honour safe mode and skip enforced
+recipients (`BroadcastQueue.release()` added so a worker pause never burns a retry);
+appeal decisions are delivered to the member via the outbox.
+
 **Remaining:** consent-aware advertising; group-scoped report entry points.
 
 ## 2026-09-08 — Compliance enforcement foundation

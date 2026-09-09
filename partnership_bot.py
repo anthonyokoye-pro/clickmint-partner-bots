@@ -719,8 +719,14 @@ async def _notify_review_sender(item: dict):
 
 async def _process_partnership_broadcasts():
     """Deliver only Partnership-scope campaigns through the shared queue."""
+    if enforcement_gate.safe_mode():
+        # Safe mode pauses the machine: leave deliveries pending, claim nothing.
+        return
     for delivery in broadcasts.claim(limit=20, bot_scope="partnership"):
         try:
+            if not enforcement_gate.check(delivery["recipient_id"], "user", "campaigns"):
+                broadcasts.fail(delivery["delivery_id"], "recipient blocked by enforcement", blocked=True)
+                continue
             campaign = broadcasts.get_campaign(delivery["campaign_id"])
             payload = campaign.get("payload", {}) if campaign else {}
             text = payload.get("text")

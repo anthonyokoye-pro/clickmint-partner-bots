@@ -101,7 +101,19 @@ def test_reports_appeals_and_owner_only_enforcement():
             raise AssertionError("admin overturned enforcement")
         assert api.decide_appeal(owner, appeal["appeal_id"], "OVERTURNED", "verified")["status"] == "OVERTURNED"
         assert enforcement.get("@spammy", "channel")["state"] == "ACTIVE"
-        assert api.list_appeals(admin)[0]["status"] == "OVERTURNED"
+        # the appellant is told the final decision via the durable outbox (numeric ids only)
+        from mint_ledger import TransactionalMintLedger
+        class Facade:
+            def __init__(self): self.tx = TransactionalMintLedger(root / "mint.sqlite3"); self.ledger = {}
+        api.ledger = Facade()
+        enforcement.enforce("@spammy", "channel", "RESTRICTED", actor_id="owner", reason="again")
+        second = enforcement.appeal("@spammy", "channel", submitted_by=4242, statement="second")
+        api.decide_appeal(admin, second["appeal_id"], "UNDER_REVIEW")
+        assert api.ledger.tx.claim_outbox(limit=5) == [], "interim states must not notify"
+        api.decide_appeal(admin, second["appeal_id"], "UPHELD", "evidence stands")
+        events = api.ledger.tx.claim_outbox(limit=5)
+        assert len(events) == 1 and events[0]["recipient_id"] == "4242" and "stands" in events[0]["payload"]
+        assert {a["status"] for a in api.list_appeals(admin)} == {"OVERTURNED", "UPHELD"}
     finally:
         directory.cleanup()
 

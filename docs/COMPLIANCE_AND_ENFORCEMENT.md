@@ -76,7 +76,11 @@ Implemented:
 - in-bot 🚩 reports are mirrored into `compliance_reports` (still PENDING a human);
 - Admin Mini App **Reports & appeals** panel and API (`/api/admin/safety`,
   `/api/admin/reports…`, `/api/admin/evidence`, `/api/admin/appeals/{id}/decide`);
-- admin bot **Trust & safety** panel with an owner-only safe-mode toggle.
+- admin bot **Trust & safety** panel with an owner-only safe-mode toggle;
+- broadcast workers (reward + partnership) claim nothing during safe mode and mark
+  deliveries to enforced recipients `blocked` instead of messaging them;
+- final appeal decisions (UPHELD / OVERTURNED / WITHDRAWN) are sent to the appellant
+  through the durable outbox; interim states are silent.
 
 Not yet implemented:
 
@@ -86,8 +90,8 @@ Not yet implemented:
 ## Safe mode semantics
 
 When safe mode is on: member forwards, task claims, partnership offers and new
-registrations are refused with a "paused" message; scheduled direct deliveries are
-**retried later** rather than dropped; owner panels and the Admin Mini App keep working
+registrations are refused with a "paused" message; scheduled direct deliveries and
+queued broadcasts are **retried later** rather than dropped; owner panels and the Admin Mini App keep working
 so the incident can be handled.
 
 ## Human verification and risk

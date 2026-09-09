@@ -2797,8 +2797,14 @@ async def _process_mint_outbox():
 
 async def _process_reward_broadcasts():
     """Deliver only Reward-scope campaigns through the shared durable queue."""
+    if enforcement_gate.safe_mode():
+        # Safe mode pauses the machine: leave deliveries pending, claim nothing.
+        return
     for delivery in broadcasts.claim(limit=20, bot_scope="reward"):
         try:
+            if not enforcement_gate.check(delivery["recipient_id"], "user", "campaigns"):
+                broadcasts.fail(delivery["delivery_id"], "recipient blocked by enforcement", blocked=True)
+                continue
             campaign = broadcasts.get_campaign(delivery["campaign_id"])
             payload = campaign.get("payload", {}) if campaign else {}
             text = payload.get("text")

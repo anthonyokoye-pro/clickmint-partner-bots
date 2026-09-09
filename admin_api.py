@@ -204,7 +204,28 @@ class AdminReadAPI:
             raise AdminAuthorizationError("owner approval required to overturn enforcement")
         appeal = self._require_enforcement().decide_appeal(appeal_id, decision, decided_by=identity.user_id, notes=notes)
         self._audit(identity.user_id, f"APPEAL_{decision.upper()}", "compliance_appeal", appeal_id, notes or "Mini App decision")
+        self._notify_appellant(appeal)
         return appeal
+
+    def _notify_appellant(self, appeal: dict) -> None:
+        """Keep the /appeal promise: tell the member the final decision.
+
+        Delivered through the durable outbox the reward bot already drains, so
+        the Mini App never talks to Telegram directly. Interim states are silent."""
+        outcome = {"UPHELD": "Your appeal was reviewed by a human and the restriction stands.",
+                   "OVERTURNED": "Your appeal was reviewed by a human and the restriction has been lifted. Welcome back.",
+                   "WITHDRAWN": "Your appeal has been closed as withdrawn."}.get(appeal.get("status"))
+        if not outcome or self.ledger is None or not hasattr(self.ledger, "tx"):
+            return
+        try:
+            recipient = int(appeal["submitted_by"])
+        except (TypeError, ValueError):
+            return
+        text = f"📨 Appeal {appeal['appeal_id']}: {outcome}"
+        if appeal.get("decision_notes"):
+            text += f"\nReviewer note: {appeal['decision_notes'][:300]}"
+        self.ledger.tx.enqueue_outbox(event_type="OWNER_NOTIFICATION", recipient_id=recipient, payload=text,
+                                      idempotency_key=f"appeal-decision:{appeal['appeal_id']}:{appeal['status']}")
 
     def emergency_mode(self, init_data: str, enabled: bool, reason: str) -> dict:
         identity = self.authenticate(init_data)

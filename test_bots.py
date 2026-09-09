@@ -756,6 +756,28 @@ def test_admin_bot_safe_mode_toggle_is_owner_only():
     print("OK admin bot safe-mode toggle is owner-only and reversible")
 
 
+def test_broadcast_worker_honours_safe_mode_and_blocked_recipients():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    q = reward_bot.broadcasts
+    cid = q.create_campaign(bot_scope="reward", created_by=OWNER_ID, payload={"text": "hello members"})
+    q.queue_campaign(cid, [1001, 1002])
+    reward_bot.enforcement.enforce(1002, "user", "BANNED", actor_id="owner", reason="confirmed abuse")
+    # safe mode: nothing is claimed, nothing sent, both stay pending
+    reward_bot.enforcement.set_emergency(True, actor_id="owner", reason="incident")
+    run(reward_bot._process_reward_broadcasts())
+    assert not s.sent() and q.campaign_summary(cid)["deliveries"].get("pending") == 2
+    reward_bot.enforcement.set_emergency(False, actor_id="owner", reason="over")
+    s.reset()
+    run(reward_bot._process_reward_broadcasts())
+    recipients = {d.get("chat_id") for d in s.sent()}
+    assert recipients == {1001}, recipients
+    d = q.campaign_summary(cid)["deliveries"]
+    assert d.get("sent") == 1 and d.get("blocked") == 1, d
+    _clean_enforcement(reward_bot)
+    print("OK broadcast worker pauses in safe mode and never messages a banned member")
+
+
 def test_enforced_partner_is_never_offered_a_post():
     s = _fresh_bot(partnership_bot)
     _clean_enforcement(partnership_bot)
@@ -810,6 +832,7 @@ ALL_TESTS = [
     test_safe_mode_pauses_members_but_never_the_owner_panel,
     test_bot_reports_are_mirrored_into_the_compliance_store,
     test_enforced_partner_is_never_offered_a_post,
+    test_broadcast_worker_honours_safe_mode_and_blocked_recipients,
     test_admin_bot_safe_mode_toggle_is_owner_only,
 ]
 
