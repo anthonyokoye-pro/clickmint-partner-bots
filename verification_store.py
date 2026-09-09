@@ -86,7 +86,22 @@ class VerificationStore:
         self._conn.executescript(_SCHEMA)
         self._cache: dict[str, dict] = {}
         self._dirty: set[str] = set()
+        self._seen_version = self._data_version()
         self._migrate_from_legacy()
+
+    def _data_version(self) -> int:
+        # Changes whenever ANOTHER connection commits — cheap cross-process
+        # cache invalidation, so the reward bot sees a connection made by the
+        # partnership bot or the Web App onboarding server without a restart.
+        return int(self._conn.execute("PRAGMA data_version").fetchone()[0])
+
+    def _refresh_if_stale(self):
+        version = self._data_version()
+        if version != self._seen_version:
+            self._seen_version = version
+            for key in list(self._cache):
+                if key not in self._dirty:
+                    self._cache.pop(key, None)
 
     # ------------------------------------------------------------ migration
     def _migrate_from_legacy(self):
@@ -120,6 +135,7 @@ class VerificationStore:
     def get(self, key, default=None):
         if key not in _MANAGED:
             return self.legacy.get(key, default) if self.legacy is not None else default
+        self._refresh_if_stale()
         if key not in self._cache:
             self._cache[key] = self._read(key)
         return self._cache[key]
@@ -176,6 +192,7 @@ class VerificationStore:
         for key in list(self._dirty):
             self._write(key, self._cache.get(key) or {})
         self._dirty.clear()
+        self._seen_version = self._data_version()
         if self.legacy is not None:
             self.legacy.sync()
 

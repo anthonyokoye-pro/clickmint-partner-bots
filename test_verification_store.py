@@ -71,8 +71,10 @@ def test_credentials_are_shared_across_both_bot_processes():
         assert "another ClickMint account" in str(exc)
     assert partner.store.owner_of_bot(9001) == 1001
     reward.remove(1001)
-    partner.store.reload()
-    assert partner.public(1001) is None
+    # No explicit reload: the other connection must notice the commit by itself.
+    assert partner.public(1001) is None, "cross-process cache must self-invalidate"
+    reward.save(1001, "9001:tok", {"id": 9001, "username": "alicebot"})
+    assert partner.public(1001)["bot_id"] == 9001
     print("PASS the same bot cannot be owned by two accounts across the two bots")
 
 

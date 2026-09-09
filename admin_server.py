@@ -14,6 +14,11 @@ from broadcast_queue import BroadcastQueue
 from enforcement import EnforcementStore
 from ad_campaigns import AdCampaignStore
 from channel_registry import ChannelRegistry
+from verification_store import VerificationStore
+from telegram_verification import BotCredentialStore, TelegramVerificationService
+from destination_state import DestinationStateMachine
+from enforcement_gate import EnforcementGate
+from onboarding_api import OnboardingAPI
 from governance import RoleRegistry
 from mint_ledger import TransactionalMintLedger
 from performance_snapshots import PerformanceSnapshotRepository
@@ -33,7 +38,9 @@ class _LedgerFacade:
 def build_runtime_app(*, dev: bool = False):
     shared_store = JsonStore(config.REWARD_STORE_PATH)
     roles = RoleRegistry(shared_store, config.OWNER_USER_ID)
-    channels = ChannelRegistry(shared_store)
+    # Destinations + credentials live in the SQLite verification DB shared by both bots.
+    verification_store = VerificationStore(config.VERIFICATION_DB_PATH, legacy=shared_store)
+    channels = ChannelRegistry(verification_store)
     marketplace = TaskMarketplace(config.TASK_DB_PATH)
     snapshots = PerformanceSnapshotRepository(config.CREDIBILITY_DB_PATH)
     broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
@@ -52,6 +59,19 @@ def build_runtime_app(*, dev: bool = False):
         enforcement=enforcement,
         ads=ads,
     )
+    credentials = BotCredentialStore(verification_store)
+    onboarding = OnboardingAPI(
+        # Members open the onboarding page from the REWARD bot, so its token signs initData.
+        platform_bot_token=config.REWARD_BOT_TOKEN,
+        credentials=credentials,
+        verification=TelegramVerificationService(credentials),
+        channels=channels,
+        destination_states=DestinationStateMachine(channels),
+        enforcement_gate=EnforcementGate(enforcement, owner_user_id=config.OWNER_USER_ID),
+        audit=lambda actor, action, reason: ledger.tx.add_audit_event(
+            actor_type="member", actor_id=str(actor), action=action,
+            object_type="bot_credential", object_id=str(actor), reason=reason),
+    )
     app = build_admin_app(
         api,
         root=Path(__file__).parent,
@@ -59,6 +79,7 @@ def build_runtime_app(*, dev: bool = False):
         owner_id=str(config.OWNER_USER_ID),
         allowed_origins=config.ADMIN_ALLOWED_ORIGINS,
         idempotency_path=config.ADMIN_API_DB_PATH,
+        onboarding=onboarding,
     )
     if dev:
         # Explicit local-only mode: production retains the HTTPS allowlist.

@@ -16,8 +16,12 @@ from admin_api import AdminAuthorizationError
 class AdminWSGI:
     def __init__(self, api, *, allowed_origins: set[str] | None = None,
                  max_body_bytes: int = 32768, requests_per_minute: int = 60,
-                 idempotency_store=None):
+                 idempotency_store=None, onboarding=None):
         self.api = api
+        # Member-facing bot-token onboarding (onboarding_api.OnboardingAPI).
+        # Separate object: it authenticates ANY Telegram user about their own
+        # credential and must never share the admin authorisation path.
+        self.onboarding = onboarding
         self.allowed_origins = allowed_origins
         self.max_body_bytes = max(1024, int(max_body_bytes))
         self.requests_per_minute = max(1, int(requests_per_minute))
@@ -43,6 +47,40 @@ class AdminWSGI:
             excess = len(self._idempotency) - self.idempotency_max_entries
             for key, _ in sorted(self._idempotency.items(), key=lambda item: item[1][0])[:excess]:
                 self._idempotency.pop(key, None)
+
+    def _onboarding(self, environ, start_response, method, path, init_data, correlation_id):
+        """Member bot-token onboarding. Deliberately NOT routed through the admin
+        mutation helpers: the request body holds a secret, so nothing about it is
+        cached, audited or echoed. Errors are redacted before they leave."""
+        from onboarding_api import OnboardingError, redact
+        if self.onboarding is None:
+            return self._response(start_response, "404 Not Found", {"error": "not found"}, correlation_id)
+        try:
+            if method == "GET" and path == "/api/onboarding/status":
+                return self._response(start_response, "200 OK", self.onboarding.status(init_data), correlation_id)
+            if method == "POST" and path in ("/api/onboarding/connect", "/api/onboarding/disconnect"):
+                if environ.get("CONTENT_TYPE", "").split(";", 1)[0].lower() != "application/json":
+                    return self._response(start_response, "415 Unsupported Media Type", {"error": "application/json required"}, correlation_id)
+                body_length = int(environ.get("CONTENT_LENGTH") or 0)
+                if body_length > 4096:
+                    return self._response(start_response, "413 Request Entity Too Large", {"error": "request too large"}, correlation_id)
+                raw = environ.get("wsgi.input").read(body_length) if body_length else b"{}"
+                body = json.loads(raw.decode("utf-8") or "{}")
+                if not isinstance(body, dict):
+                    raise ValueError("JSON object required")
+                if path.endswith("/connect"):
+                    payload = self.onboarding.connect(init_data, str(body.get("token", "")))
+                else:
+                    payload = self.onboarding.disconnect(init_data)
+                return self._response(start_response, "200 OK", payload, correlation_id)
+            return self._response(start_response, "404 Not Found", {"error": "not found"}, correlation_id)
+        except PermissionError as exc:
+            self._security_audit("ONBOARDING_AUTH_REJECTED", redact(str(exc)), correlation_id)
+            return self._response(start_response, "403 Forbidden", {"error": redact(str(exc))}, correlation_id)
+        except (OnboardingError, ValueError, KeyError, TypeError) as exc:
+            return self._response(start_response, "400 Bad Request", {"error": redact(str(exc))}, correlation_id)
+        except Exception:
+            return self._response(start_response, "500 Internal Server Error", {"error": "internal error"}, correlation_id)
 
     def _cached_mutation(self, start_response, correlation_id: str, key: str):
         self._prune_idempotency()
@@ -134,6 +172,20 @@ class AdminWSGI:
         init_data = environ.get("HTTP_X_TELEGRAM_INIT_DATA", "")
         self._current_init_data = init_data
         correlation_id = environ.get("HTTP_X_CORRELATION_ID") or secrets.token_hex(8)
+        if method == "GET" and path.startswith("/onboarding_web/"):
+            relative = path[len("/onboarding_web/"):] or "index.html"
+            candidate = (Path(__file__).parent / "onboarding_web" / relative).resolve()
+            root = (Path(__file__).parent / "onboarding_web").resolve()
+            if candidate.is_file() and str(candidate).startswith(str(root)):
+                body = candidate.read_bytes()
+                start_response("200 OK", [("Content-Type", mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"),
+                                          ("Content-Length", str(len(body))),
+                                          ("Cache-Control", "no-store"),
+                                          ("Referrer-Policy", "no-referrer"),
+                                          ("X-Content-Type-Options", "nosniff")])
+                return [body]
+            start_response("404 Not Found", [("Content-Type", "application/json")])
+            return [b'{"error":"not found"}']
         if method == "GET" and path.startswith("/admin_web/"):
             relative = path[len("/admin_web/"):] or "index.html"
             candidate = (Path(__file__).parent / "admin_web" / relative).resolve()
@@ -151,6 +203,8 @@ class AdminWSGI:
             if not self._rate_allowed(environ):
                 self._security_audit("ADMIN_RATE_LIMITED", "request rate exceeded", correlation_id)
                 return self._response(start_response, "429 Too Many Requests", {"error": "rate limit exceeded"}, correlation_id)
+            if path.startswith("/api/onboarding/"):
+                return self._onboarding(environ, start_response, method, path, init_data, correlation_id)
             if method == "GET" and path == "/api/admin/dashboard":
                 query = parse_qs(environ.get("QUERY_STRING", ""))
                 task_limit = int(query.get("task_limit", [20])[0])

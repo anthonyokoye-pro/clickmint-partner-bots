@@ -55,6 +55,9 @@ ADS_DB_PATH = env("ADS_DB_PATH", os.path.join(STORE_DIR, "ads.sqlite3"))
 # prepared, but nothing queues or delivers until the owner flips this on.
 ADS_ENABLED = env("ADS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 ADMIN_ALLOWED_ORIGINS = [item.strip() for item in env("ADMIN_ALLOWED_ORIGINS", "").split(",") if item.strip()]
+# Public HTTPS URL of the member onboarding Mini App (served by admin_server at
+# /onboarding_web/). When unset the bots fall back to the in-chat /connectbot flow.
+ONBOARDING_WEBAPP_URL = env("ONBOARDING_WEBAPP_URL", "").strip()
 # A successful Telegram verification is cached briefly, then participation
 # requires another real Bot API verification.
 VERIFICATION_MAX_AGE_SECONDS = int(env("VERIFICATION_MAX_AGE_SECONDS", "86400") or 86400)

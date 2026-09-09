@@ -102,3 +102,9 @@ appeal decisions are delivered to the member via the outbox.
 **Finding:** Reward and Partnership each kept `managed_channels` and `telegram_bot_credentials` in their own JSON file. The "one bot per ClickMint account" rule was only enforced within one bot, and every destination update rewrote the whole JSON file with a merge-on-sync that races across processes.
 
 **Decision:** `verification_store.py` — one SQLite (WAL) database, `VERIFICATION_DB_PATH`, opened by both bots (and the admin bot read-side). `ChannelRegistry` and `BotCredentialStore` are unchanged; they now sit on the shared store. Legacy JSON rows are migrated once on first open and kept as `*_migrated`. The background re-verifier now queries `ix_dest_next` instead of loading every row. All other keys (ledger, audit, roles, sessions) stay in the per-bot JsonStore for now; they are the next migration candidate, not this one.
+
+## 2026-09-09 — Web App token onboarding
+
+**Finding:** `/connectbot <token>` transmits the member's bot secret through Telegram chat; message deletion is best-effort and the token is already in history on every device.
+
+**Decision:** Mini App onboarding (`onboarding_api.py`, `/onboarding_web/`). Identity is taken solely from server-validated `initData` signed by the reward bot; the token goes HTTPS → server → `getMe` → AES-GCM in the shared verification DB and is redacted from every error, audit and response. The in-chat command remains as fallback when no HTTPS URL is configured and warns the member to rotate. See `docs/ONBOARDING_WEBAPP.md`.

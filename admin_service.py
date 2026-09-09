@@ -9,7 +9,7 @@ from admin_idempotency import IdempotencyStore
 
 
 def build_admin_app(api, *, root: str | Path, bot_token: str, owner_id: str,
-                    allowed_origins: list[str], idempotency_path: str | Path):
+                    allowed_origins: list[str], idempotency_path: str | Path, onboarding=None):
     errors = admin_preflight(
         root, bot_token=bot_token, owner_id=owner_id,
         allowed_origins=allowed_origins,
@@ -18,4 +18,4 @@ def build_admin_app(api, *, root: str | Path, bot_token: str, owner_id: str,
         raise RuntimeError("Admin startup preflight failed: " + "; ".join(errors))
     replay_store = IdempotencyStore(idempotency_path)
     return AdminWSGI(api, allowed_origins=set(allowed_origins),
-                     idempotency_store=replay_store)
+                     idempotency_store=replay_store, onboarding=onboarding)

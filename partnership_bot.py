@@ -15,7 +15,7 @@ import time
 from html import escape
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 from core import (Contract, CreditLedger, DeliveryLog, ReportRegistry,
                   PerformanceEngine, POST_TYPES, is_forward, forward_source)
@@ -167,6 +167,18 @@ def _submitted_text(msg) -> str:
     return (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
 
 
+def _connect_prompt():
+    """Prefer the HTTPS Mini App for the token; fall back to in-chat only when
+    no onboarding URL is configured."""
+    if config.ONBOARDING_WEBAPP_URL:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="🔐 Connect bot securely", web_app=WebAppInfo(url=config.ONBOARDING_WEBAPP_URL))]])
+        return ("🔐 <b>Connect your bot</b>\n\nTap the button to paste your BotFather token on a secure "
+                "page. It travels over HTTPS only, is encrypted at rest, and never appears in this chat.",), \
+               {"parse_mode": "HTML", "reply_markup": kb}
+    return ("Usage: /connectbot <token from BotFather>\nYour token is encrypted and never shown back.",), {}
+
+
 @dp.message(Command("connectbot"))
 async def connect_bot_cmd(msg: types.Message):
     if getattr(msg.chat, "type", "private") != "private":
@@ -174,8 +186,15 @@ async def connect_bot_cmd(msg: types.Message):
         return
     parts = (msg.text or "").split(maxsplit=1)
     if len(parts) != 2:
-        await msg.answer("Usage: /connectbot <token from BotFather>")
+        args, kwargs = _connect_prompt()
+        await msg.answer(*args, **kwargs)
         return
+    if config.ONBOARDING_WEBAPP_URL:
+        # A token was pasted into chat although the secure page exists: still
+        # honour it (deleting the message below) but tell the member to rotate.
+        pasted_in_chat = True
+    else:
+        pasted_in_chat = False
     previous = bot_credentials.public(msg.from_user.id)
     try:
         try:
@@ -188,7 +207,9 @@ async def connect_bot_cmd(msg: types.Message):
         return
     if previous and int(previous.get("bot_id", -1)) != int(identity.get("bot_id", -2)):
         _disconnect_all(msg.from_user.id, "Connected bot changed; destination must be re-verified")
-    await msg.answer(f"✅ Connected @{identity.get('username') or 'your bot'}. Add it as an administrator, then register a destination.")
+    await msg.answer(f"✅ Connected @{identity.get('username') or 'your bot'}. Add it as an administrator, then register a destination."
+                     + ("\n\n⚠️ You pasted the token into chat. Next time use the 🔐 secure page (/connectbot with no "
+                        "arguments); consider /revoke in @BotFather and reconnecting." if pasted_in_chat else ""))
 
 
 @dp.message(Command("botstatus"))
