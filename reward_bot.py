@@ -1408,7 +1408,7 @@ async def _execute_task_payload(task: dict, chat_id, owner_id: int):
     if text:
         owned_bot = telegram_verification.make_bot(telegram_verification.credentials.token(int(owner_id)))
         try:
-            return await owned_bot.send_message(chat_id, text, parse_mode="HTML")
+            return await owned_bot.send_message(chat_id, text)
         finally:
             if owned_bot is not bot:
                 await owned_bot.session.close()
@@ -3021,7 +3021,7 @@ async def _process_reward_broadcasts():
                                               entities=_entities_from_payload(text, payload))
             else:
                 # Legacy drafts created before entities were captured.
-                sent = await bot.send_message(int(delivery["recipient_id"]), text, parse_mode="HTML")
+                sent = await bot.send_message(int(delivery["recipient_id"]), text)
             broadcasts.complete(delivery["delivery_id"], sent.message_id)
         except Exception as exc:
             blocked = any(token in str(exc).lower() for token in ("blocked", "chat not found", "deactivated"))

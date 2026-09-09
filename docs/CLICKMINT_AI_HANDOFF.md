@@ -1,9 +1,9 @@
 # CLICKMINT AI Handoff and Source-of-Truth Guide
 
-**Generated:** 2026-09-09  
-**Branch:** `arena/01a0713e-clickmint-partner-bots`  
-**Current checkout:** `c7e4b8e`  
-**Fetched remote implementation tip:** `d9fcb6d` — `Apply verification gate to scheduled delivery`
+**Generated/updated:** 2026-09-10
+**Branch:** `arena/01a0713e-clickmint-partner-bots`
+**Current checkout:** `c241627` plus the continuous implementation pass in the working tree
+**Previous implementation baseline:** `d9fcb6d` — `Apply verification gate to scheduled delivery`
 
 ## Purpose
 
@@ -36,17 +36,9 @@ Before changing code:
 - Do not implement deposits, withdrawals, Boost, advertising, advanced AI, or autonomous production engineering merely because they appear in the roadmap.
 - Ask only when a decision is genuinely ambiguous, high-impact, destructive, requires credentials, or requires an external account.
 
-## Repository synchronization warning
+## Repository synchronization status
 
-The local checkout is at `c7e4b8e`, while the fetched remote tip is `d9fcb6d`. The working tree contains a large set of modified and untracked implementation files. A comparison showed that sampled files in the working tree match the remote tip byte-for-byte, including:
-
-- `admin_api.py`
-- `admin_http.py`
-- `broadcast_queue.py`
-- `telegram_verification.py`
-- `docs/MASTER_SYSTEM_DOCUMENTATION.md`
-
-This means the source exists locally but is not represented by the current committed `HEAD` in the same way. Do not use a destructive reset to resolve this. First inspect `git diff`, `git status`, and the relevant remote files. Commit only intended files.
+The earlier checkout/remote mismatch was reconciled by rebasing onto `d9fcb6d` without discarding local work. The documentation commits and the continuous implementation pass are now on the fixed session branch. Always inspect `git status` and compare the remote before future destructive operations. The retained pre-existing-work stash was not dropped.
 
 ## Current architecture
 
@@ -110,6 +102,21 @@ Telegram users/admins
 | `mint_ledger.py` | Internal Mint/credit ledger foundation | Partial economic system |
 | `task_marketplace.py` | Task marketplace foundation | Partial/product design incomplete |
 | `economics.py`, `currency.py` | Economic rules/currency support | Foundation; not deposit/withdrawal system |
+
+## 2026-09-10 continuous implementation pass
+
+The approved Phase 0–6 pass completed the following safe reliability and UX work:
+
+- `audience.py` now provides an explicit audience-resolution boundary.
+- Admin Reward campaign queueing now resolves known Reward Bot recipients through `AudienceDirectory`; it no longer reads the empty Admin ledger compatibility facade.
+- Campaign draft deletion now creates an auditable tombstone with `deleted_at` and `deleted_by`; deleted records are not queueable.
+- Mini App campaign cards now expose state-appropriate Edit, Continue, Cancel, and Delete controls, with destructive confirmations.
+- Automated Reward and Partnership broadcast/task delivery no longer passes uncontrolled text through HTML parse mode. Entity-based rich editing remains a later step.
+- Admin bind host is configurable through `ADMIN_BIND_HOST` and defaults to `0.0.0.0` for container/live-preview compatibility.
+- Audience and Admin queue regression tests were added.
+- A dependency-aware run using `/tmp/cmvenv` installed `requirements.txt`; `run_all_tests.py` completed successfully.
+
+This pass did not claim complete implementation of every roadmap phase. Ad Campaign semantics, full Telegram entity editing, complete task-service extraction, complete Admin parity, and full verification scan UX remain partial and are explicitly not represented as complete.
 
 ## What is implemented now
 

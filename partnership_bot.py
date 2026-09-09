@@ -846,7 +846,7 @@ async def _process_partnership_broadcasts():
             if not text:
                 broadcasts.fail(delivery["delivery_id"], "campaign has no explicit text payload", blocked=True)
                 continue
-            sent = await bot.send_message(int(delivery["recipient_id"]), text, parse_mode="HTML")
+            sent = await bot.send_message(int(delivery["recipient_id"]), text)
             broadcasts.complete(delivery["delivery_id"], sent.message_id)
         except Exception as exc:
             blocked = any(token in str(exc).lower() for token in ("blocked", "chat not found", "deactivated"))

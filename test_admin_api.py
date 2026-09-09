@@ -12,6 +12,7 @@ from performance_snapshots import PerformanceSnapshotRepository
 from task_marketplace import TaskMarketplace
 from broadcast_queue import BroadcastQueue
 from store import JsonStore
+from audience import AudienceDirectory
 
 
 class Roles:
@@ -185,6 +186,26 @@ def test_ads_are_scoped_consent_gated_and_owner_reviewed():
         directory.cleanup()
 
 
+def test_reward_campaign_queues_only_resolved_audience():
+    directory = tempfile.TemporaryDirectory(prefix="clickmint-audience-api-")
+    try:
+        root = Path(directory.name)
+        store = JsonStore(str(root / "store.json"))
+        store["ledger"] = {"one": {"user_id": 101}, "duplicate": {"user_id": 101}, "two": {"user_id": 202}}
+        store.sync()
+        api = AdminReadAPI(bot_token="token", owner_id=8, roles=Roles(),
+                           channels=ChannelRegistry(store), marketplace=TaskMarketplace(root / "t.sqlite3"),
+                           snapshots=PerformanceSnapshotRepository(root / "c.sqlite3"),
+                           broadcasts=BroadcastQueue(root / "b.sqlite3"), audience=AudienceDirectory(store))
+        admin = signed("token", {"auth_date": str(int(time.time())), "user": json.dumps({"id": 9})})
+        campaign = api.create_reward_campaign(admin, "hello", title="Audience test")
+        result = api.queue_reward_campaign(admin, campaign["campaign_id"])
+        assert result["new_deliveries"] == 2
+        assert sorted(row["recipient_id"] for row in api.broadcasts.claim(bot_scope="reward")) == ["101", "202"]
+    finally:
+        directory.cleanup()
+
+
 if __name__ == "__main__":
     test_authenticated_dashboard_is_read_only()
     print("PASS test_authenticated_dashboard_is_read_only")
@@ -192,3 +213,5 @@ if __name__ == "__main__":
     print("PASS test_reports_appeals_and_owner_only_enforcement")
     test_ads_are_scoped_consent_gated_and_owner_reviewed()
     print("PASS test_ads_are_scoped_consent_gated_and_owner_reviewed")
+    test_reward_campaign_queues_only_resolved_audience()
+    print("PASS test_reward_campaign_queues_only_resolved_audience")

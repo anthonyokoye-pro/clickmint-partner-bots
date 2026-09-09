@@ -11,6 +11,30 @@
     if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
     return data;
   }
+  async function campaignAction(action, id, campaign) {
+    if (["cancel", "delete"].includes(action) && !confirm(`${action === "delete" ? "Delete" : "Cancel"} ${campaign.title || campaign.campaign_id}?`)) return;
+    let body = {reason: `Admin Mini App ${action}`};
+    if (action === "edit") {
+      const title = prompt("Campaign title", campaign.title || "");
+      if (title === null) return;
+      const text = prompt("Plain-text campaign content", campaign.payload && campaign.payload.text || "");
+      if (text === null) return;
+      body = {title: title.trim(), text: text.trim(), scheduled_at: campaign.scheduled_at || null};
+    }
+    try {
+      await api(`/api/admin/broadcasts/${encodeURIComponent(id)}/${action}`, {method:"POST", headers:{"Content-Type":"application/json", "X-Idempotency-Key":crypto.randomUUID()}, body:JSON.stringify(body)});
+      $("notice").textContent = `Campaign ${action} completed`;
+      await refresh();
+    } catch (error) { $("notice").textContent = error.message; }
+  }
+  function campaignButtons(campaign) {
+    const id = esc(campaign.campaign_id), status = campaign.status;
+    const button = (action, label) => `<button data-campaign-action="${action}" data-id="${id}">${label}</button>`;
+    if (status === "draft") return button("edit", "Edit") + button("queue", "Continue") + button("cancel", "Cancel") + button("delete", "Delete");
+    if (["queued", "running"].includes(status)) return button("pause", "Pause") + button("cancel", "Cancel");
+    if (status === "paused") return button("resume", "Continue") + button("cancel", "Cancel");
+    return "";
+  }
   function render(data) {
     const channels = data.channels || [], tasks = data.tasks || [], broadcasts = data.broadcasts || [];
     $("summary").innerHTML = `<div class="card"><strong>${channels.length}</strong><span>Destinations</span></div><div class="card"><strong>${tasks.length}</strong><span>Recommended tasks</span></div><div class="card"><strong>${broadcasts.length}</strong><span>Recent campaigns</span></div>`;
@@ -18,8 +42,8 @@
     const cats = [...new Set(tasks.map(t => t.category))];
     const selected = $("category").value; $("category").innerHTML = `<option value="">All categories</option>` + cats.map(c => `<option ${c===selected?"selected":""}>${esc(c)}</option>`).join("");
     $("tasks").innerHTML = tasks.length ? tasks.map(t => `<div class="item"><div><b>${esc(t.title)}</b><div class="muted">${esc(t.category)}</div></div><span class="pill">🪙 ${esc(t.reward_amount)} Mint</span></div>`).join("") : `<div class="muted">No eligible tasks.</div>`;
-    $("broadcasts").innerHTML = broadcasts.length ? broadcasts.map(b => { const d=b.deliveries||{}; return `<div class="item"><div><b>${esc(b.title || b.campaign_id)}</b><div class="muted">${esc(b.status)} · sent ${esc(d.sent||0)} · pending ${esc(d.pending||0)} · failed ${esc(d.failed||0)} · ${b.composed_in==="telegram"?`composed in Telegram, ${esc(b.entity_count||0)} formatting entit${b.entity_count===1?"y":"ies"}`:"plain text"}</div>${b.preview_html?`<div class="preview">${b.preview_html}</div>`:""}</div><span>${["queued","running"].includes(b.status)?`<button data-action="pause" data-id="${esc(b.campaign_id)}">Pause</button>`:b.status==="paused"?`<button data-action="resume" data-id="${esc(b.campaign_id)}">Resume</button>`:b.status==="draft"?`<button data-action="queue" data-id="${esc(b.campaign_id)}">Queue</button>`:""}</span></div>`}).join("") : `<div class="muted">No campaigns.</div>`;
-    document.querySelectorAll("[data-action]").forEach(button => button.onclick = async () => { try { await api(`/api/admin/broadcasts/${encodeURIComponent(button.dataset.id)}/${button.dataset.action}`, {method:"POST",headers:{"Content-Type":"application/json","X-Idempotency-Key":crypto.randomUUID()},body:JSON.stringify({reason:"Admin Mini App action"})}); refresh(); } catch (error) { $("notice").textContent = error.message; } });
+    $("broadcasts").innerHTML = broadcasts.length ? broadcasts.map(b => { const d=b.deliveries||{}; return `<div class="item"><div><b>${esc(b.title || b.campaign_id)}</b><div class="muted">${esc(b.status)} · sent ${esc(d.sent||0)} · pending ${esc(d.pending||0)} · failed ${esc(d.failed||0)} · ${b.composed_in==="telegram"?`composed in Telegram, ${esc(b.entity_count||0)} formatting entit${b.entity_count===1?"y":"ies"}`:"plain text"}</div>${b.preview_html?`<div class="preview">${b.preview_html}</div>`:""}</div><span class="actions">${campaignButtons(b)}</span></div>`}).join("") : `<div class="muted">No campaigns.</div>`;
+    document.querySelectorAll("[data-campaign-action]").forEach(button => button.onclick = () => { const campaign = broadcasts.find(item => item.campaign_id === button.dataset.id); if (campaign) campaignAction(button.dataset.campaignAction, button.dataset.id, campaign); });
   }
   async function loadSecondary(data) {
     try {

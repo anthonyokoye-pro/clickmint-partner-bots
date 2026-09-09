@@ -10,6 +10,7 @@ from admin_api import AdminReadAPI
 from admin_http import AdminWSGI
 from admin_idempotency import IdempotencyStore
 from admin_service import build_admin_app
+from audience import AudienceDirectory
 from broadcast_queue import BroadcastQueue
 from enforcement import EnforcementStore
 from ad_campaigns import AdCampaignStore
@@ -57,6 +58,7 @@ def build_runtime_app(*, dev: bool = False):
         snapshots=snapshots,
         broadcasts=broadcasts,
         ledger=ledger,
+        audience=AudienceDirectory(shared_store),
         enforcement=enforcement,
         ads=ads,
     )
@@ -90,7 +92,7 @@ def build_runtime_app(*, dev: bool = False):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the ClickMint Admin Mini App")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default=config.ADMIN_BIND_HOST)
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--dev", action="store_true",
                         help="allow local HTTP origins; never use in production")

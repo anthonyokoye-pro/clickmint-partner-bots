@@ -25,10 +25,11 @@ def test_draft_delete_prevents_queueing():
         queue = BroadcastQueue(Path(directory) / "broadcast.sqlite3")
         campaign_id = queue.create_campaign(bot_scope="partnership", created_by=1,
                                             title="Remove me", payload={"text": "x"})
-        assert queue.delete_draft(campaign_id)
+        assert queue.delete_draft(campaign_id, deleted_by=99)
+        assert queue.get_campaign(campaign_id)["status"] == "deleted"
         try:
             queue.queue_campaign(campaign_id, [1])
-        except KeyError:
+        except ValueError:
             pass
         else:
             raise AssertionError("deleted draft remained queueable")

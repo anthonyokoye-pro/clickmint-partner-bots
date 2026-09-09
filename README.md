@@ -33,10 +33,11 @@ Tiered network, strict 1:1 credits, accept/reject chain.
 - **+2 onboarding seed** on join.
 - **Owner (CLICKMINT) is exempt** — no funnel, no credits, no cap; can route anywhere.
 
-Commands: `/start @chan 1200` · `/register @chan 1200` · `/balance` · `/rank` · `/audit` ·
+Commands: `/start @chan` · `/register @chan` · `/balance` · `/rank` · `/audit` ·
 `/reports` · `/schedule` · `/appeal <why>` · `/report @target <why>` (or reply `/report <why>` inside a
 registered group) · `/ads` (advertising consent, see `docs/ADVERTISING.md`) · `/adminlogin <CODE>` ·
-or just **forward a post** to distribute.
+or just **forward a post** to distribute. Telegram member/subscriber counts are retrieved from
+Telegram after the user's own bot is verified; manual counts are not authoritative.
 (There is no `/agree` command — agreeing happens on the offer's buttons, so the credit
 goes to the channel that actually shares someone else's post.)
 

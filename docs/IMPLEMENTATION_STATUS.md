@@ -1,7 +1,7 @@
 # CLICKMINT Implementation Status
 
-**Status date:** 2026-09-09  
-**Branch:** `arena/01a0713e-clickmint-partner-bots`  
+**Status date:** 2026-09-10
+**Branch:** `arena/01a0713e-clickmint-partner-bots`
 **Purpose:** Evidence-based separation of implemented, partial, planned, rejected, and unknown work.
 
 This document is a status register, not a roadmap. A requirement is marked **implemented** only when there is corresponding source code in the current working tree and/or the referenced remote commit, and it is not merely described in a prompt or document.
@@ -26,6 +26,22 @@ The current checkout is based at `c7e4b8e`. The fetched remote tip is available 
 - `docs/MASTER_SYSTEM_DOCUMENTATION.md`
 
 The current checkout's committed history and its working tree therefore must not be treated as the same thing. No destructive reset was performed.
+
+## 2026-09-10 implementation pass
+
+Completed in the current continuous Phase 0–6 pass:
+
+- Added `audience.py` as an explicit Reward audience boundary.
+- Fixed Admin broadcast queueing so it resolves known Reward Bot user IDs instead of reading an empty compatibility ledger facade.
+- Added duplicate filtering and status-aware audience filtering.
+- Changed draft deletion to an auditable tombstone (`deleted_at`/`deleted_by`) while preserving the record and preventing queueing.
+- Added Admin Mini App campaign edit, continue, cancel, and delete controls with confirmations for destructive actions.
+- Removed raw HTML parse mode from automated Reward and Partnership broadcast/task delivery paths until entity-based editing is available.
+- Made Admin bind host configurable, defaulting to `0.0.0.0` for container/live-preview compatibility.
+- Added audience and Admin queue regression tests.
+- Installed repository dependencies in `/tmp/cmvenv` and completed the broad test runner successfully.
+
+Remaining items from the original Phase 0–6 roadmap are documented as partial where they require larger product work: full Telegram entity editor, complete Ad Campaign model, complete Admin capability parity, full Task service extraction, and comprehensive verification scan UX.
 
 ## Core systems
 

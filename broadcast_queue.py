@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS broadcast_campaigns (
     status TEXT NOT NULL CHECK (status IN ('draft','queued','running','paused','cancelled','completed')),
     scheduled_at INTEGER,
     created_at INTEGER NOT NULL,
-    title TEXT NOT NULL DEFAULT ''
+    title TEXT NOT NULL DEFAULT '',
+    deleted_at INTEGER,
+    deleted_by TEXT
 );
 CREATE TABLE IF NOT EXISTS broadcast_recipients (
     delivery_id TEXT PRIMARY KEY,
@@ -59,6 +61,10 @@ class BroadcastQueue:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(broadcast_campaigns)")}
             if "title" not in columns:
                 conn.execute("ALTER TABLE broadcast_campaigns ADD COLUMN title TEXT NOT NULL DEFAULT ''")
+            if "deleted_at" not in columns:
+                conn.execute("ALTER TABLE broadcast_campaigns ADD COLUMN deleted_at INTEGER")
+            if "deleted_by" not in columns:
+                conn.execute("ALTER TABLE broadcast_campaigns ADD COLUMN deleted_by TEXT")
 
     def _connect(self):
         conn = sqlite3.connect(self.path, timeout=30, isolation_level=None, factory=_ClosingConnection)
@@ -97,35 +103,36 @@ class BroadcastQueue:
             )
         return campaign_id
 
+    @staticmethod
+    def _campaign_row(row):
+        if not row:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(result["payload"] or "{}")
+        if result.get("deleted_at") is not None:
+            result["status"] = "deleted"
+        return result
+
     def recent_campaigns(self, *, bot_scope: str = "reward", limit: int = 20) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM broadcast_campaigns WHERE bot_scope=? ORDER BY created_at DESC LIMIT ?",
                 (bot_scope, max(1, int(limit))),
             ).fetchall()
-        results = []
-        for row in rows:
-            item = dict(row)
-            item["payload"] = json.loads(item["payload"] or "{}")
-            results.append(item)
-        return results
+        return [self._campaign_row(row) for row in rows]
 
     def get_campaign(self, campaign_id: str) -> dict | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM broadcast_campaigns WHERE campaign_id=?", (campaign_id,)).fetchone()
-        if not row:
-            return None
-        result = dict(row)
-        result["payload"] = json.loads(result["payload"] or "{}")
-        return result
+        return self._campaign_row(row)
 
     def queue_campaign(self, campaign_id: str, recipient_ids: list[int | str]) -> int:
         now = int(time.time())
         with self._tx() as conn:
-            campaign = conn.execute("SELECT status FROM broadcast_campaigns WHERE campaign_id=?", (campaign_id,)).fetchone()
+            campaign = conn.execute("SELECT status, deleted_at FROM broadcast_campaigns WHERE campaign_id=?", (campaign_id,)).fetchone()
             if not campaign:
                 raise KeyError(campaign_id)
-            if campaign["status"] not in {"draft", "paused"}:
+            if campaign["deleted_at"] is not None or campaign["status"] not in {"draft", "paused"}:
                 raise ValueError("campaign is not queueable")
             inserted = 0
             for recipient_id in dict.fromkeys(str(value) for value in recipient_ids):
@@ -206,22 +213,27 @@ class BroadcastQueue:
                 "SELECT status, COUNT(*) AS count FROM broadcast_recipients WHERE campaign_id=? GROUP BY status",
                 (campaign_id,),
             ).fetchall()
-        result = dict(campaign)
-        result["payload"] = json.loads(result["payload"] or "{}")
+        result = self._campaign_row(campaign)
         result["deliveries"] = {row["status"]: int(row["count"]) for row in counts}
         return result
 
     def update_draft(self, campaign_id: str, *, title: str, payload: dict, scheduled_at: int | None = None) -> bool:
         with self._tx() as conn:
             cur = conn.execute(
-                "UPDATE broadcast_campaigns SET title=?,payload=?,scheduled_at=? WHERE campaign_id=? AND status='draft'",
+                "UPDATE broadcast_campaigns SET title=?,payload=?,scheduled_at=? "
+                "WHERE campaign_id=? AND status='draft' AND deleted_at IS NULL",
                 (title.strip()[:160], json.dumps(payload), scheduled_at, campaign_id),
             )
             return cur.rowcount == 1
 
-    def delete_draft(self, campaign_id: str) -> bool:
+    def delete_draft(self, campaign_id: str, *, deleted_by=None) -> bool:
+        """Tombstone a draft so history and audit relationships remain queryable."""
         with self._tx() as conn:
-            cur = conn.execute("DELETE FROM broadcast_campaigns WHERE campaign_id=? AND status='draft'", (campaign_id,))
+            cur = conn.execute(
+                "UPDATE broadcast_campaigns SET deleted_at=?, deleted_by=? "
+                "WHERE campaign_id=? AND status='draft' AND deleted_at IS NULL",
+                (int(time.time()), str(deleted_by) if deleted_by is not None else None, campaign_id),
+            )
             return cur.rowcount == 1
 
     def pause(self, campaign_id: str) -> bool:

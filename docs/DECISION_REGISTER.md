@@ -1,6 +1,6 @@
 # CLICKMINT Decision Register
 
-**Status date:** 2026-09-09  
+**Status date:** 2026-09-09
 **Purpose:** Single record of decisions and constraints that must not be rediscovered or silently reversed.
 
 ## Decision states

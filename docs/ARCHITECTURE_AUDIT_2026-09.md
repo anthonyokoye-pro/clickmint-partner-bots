@@ -35,10 +35,10 @@ Optional observation: views_provider.py / future Telethon observer
 ## High-priority findings
 
 1. **Enforcement was fragmented.** Existing `ACTIVE/WATCH/RESTRICTED/REMOVED` channel fields were not a system-wide user/channel/group incident model. There was no durable report/evidence/timeline/safe-mode store.
-2. **Admin Mini App is incomplete for campaign lifecycle.** Broadcasts have create/queue/pause/resume/cancel but no title, edit, delete, or explicit draft lifecycle. Ad campaign parity and consent workflows are not implemented.
-3. **Runtime boundaries are duplicated.** Legacy JSON state and newer SQLite stores coexist. A migration boundary is documented but not yet authoritative; the Admin runtime currently uses a compatibility facade for the Mint ledger.
+2. **Admin Mini App remains incomplete for campaign lifecycle, although the first lifecycle pass is now present.** Reward campaigns have titles, backend draft edit/delete/queue methods, and frontend Edit/Continue/Cancel/Delete controls. Deletion is now an auditable tombstone. Ad campaign parity, retry/reschedule, rich Telegram entity editing, and consent workflows remain unimplemented.
+3. **Runtime boundaries are duplicated.** Legacy JSON state and newer SQLite stores coexist. The Admin runtime now uses an explicit `AudienceDirectory` during migration, but the Mint migration boundary is not yet authoritative and legacy writes remain enabled by default.
 4. **Cross-platform locking is incomplete.** `JsonStore` uses `fcntl` on POSIX and degrades to no lock on Windows. This is acceptable for a prototype but unsafe for concurrent Windows bot processes and must be replaced with a Windows-capable lock or a single writer.
-5. **Telegram layer remains dependency- and environment-sensitive.** Offline bot wiring cannot run where aiogram is not installed. Live Bot API permission tests remain external.
+5. **Telegram layer remains environment-sensitive, but the repository test environment is now reproducible locally.** A temporary environment with `requirements.txt` installed ran bot wiring and simulation successfully. Live Bot API permission tests remain external and deployment-dependent.
 6. **Scheduler and queue are separate mechanisms.** Future campaign claims are protected in SQLite, but the production worker/retry/rate-limit integration is not one unified service.
 
 ## Safety/compliance findings

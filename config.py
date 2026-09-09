@@ -60,6 +60,9 @@ ADMIN_ALLOWED_ORIGINS = [item.strip() for item in env("ADMIN_ALLOWED_ORIGINS", "
 # Public HTTPS URL of the member onboarding Mini App (served by admin_server at
 # /onboarding_web/). When unset the bots fall back to the in-chat /connectbot flow.
 ONBOARDING_WEBAPP_URL = env("ONBOARDING_WEBAPP_URL", "").strip()
+# Bind publicly for container/live-preview proxies; restrict exposure with the
+# reverse proxy and ADMIN_ALLOWED_ORIGINS in production.
+ADMIN_BIND_HOST = env("ADMIN_BIND_HOST", "0.0.0.0")
 # A successful Telegram verification is cached briefly, then participation
 # requires another real Bot API verification.
 VERIFICATION_MAX_AGE_SECONDS = int(env("VERIFICATION_MAX_AGE_SECONDS", "86400") or 86400)

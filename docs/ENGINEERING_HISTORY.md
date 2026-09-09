@@ -77,6 +77,16 @@ appeal decisions are delivered to the member via the outbox.
 
 **Decision:** Keep aiogram-dependent tests explicit and require `pip install -r requirements.txt` in Windows/CI before claiming full bot coverage. Never treat import-only checks as live Telegram validation.
 
+## 2026-09-10 — Continuous Phase 0–6 reliability pass
+
+**Findings addressed:** Admin campaign queueing depended on an empty compatibility ledger facade; draft deletion erased audit history; automated delivery passed uncontrolled content as HTML; the Admin server bind host was fixed to localhost; the Mini App exposed too few state-aware campaign actions; and the dependency-free environment could not run bot tests.
+
+**Changes:** Added `audience.py` and explicit `AudienceDirectory` injection; added audience and Admin queue tests; changed draft deletion to an auditable tombstone; added Mini App Edit/Continue/Cancel/Delete controls; removed uncontrolled HTML parse mode from automated delivery paths; added configurable `ADMIN_BIND_HOST` defaulting to `0.0.0.0`; updated README and handoff/status docs.
+
+**Validation:** Created `/tmp/cmvenv`, installed `requirements.txt`, and ran `run_all_tests.py` successfully. The suite passed core, governance, audience, bot wiring, offline simulation, enforcement, verification, broadcast, task, performance, credibility, economics, Mint, backup, integration, Admin, idempotency, and Web App authentication checks.
+
+**Remaining:** The full Telegram entity editor, distinct Ad Campaign domain, complete task-service extraction, full Admin capability parity, and real external Telegram permission/deployment tests remain future work.
+
 ## 2026-09-09 — Documentation reconciliation and source-of-truth handoff
 
 **Problem:** Requirements, research, decisions, implementation status, and future roadmap items were distributed across conversation history and partially overlapping Markdown files. A new session could not reliably distinguish implemented behavior from proposals.

@@ -22,7 +22,7 @@ def _safe_preview(payload: dict) -> str:
 class AdminReadAPI:
     """Application service independent of HTTP framework or Telegram web server."""
     def __init__(self, *, bot_token, owner_id, roles, channels, marketplace,
-                 snapshots, broadcasts, ledger=None, enforcement=None, ads=None):
+                 snapshots, broadcasts, ledger=None, audience=None, enforcement=None, ads=None):
         self.bot_token = bot_token
         self.owner_id = int(owner_id)
         self.roles = roles
@@ -31,6 +31,7 @@ class AdminReadAPI:
         self.snapshots = snapshots
         self.broadcasts = broadcasts
         self.ledger = ledger
+        self.audience = audience
         self.enforcement = enforcement
         self.ads = ads
 
@@ -160,9 +161,11 @@ class AdminReadAPI:
         campaign = self.broadcasts.get_campaign(campaign_id)
         if not campaign or campaign.get("bot_scope") != "reward":
             raise ValueError("campaign not found")
-        if self.ledger is None:
-            raise RuntimeError("ledger required for audience selection")
-        recipients = [member.get("user_id") for member in self.ledger.ledger.values() if member.get("user_id")]
+        if self.audience is None:
+            raise RuntimeError("audience directory required for audience selection")
+        recipients = self.audience.recipient_ids()
+        if not recipients:
+            raise ValueError("no eligible Reward Bot recipients were found")
         inserted = self.broadcasts.queue_campaign(campaign_id, recipients)
         self._audit(identity.user_id, "REWARD_BROADCAST_QUEUED", "broadcast_campaign", campaign_id, f"{inserted} recipients")
         return {"campaign_id": campaign_id, "status": "queued", "new_deliveries": inserted}
@@ -180,9 +183,9 @@ class AdminReadAPI:
 
     def delete_reward_draft(self, init_data: str, campaign_id: str) -> dict:
         identity = self.authenticate(init_data)
-        if not self.broadcasts.delete_draft(campaign_id):
+        if not self.broadcasts.delete_draft(campaign_id, deleted_by=identity.user_id):
             raise ValueError("only an existing draft can be deleted")
-        self._audit(identity.user_id, "REWARD_BROADCAST_DELETED", "broadcast_campaign", campaign_id, "Mini App draft deletion")
+        self._audit(identity.user_id, "REWARD_BROADCAST_DELETED", "broadcast_campaign", campaign_id, "Mini App draft tombstoned")
         return {"campaign_id": campaign_id, "status": "deleted"}
 
     def broadcast_action(self, init_data: str, campaign_id: str, action: str,
@@ -388,6 +391,8 @@ class AdminReadAPI:
                 "campaign_id": campaign["campaign_id"],
                 "title": campaign.get("title") or campaign.get("payload", {}).get("text", "")[:80],
                 "status": campaign["status"],
+                "scheduled_at": campaign.get("scheduled_at"),
+                "payload": campaign.get("payload", {}),
                 "composed_in": campaign.get("payload", {}).get("composed_in", "legacy"),
                 "entity_count": len(campaign.get("payload", {}).get("entities") or []),
                 "preview_html": _safe_preview(campaign.get("payload", {})),
