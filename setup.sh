@@ -116,6 +116,10 @@ if [ "${KEEP_ENV:-0}" != "1" ]; then
     err "That must be digits only (no @, no spaces, no minus sign)."
   done
 
+  # Generate the encryption key locally; it protects user-owned Telegram bot
+  # tokens and must never be sent to Telegram or committed to Git.
+  CREDENTIAL_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+
   # ------------------------------------------------------------- write .env
   {
     echo "# Written by setup.sh on $(date -u '+%Y-%m-%d %H:%M UTC')."
@@ -124,6 +128,7 @@ if [ "${KEEP_ENV:-0}" != "1" ]; then
     echo "PARTNER_BOT_TOKEN=$TOK_PARTNER"
     echo "ADMIN_BOT_TOKEN=$TOK_ADMIN"
     echo "OWNER_USER_ID=$OWNER_ID"
+    echo "CLICKMINT_CREDENTIAL_KEY=$CREDENTIAL_KEY"
   } > .env
   chmod 600 .env 2>/dev/null
   say ""

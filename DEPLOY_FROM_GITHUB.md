@@ -25,7 +25,7 @@ The three bots read tokens + owner id from **environment variables** (`config.py
 paste them into code. Locally, copy the template and fill it in:
 
 ```bash
-cp .env.example .env        # fill in the 3 tokens + OWNER_USER_ID
+cp .env.example .env        # fill in tokens, OWNER_USER_ID, and CLICKMINT_CREDENTIAL_KEY
 ```
 
 `.env` is git-ignored. `python-dotenv` (in `requirements.txt`) loads it automatically.
