@@ -103,7 +103,14 @@ def check_local() -> None:
     else:
         good("CLICKMINT_CREDENTIAL_KEY is configured")
 
-    print("\n\033[1m4. Storage\033[0m")
+    print("\n\033[1m4. Verification policy\033[0m")
+    if config.VERIFICATION_MAX_AGE_SECONDS <= 0:
+        bad("VERIFICATION_MAX_AGE_SECONDS must be positive",
+            "set it to a positive number of seconds, such as 86400")
+    else:
+        good(f"Verification freshness = {config.VERIFICATION_MAX_AGE_SECONDS} seconds")
+
+    print("\n\033[1m5. Storage\033[0m")
     store_dir = os.path.abspath(config.STORE_DIR)
     if not os.path.isdir(store_dir):
         bad(f"STORE_DIR does not exist: {store_dir}", f"mkdir -p {store_dir}")
@@ -119,7 +126,7 @@ def check_local() -> None:
 
 
 async def check_live() -> None:
-    print("\n\033[1m5. Telegram\033[0m")
+    print("\n\033[1m6. Telegram\033[0m")
     try:
         from aiogram import Bot
     except ImportError:
