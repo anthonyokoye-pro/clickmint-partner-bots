@@ -34,8 +34,23 @@ def test_draft_delete_prevents_queueing():
             raise AssertionError("deleted draft remained queueable")
 
 
+def test_release_returns_delivery_without_burning_an_attempt():
+    with tempfile.TemporaryDirectory() as directory:
+        queue = BroadcastQueue(Path(directory) / "broadcast.sqlite3")
+        campaign_id = queue.create_campaign(bot_scope="reward", created_by=1, payload={"text": "hi"})
+        queue.queue_campaign(campaign_id, [10])
+        claimed = queue.claim(limit=5)
+        assert len(claimed) == 1 and claimed[0]["attempts"] == 1
+        assert queue.release(claimed[0]["delivery_id"], retry_seconds=1)
+        assert queue.claim(limit=5) == []          # not due yet
+        import time; time.sleep(1.1)
+        again = queue.claim(limit=5)
+        assert len(again) == 1 and again[0]["attempts"] == 1, again
+
+
 if __name__ == "__main__":
     for test_case in (test_named_draft_edit_delete_and_queue_boundaries,
-                      test_draft_delete_prevents_queueing):
+                      test_draft_delete_prevents_queueing,
+                      test_release_returns_delivery_without_burning_an_attempt):
         test_case()
         print(f"PASS {test_case.__name__}")

@@ -1,37 +1,40 @@
 # CLICKMINT — Project Documents
 
-This folder holds the project's planning, audit, research and branding docs so the whole
-story lives in the repo (and travels with the code). Read these to understand *what* the
-system is and *why* it was built the way it was, before you touch any code.
+**Start with `STATUS.md`.** It is the one file kept current on every change: what is implemented,
+partial, pending or rejected, plus the live test counts. Everything else is a topic document.
 
-## Index
-| **`MASTER_SYSTEM_DOCUMENTATION.md`** | Complete source-based architecture, data model, workflows, commands, functions, diagrams, security, deployment, and known unknowns. | **Read first for technical orientation.** |
-| **`REWARD_SYSTEM.md`** | 🪙 MINT wallet rules, reward lifecycle, band matching, and the user-facing writing standard. | Read before changing the reward bot. |
-| File | What it contains | When to read it |
-|---|---|---|
-| **`MASTER_PLAN.md`** | The single source of truth: growth plan, bot design/directory library, full audit results, and the **handoff prompt** for the next session. | **Read first.** |
-| **`AUDIT_REPORT.md`** | The formal full-codebase audit. What passed, what bugs were found and fixed (incl. the test-runner blind spot), and known honest limitations. | Before changing code, to know the verified baseline. |
-| **`PARTNERSHIP_RESEARCH.md`** | The growth/partner research: quality-over-size filter, engagement benchmarks, channel types, the 2:1 offer, contract terms, paid-ads guidance. | When planning growth/outreach. |
-| **`BOT_BRANDING.md`** | Name, usernames (with availability fallbacks), About, and Description for all three bots, plus the bot images and Telegram field limits. | When creating the bots in @BotFather. |
-| **`GITHUB_PUSH.md`** | Step-by-step Git Bash walkthrough for pushing this repo, with errors and fixes. | When pushing/updating on GitHub. |
-| **`DEPLOY_FREE.md`** | How to run everything for $0: free hosting, SQLite vs Postgres, systemd services. | When deploying to a free server/Pi. |
+## Canonical (maintained)
+| File | Covers |
+|---|---|
+| **`STATUS.md`** | Implementation status matrix, decisions record, current test counts. **Read first.** |
+| `TELEGRAM_USER_BOT_VERIFICATION.md` | User-owned bot model, destination state machine, re-verification schedule, error classification, shared SQLite storage. |
+| `RELAY_ARCHITECTURE.md` | Which bot may forward which copy of a post; fail-closed routing. |
+| `ONBOARDING_WEBAPP.md` | Secure Mini App token onboarding. |
+| `COMPLIANCE_AND_ENFORCEMENT.md` | Entity states, reports, appeals, safe mode, Telegram boundaries. |
+| `ADVERTISING.md` | Consent-aware ads model (off by default). |
+| `ADMIN_API.md` / `ADMIN_DEPLOYMENT.md` | Admin Mini App API and HTTPS deployment. |
+| `ECONOMICS.md` | Economic modelling only — no payments implemented. |
+| `REWARD_SYSTEM.md` | 🪙 MINT rules and the user-facing copy standard. |
+| `ENGINEERING_HISTORY.md` | Dated decision records (append-only). |
+| `FINAL_AUDIT_2026-09-09.md` | Executed offline audit + live-Telegram checklist. |
 
-## The next-session short prompt (paste into a GitHub-connected agent)
-> Audit this repo (CLICKMINT, a zero-budget Telegram partner/reward network).
-> Read `docs/MASTER_PLAN.md` Parts 2 & 3 to understand the design and the current
-> audited state. Run `python3 -m py_compile *.py`, `python3 test_core.py` (expect 14/14),
-> `python3 test_governance.py` (expect 23/23), and confirm all three bots
-> (`reward_bot.py`, `partnership_bot.py`, `admin_bot.py`) import and register handlers.
-> Then find and fix remaining bugs / missing tests / robustness, respecting: no auto-ban,
-> no fake views, forward-only, quality-over-size, owner exemption, scoped-admin least
-> privilege, zero budget, free hosting, and the branding in `BOT_BRANDING.md`.
+## Strategy & reference (valid)
+| File | Covers |
+|---|---|
+| `MASTER_PLAN.md` Part 1 & 4 | Growth strategy (quality partners, 3-tier ladder) and handoff notes. |
+| `PARTNERSHIP_RESEARCH.md` | Partner research and benchmarks. |
+| `BOT_BRANDING.md` | Names, descriptions, images, Telegram field limits. |
+| `DEPLOY_WORKFLOW.md`, `GITHUB_PUSH.md`, `DEPLOY_FREE.md` | Operations. |
 
-## Quick top-level layout of the repo
-- `core.py` — engine (tiering, credits, performance, reports, contract, owner exemption)
-- `governance.py` — rules layer (post limit, submission gate, review queue, partner contracts, roles)
-- `reward_bot.py` / `partnership_bot.py` / `admin_bot.py` — the three Telegram bots
-- `config.py` — reads all secrets from environment variables (never hardcoded)
-- `store.py` — JSON persistence; `scheduler.py`; `ui.py`; `views_provider.py` (optional MTProto)
-- `test_core.py` (14) / `test_governance.py` (23) — offline test suites, run by CI on every push
-- `.github/workflows/` — `tests.yml` (run tests) and `deploy.yml` (optional auto-deploy)
-- `deploy.sh` + `clickmint*.service` — free-host deployment kit
+## Historical (superseded — do not treat as current)
+| File | Why kept |
+|---|---|
+| `MASTER_SYSTEM_DOCUMENTATION.md` | 2026-09-04 snapshot; original flow/formula explanations. |
+| `MASTER_PLAN.md` Parts 2–3, `AUDIT_REPORT.md`, `ARCHITECTURE_AUDIT_2026-09.md`, `DRY_RUN.md` | Earlier audits; findings are all resolved or tracked in `STATUS.md`. |
+
+## Running the suite
+```
+pip install -r requirements.txt
+python3 run_all_tests.py      # every suite; counts are recorded in STATUS.md
+python3 simulate.py           # scripted end-to-end dry run against a mocked Telegram
+```

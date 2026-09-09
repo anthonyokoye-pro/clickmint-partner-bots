@@ -4,7 +4,7 @@ Three bots (reward · partnership · owner admin panel) sharing one verified eng
 (`core.py` + `governance.py`). Zero budget, free hosting, JSON store.
 
 **Status:** `python3 test_core.py` 28/28 · `python3 test_governance.py` 33/33 ·
-`python3 test_bots.py` 26/26 (bot wiring) · `python3 simulate.py` clean dry run.
+`python3 test_bots.py` 37/37 (bot wiring) · `python3 simulate.py` clean dry run.
 See `docs/AUDIT_REPORT.md` and the readable transcript in `docs/DRY_RUN.md`.
 
 **New here / not comfortable with the terminal?** Read **[START_HERE.md](START_HERE.md)** —
@@ -34,7 +34,9 @@ Tiered network, strict 1:1 credits, accept/reject chain.
 - **Owner (CLICKMINT) is exempt** — no funnel, no credits, no cap; can route anywhere.
 
 Commands: `/start @chan 1200` · `/register @chan 1200` · `/balance` · `/rank` · `/audit` ·
-`/reports` · `/schedule` · `/adminlogin <CODE>` · or just **forward a post** to distribute.
+`/reports` · `/schedule` · `/appeal <why>` · `/report @target <why>` (or reply `/report <why>` inside a
+registered group) · `/ads` (advertising consent, see `docs/ADVERTISING.md`) · `/adminlogin <CODE>` ·
+or just **forward a post** to distribute.
 (There is no `/agree` command — agreeing happens on the offer's buttons, so the credit
 goes to the channel that actually shares someone else's post.)
 

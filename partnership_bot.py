@@ -15,19 +15,27 @@ import time
 from html import escape
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 from core import (Contract, CreditLedger, DeliveryLog, ReportRegistry,
                   PerformanceEngine, POST_TYPES, is_forward, forward_source)
 from broadcast_queue import BroadcastQueue
+from enforcement import EnforcementStore, EnforcementError
+from enforcement_gate import EnforcementGate
+from destination_state import (DestinationStateMachine, VState, IllegalTransition, classify_telegram_error,
+                               apply_verification_result, failed_result_from_reason)
 from channel_registry import ChannelRegistry
+from verification_store import VerificationStore
+from onboarding_api import redact
 from telegram_verification import BotCredentialStore, TelegramVerificationService, CredentialError
 from features import StatsBook
 from store import JsonStore
 from governance import (SubmissionGate, ReviewQueue, RoleRegistry, POST_CATEGORIES,
                         TERMS_TEXT, daily_post_cap)
 import config
+import relay
 import ui
+from platform_store import DeliveryAudit, SharedKV
 
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = config.PARTNER_BOT_TOKEN
@@ -37,11 +45,15 @@ store = JsonStore(config.PARTNER_STORE_PATH)
 ledger = CreditLedger(store)
 ledger.owner_user_id = config.OWNER_USER_ID      # owner recognised by numeric id too
 contract = Contract()
-audit = DeliveryLog(store)
+audit = DeliveryAudit(config.PLATFORM_DB_PATH, legacy=store)     # shared SQLite, JSON migrated once
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
-channels = ChannelRegistry(store)
-bot_credentials = BotCredentialStore(store)
+# Destinations + bot credentials live in the SQLite verification DB shared with
+# the other bot; every other key still goes to this bot's JsonStore.
+verification_store = VerificationStore(config.VERIFICATION_DB_PATH, legacy=store)
+channels = ChannelRegistry(verification_store)
+destination_states = DestinationStateMachine(channels)   # the ONLY writer of verified_state/status
+bot_credentials = BotCredentialStore(verification_store)
 telegram_verification = TelegramVerificationService(bot_credentials)
 broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
 stats = StatsBook(store)
@@ -52,29 +64,49 @@ def _is_connected(username: str) -> bool:
 perf.views_provider = stats.provider
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
-roles = RoleRegistry(store, owner_user_id=OWNER_USER_ID)
+platform_kv = SharedKV(config.PLATFORM_DB_PATH, legacy=store)
+roles = RoleRegistry(platform_kv, owner_user_id=OWNER_USER_ID)   # one role table for every bot
+enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
+enforcement_gate = EnforcementGate(enforcement, owner_user_id=config.OWNER_USER_ID)
+
+
+def _apply_verification(row: dict, result, *, source: str) -> tuple[bool, str]:
+    def _audit_change(r, previous, current, reason):
+        audit.record(bot="partnership", sender=str(r.get("owner_id")), target_channel=str(r.get("chat_id") or r.get("username")),
+                     mode="direct", status="failed" if current != "ACTIVE" else "delivered", forward_valid=True,
+                     error=f"{previous} -> {current}: {reason}"[:120])
+    return apply_verification_result(destination_states, row, result, source=source, on_change=_audit_change)
+
+
+def _disconnect_all(uid: int, reason: str):
+    for row in channels.mine(uid):
+        try:
+            destination_states.transition(uid, row.get("chat_id") or row.get("username"), VState.DISCONNECTED,
+                                          reason=reason, source="owner", verification_reasons=[reason])
+        except IllegalTransition:
+            pass
+
+
+def _enforcement_block(uid: int, capability: str, *destinations) -> str | None:
+    subjects = [(uid, "user")] + [(d, "channel") for d in destinations if d]
+    decision = enforcement_gate.check_many(subjects, capability, is_owner=roles.is_owner(uid))
+    return None if decision else enforcement_gate.block_message(decision)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
 async def _register_from_telegram(msg, destination: str, kind: str = "channel") -> str:
+    blocked = _enforcement_block(msg.from_user.id, "registration", destination)
+    if blocked:
+        return blocked
     owner = msg.from_user.id
     channels.add(owner, destination, destination, kind, ["General"], size=0, bot_added=False)
-    channels.update(owner, destination, status="VERIFYING")
+    destination_states.transition(owner, destination, VState.VERIFYING, reason="registration requested", source="register")
     result = await telegram_verification.verify(owner, destination)
-    if not result.eligible:
-        channels.update(owner, destination, status=result.state, bot_added=False,
-                        verified_state=result.state, verification_reasons=list(result.reasons),
-                                verification_checks=result.checks or {})
+    ok, _ = _apply_verification(channels.get(destination), result, source="register")
+    if not ok:
         return "❌ Verification failed: " + "; ".join(result.reasons) + "\nAdd your bot as administrator and try again."
     size = result.member_count or 0
-    channels.update(owner, destination, size=size, bot_added=True, status="ACTIVE",
-                    verified_state="VERIFIED", telegram_member_count=size,
-                    telegram_member_count_source="telegram_api",
-                    telegram_member_count_checked_at=result.checked_at,
-                    canonical_chat_id=result.chat_id,
-                    permissions=result.permissions or {}, verification_checks=result.checks or {},
-                    last_verified_at=result.checked_at)
     ledger.register(destination, size, is_partner=True); ledger.set_user_id(destination, owner)
     return f"✅ Verified {destination}; Telegram reports {size:,} members/subscribers."
 
@@ -139,6 +171,18 @@ def _submitted_text(msg) -> str:
     return (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
 
 
+def _connect_prompt():
+    """Prefer the HTTPS Mini App for the token; fall back to in-chat only when
+    no onboarding URL is configured."""
+    if config.ONBOARDING_WEBAPP_URL:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="🔐 Connect bot securely", web_app=WebAppInfo(url=config.ONBOARDING_WEBAPP_URL))]])
+        return ("🔐 <b>Connect your bot</b>\n\nTap the button to paste your BotFather token on a secure "
+                "page. It travels over HTTPS only, is encrypted at rest, and never appears in this chat.",), \
+               {"parse_mode": "HTML", "reply_markup": kb}
+    return ("Usage: /connectbot <token from BotFather>\nYour token is encrypted and never shown back.",), {}
+
+
 @dp.message(Command("connectbot"))
 async def connect_bot_cmd(msg: types.Message):
     if getattr(msg.chat, "type", "private") != "private":
@@ -146,8 +190,15 @@ async def connect_bot_cmd(msg: types.Message):
         return
     parts = (msg.text or "").split(maxsplit=1)
     if len(parts) != 2:
-        await msg.answer("Usage: /connectbot <token from BotFather>")
+        args, kwargs = _connect_prompt()
+        await msg.answer(*args, **kwargs)
         return
+    if config.ONBOARDING_WEBAPP_URL:
+        # A token was pasted into chat although the secure page exists: still
+        # honour it (deleting the message below) but tell the member to rotate.
+        pasted_in_chat = True
+    else:
+        pasted_in_chat = False
     previous = bot_credentials.public(msg.from_user.id)
     try:
         try:
@@ -156,14 +207,13 @@ async def connect_bot_cmd(msg: types.Message):
             logging.warning("could not delete bot-token message")
         identity = await telegram_verification.connect_bot(msg.from_user.id, parts[1].strip())
     except Exception as exc:
-        await msg.answer(f"❌ Bot connection failed: {str(exc)}")
+        await msg.answer(f"❌ Bot connection failed: {redact(str(exc))[:200]}")
         return
     if previous and int(previous.get("bot_id", -1)) != int(identity.get("bot_id", -2)):
-        for row in channels.mine(msg.from_user.id):
-            channels.update(msg.from_user.id, row.get("chat_id") or row.get("username"),
-                            bot_added=False, status="DISCONNECTED", verified_state="DISCONNECTED",
-                            verification_reasons=["Connected bot changed; destination must be re-verified"])
-    await msg.answer(f"✅ Connected @{identity.get('username') or 'your bot'}. Add it as an administrator, then register a destination.")
+        _disconnect_all(msg.from_user.id, "Connected bot changed; destination must be re-verified")
+    await msg.answer(f"✅ Connected @{identity.get('username') or 'your bot'}. Add it as an administrator, then register a destination."
+                     + ("\n\n⚠️ You pasted the token into chat. Next time use the 🔐 secure page (/connectbot with no "
+                        "arguments); consider /revoke in @BotFather and reconnecting." if pasted_in_chat else ""))
 
 
 @dp.message(Command("botstatus"))
@@ -207,10 +257,7 @@ async def bot_status_callback(cb: types.CallbackQuery):
 @dp.message(Command("disconnectbot"))
 async def disconnect_bot_cmd(msg: types.Message):
     bot_credentials.remove(msg.from_user.id)
-    for row in channels.mine(msg.from_user.id):
-        channels.update(msg.from_user.id, row.get("chat_id") or row.get("username"),
-                        bot_added=False, status="DISCONNECTED", verified_state="DISCONNECTED",
-                        verification_reasons=["Telegram bot credential removed"])
+    _disconnect_all(msg.from_user.id, "Telegram bot credential removed")
     await msg.answer("✅ Your Telegram bot credential and destination access were removed.")
 
 
@@ -235,15 +282,108 @@ async def start(msg: types.Message):
     await msg.answer(head, reply_markup=ui.main_menu(role))
 
 
+def _dest_label(row: dict) -> str:
+    icon = {"ACTIVE": "✅", "DEGRADED": "⚠️", "VERIFYING": "⏳", "REGISTERED": "🆕"}.get(row.get("status"), "⛔")
+    return f"{icon} {row.get('username') or row.get('chat_id')} · {row.get('kind')} · {row.get('status')}"
+
+
+def _platform_bot_id() -> int | None:
+    try:
+        return int(str(BOT_TOKEN).split(":", 1)[0])
+    except (ValueError, AttributeError):
+        return None
+
+
+def _mychannels_view(uid: int):
+    rows = channels.mine(uid)
+    if not rows:
+        return "📂 No registered channels/groups. Connect your bot with /connectbot, then use /start @name.", None
+    lines = ["📂 MY CHANNELS / GROUPS", ""]
+    kb = []
+    for i, row in enumerate(rows):
+        lines.append(f"• {_dest_label(row)} · tier {row.get('band')}")
+        if row.get("status") != "ACTIVE" and row.get("verification_reasons"):
+            lines.append(f"    ↳ {row['verification_reasons'][0][:90]}")
+        kb.append([InlineKeyboardButton(text=f"🔄 Re-verify {row.get('username') or row.get('chat_id')}"[:60],
+                                        callback_data=f"dest:verify:{i}"),
+                   InlineKeyboardButton(text="🗑", callback_data=f"dest:remove:{i}")])
+        kb.append([InlineKeyboardButton(text="⚡ Auto-post ON" if row.get("auto_post") else "⚡ Auto-post off",
+                                        callback_data=f"dest:auto:{i}")])
+    kb.append([InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")])
+    lines += ["", "Re-verify runs a live Telegram permission check with YOUR bot.",
+              "⚡ Auto-post lets partner forwards land here automatically (per destination, your call)."]
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+async def _send_mychannels(msg_or_cb, uid: int, *, edit: bool):
+    text, markup = _mychannels_view(uid)
+    try:
+        if edit:
+            await msg_or_cb.message.edit_text(text, reply_markup=markup)
+        else:
+            await msg_or_cb.answer(text, reply_markup=markup)
+    except Exception as exc:
+        if edit and "not modified" not in str(exc).lower():
+            await msg_or_cb.message.answer(text, reply_markup=markup)
+
+
 @dp.message(Command("mychannels"))
 async def mychannels_cmd(msg: types.Message):
-    rows = channels.mine(_uid(msg))
-    if not rows:
-        await msg.answer("📂 No registered channels/groups. Connect your bot with /connectbot, then use /start @name.")
-        return
-    await msg.answer("📂 MY CHANNELS / GROUPS\n\n" + "\n".join(
-        f"• {r.get('username')} · {r.get('kind')} · performance tier {r.get('band')} · "
-        f"{('✅ VERIFIED' if r.get('verified_state') == 'VERIFIED' else '⚠️ ' + str(r.get('verified_state', 'REGISTERED')))}" for r in rows))
+    await _send_mychannels(msg, _uid(msg), edit=False)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("dest:"))
+async def destination_control(cb: types.CallbackQuery):
+    """Per-destination inline controls, scoped to the caller's own rows."""
+    parts = cb.data.split(":")
+    uid = cb.from_user.id
+    rows = channels.mine(uid)
+    try:
+        action, row = parts[1], rows[int(parts[2])]
+    except (ValueError, IndexError):
+        await cb.answer("That list is out of date — reopening.", show_alert=True)
+        await _send_mychannels(cb, uid, edit=True); return
+    key = row.get("chat_id") or row.get("username")
+    if action == "auto":
+        if row.get("auto_post"):
+            channels.update(uid, key, auto_post=False)
+            await cb.answer("Auto-post off: partners' posts arrive as offers instead.")
+        else:
+            why = relay.auto_post_blocker(row, platform_bot_id=_platform_bot_id(), owner_rows=rows)
+            if why:
+                await cb.answer(f"Can't enable Auto-post: {why}"[:200], show_alert=True); return
+            channels.update(uid, key, auto_post=True)
+            await cb.answer("Auto-post on for this destination.")
+        await _send_mychannels(cb, uid, edit=True); return
+    if action == "remove":
+        try:
+            destination_states.transition(uid, key, VState.REMOVED, reason="owner removed via /mychannels", source="owner")
+        except IllegalTransition:
+            pass
+        channels.remove(uid, key)
+        await cb.answer(f"Removed {row.get('username') or key}.")
+        await _send_mychannels(cb, uid, edit=True); return
+    if action == "verify":
+        blocked = _enforcement_block(uid, "registration", key)
+        if blocked:
+            await cb.answer(blocked[:200], show_alert=True); return
+        try:
+            destination_states.transition(uid, key, VState.VERIFYING, reason="owner requested re-verify", source="scan")
+        except IllegalTransition as exc:
+            await cb.answer(str(exc)[:200], show_alert=True); return
+        try:
+            result = await telegram_verification.verify(uid, channels.telegram_reference(row))
+        except CredentialError:
+            result = failed_result_from_reason(row, "connect your bot with /connectbot")
+        except Exception as exc:
+            info = classify_telegram_error(exc)
+            if info.kind.value == "unknown":
+                logging.exception("re-verify of %s raised", key)
+            result = failed_result_from_reason(row, f"Telegram verification failed: {info.kind.value}")
+        ok, why = _apply_verification(channels.get(key), result, source="scan")
+        await cb.answer(("✅ Verified" if ok else "❌ " + why)[:200], show_alert=not ok)
+        await _send_mychannels(cb, uid, edit=True); return
+    await cb.answer("Unknown action.", show_alert=True)
 
 
 @dp.message(Command("verification"))
@@ -293,12 +433,8 @@ async def scan_cmd(msg: types.Message):
                 f"{icon('administrator')} Checking administrator status",
                 f"{icon('permissions')} Checking required permissions",
             ])
-            if not result.eligible:
-                channels.update(_uid(msg), row.get("chat_id") or row.get("username"),
-                                bot_added=False, status=result.state,
-                                verified_state=result.state,
-                                verification_reasons=list(result.reasons),
-                                verification_checks=result.checks or {})
+            ok, _ = _apply_verification(row, result, source="scan")
+            if not ok:
                 lines.append(f"❌ {row.get('username')}: {'; '.join(result.reasons)}")
                 continue
             lines.extend([
@@ -307,18 +443,12 @@ async def scan_cmd(msg: types.Message):
                 f"{icon('eligibility')} Checking eligibility",
             ])
             count = result.member_count or 0
-            channels.update(_uid(msg), row.get("chat_id") or row.get("username"),
-                            bot_added=True, status="ACTIVE", verified_state="VERIFIED",
-                            size=count, telegram_member_count=count,
-                            telegram_member_count_source="telegram_api",
-                            telegram_member_count_checked_at=result.checked_at,
-                            permissions=result.permissions or {}, last_verified_at=result.checked_at)
             lines.append(f"✅ {row.get('username')}: {count:,} members (Telegram API)")
         except CredentialError:
             lines.append("❌ Connect your own bot first with /connectbot.")
             break
         except Exception as exc:
-            lines.append(f"⚠️ {row.get('username')}: refresh failed ({type(exc).__name__})")
+            lines.append(f"⚠️ {row.get('username')}: refresh failed ({classify_telegram_error(exc).kind.value})")
     await msg.answer("\n".join(lines))
 
 
@@ -337,12 +467,8 @@ async def stats_all_callback(cb: types.CallbackQuery):
     for row in rows:
         try:
             result = await telegram_verification.verify(cb.from_user.id, channels.telegram_reference(row))
-            if not result.eligible:
-                channels.update(cb.from_user.id, row.get("chat_id") or row.get("username"),
-                                bot_added=False, status=result.state,
-                                verified_state=result.state,
-                                verification_reasons=list(result.reasons),
-                                verification_checks=result.checks or {})
+            ok, _ = _apply_verification(row, result, source="scan")
+            if not ok:
                 lines.append(f"❌ {row.get('username')}: {'; '.join(result.reasons)}")
                 continue
             if result.member_count is None:
@@ -526,6 +652,10 @@ async def on_partner_forward(msg: types.Message):
     username = _uname(msg)
     uid = _uid(msg)
     ledger.set_user_id(username, uid)   # remember id to DM later
+    blocked = _enforcement_block(uid, "partnerships", username)
+    if blocked:
+        await msg.answer(blocked)
+        return
     sess = _session(uid)
     if not sess.get("accepted_terms"):
         await msg.answer("Accept the posting terms first (/start → Submit a post).")
@@ -568,6 +698,9 @@ async def on_partner_forward(msg: types.Message):
         if other == username or not om.get("is_partner"):
             continue
         if om.get("status") in ("RESTRICTED", "REMOVED"):
+            continue
+        # Enforced partners are never offered anything (shared gate).
+        if not enforcement_gate.check(other, "channel", "partnerships"):
             continue
         # Partnership offers cannot target an unverified destination.
         if not _is_connected(other):
@@ -621,6 +754,11 @@ async def chain_choice(cb: types.CallbackQuery):
         item = reports.report(sender=sender, reporter=target,
                               reported_post={"target_channel": target},
                               reason="partner flagged the post")
+        try:
+            enforcement.report(cb.from_user.id, sender, "channel", "partner flagged the post",
+                               subject=f"legacy_report:{item['id']}")
+        except EnforcementError as exc:
+            logging.warning("compliance report mirror failed: %s", exc)
         audit.record(bot="partnership", sender=sender, target_channel=target,
                      mode="chain", status="skipped", forward_valid=True)
         await cb.message.answer(f"🚩 Report #{item['id']} filed against {sender}. "
@@ -694,8 +832,14 @@ async def _notify_review_sender(item: dict):
 
 async def _process_partnership_broadcasts():
     """Deliver only Partnership-scope campaigns through the shared queue."""
+    if enforcement_gate.safe_mode():
+        # Safe mode pauses the machine: leave deliveries pending, claim nothing.
+        return
     for delivery in broadcasts.claim(limit=20, bot_scope="partnership"):
         try:
+            if not enforcement_gate.check(delivery["recipient_id"], "user", "campaigns"):
+                broadcasts.fail(delivery["delivery_id"], "recipient blocked by enforcement", blocked=True)
+                continue
             campaign = broadcasts.get_campaign(delivery["campaign_id"])
             payload = campaign.get("payload", {}) if campaign else {}
             text = payload.get("text")
@@ -710,10 +854,56 @@ async def _process_partnership_broadcasts():
                             retry_seconds=min(3600, 30 * (2 ** min(delivery.get("attempts", 1), 6))))
 
 
+_REVERIFY_BATCH = int(config.env("REVERIFY_BATCH", "5") or 5)
+
+
+async def _background_reverify(*, now: int | None = None) -> list[str]:
+    """State-aware scheduled re-verification (mirrors reward_bot). Bounded batch,
+    paused in safe mode, owner notified only on a real status change."""
+    if enforcement_gate.safe_mode():
+        return []
+    # Index-served candidate set (ix_dest_next), then the state machine's own
+    # schedule rule as the authority — two views that must agree.
+    candidates = verification_store.destinations_due(now=now, limit=_REVERIFY_BATCH * 4)
+    due = destination_states.due_for_recheck(candidates, now=now)
+    notes = []
+    for row in due[:_REVERIFY_BATCH]:
+        key = row.get("chat_id") or row.get("username")
+        before = row.get("status")
+        try:
+            result = await telegram_verification.verify(int(row["owner_id"]), channels.telegram_reference(row))
+        except CredentialError:
+            result = failed_result_from_reason(row, "connect your bot with /connectbot")
+        except Exception as exc:
+            info = classify_telegram_error(exc)
+            if info.kind.value == "unknown":
+                logging.exception("background re-verify of %s raised", key)
+            result = failed_result_from_reason(row, f"Telegram verification failed: {info.kind.value}")
+        if result is None:
+            continue
+        _apply_verification(row, result, source="background")
+        after = (channels.get(key) or {}).get("status", before)
+        try:
+            channels.update(int(row["owner_id"]), key, last_recheck_at=int(now if now is not None else time.time()))
+        except (KeyError, ValueError):
+            pass
+        if before != after:
+            note = f"{row.get('username') or key}: {before} → {after}"
+            notes.append(note)
+            try:
+                await bot.send_message(int(row["owner_id"]), f"🔎 Destination access changed\n• {note}"
+                                       + ("" if after == "ACTIVE" else
+                                          "\n\nTap /mychannels → Re-verify after fixing the bot's admin rights."))
+            except Exception as exc:
+                logging.warning("reverify notice to %s failed: %s", row.get("owner_id"), classify_telegram_error(exc).kind.value)
+    return notes
+
+
 async def notify_loop():
     """Hand out partner-scope review outcomes to their senders."""
     while True:
         try:
+            await _background_reverify()
             await _process_partnership_broadcasts()
             for item in review.pending_notify("partnership"):
                 if await _notify_review_sender(item):

@@ -48,7 +48,18 @@ CREDIBILITY_DB_PATH = env("CREDIBILITY_DB_PATH", os.path.join(STORE_DIR, "credib
 BROADCAST_DB_PATH = env("BROADCAST_DB_PATH", os.path.join(STORE_DIR, "broadcast.sqlite3"))
 ADMIN_API_DB_PATH = env("ADMIN_API_DB_PATH", os.path.join(STORE_DIR, "admin_api.sqlite3"))
 ENFORCEMENT_DB_PATH = env("ENFORCEMENT_DB_PATH", os.path.join(STORE_DIR, "enforcement.sqlite3"))
+# Shared by Reward AND Partnership: one bot per ClickMint account, one destination truth.
+VERIFICATION_DB_PATH = env("VERIFICATION_DB_PATH", os.path.join(STORE_DIR, "verification.sqlite3"))
+# Shared by all bots + admin server: delivery audit log and role registry (decision 2026-09-09 #2).
+PLATFORM_DB_PATH = env("PLATFORM_DB_PATH", os.path.join(STORE_DIR, "platform.sqlite3"))
+ADS_DB_PATH = env("ADS_DB_PATH", os.path.join(STORE_DIR, "ads.sqlite3"))
+# Advertising kill switch. OFF by default: consents/terms/drafts/review can be
+# prepared, but nothing queues or delivers until the owner flips this on.
+ADS_ENABLED = env("ADS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 ADMIN_ALLOWED_ORIGINS = [item.strip() for item in env("ADMIN_ALLOWED_ORIGINS", "").split(",") if item.strip()]
+# Public HTTPS URL of the member onboarding Mini App (served by admin_server at
+# /onboarding_web/). When unset the bots fall back to the in-chat /connectbot flow.
+ONBOARDING_WEBAPP_URL = env("ONBOARDING_WEBAPP_URL", "").strip()
 # A successful Telegram verification is cached briefly, then participation
 # requires another real Bot API verification.
 VERIFICATION_MAX_AGE_SECONDS = int(env("VERIFICATION_MAX_AGE_SECONDS", "86400") or 86400)

@@ -401,7 +401,7 @@ class PartnerContractRegistry:
 # ---------------------------------------------------------------------------
 # 5) ROLE REGISTRY — owner / scoped-admin / user, invite-code login
 # ---------------------------------------------------------------------------
-SCOPES = ["reward", "partnership"]      # admin can control one or both
+SCOPES = ["reward", "partnership", "ads"]  # network scopes + the separate Ads Manager scope
 
 
 class RoleRegistry:

@@ -60,8 +60,9 @@ class ChannelRegistry:
             raise KeyError("channel not found or not owned by this user")
         allowed = {"username", "categories", "size", "bot_added", "status", "band",
                    "verified_state", "telegram_member_count", "telegram_member_count_source",
-                   "telegram_member_count_checked_at", "telegram_chat_type", "telegram_bot_id", "canonical_chat_id",
-                   "permissions", "verification_checks", "verification_reasons", "last_verified_at"}
+                   "telegram_member_count_checked_at", "telegram_chat_type", "telegram_bot_id", "canonical_chat_id", "auto_post",
+                   "permissions", "verification_checks", "verification_reasons", "last_verified_at",
+                   "state_history", "last_transition_at", "last_error_kind", "last_recheck_at"}
         unknown = set(changes) - allowed
         if unknown:
             raise ValueError(f"unsupported fields: {sorted(unknown)}")
@@ -87,6 +88,15 @@ class ChannelRegistry:
 
     def get(self, chat_id) -> dict | None:
         return self._items().get(str(chat_id))
+
+    def find_by_telegram_chat(self, telegram_chat_id) -> dict | None:
+        """Resolve a live Telegram chat id (e.g. from a group message) to its
+        registered row, matching on canonical id, chat_id or username."""
+        wanted = str(telegram_chat_id)
+        for row in self._items().values():
+            if wanted in {str(row.get("canonical_chat_id")), str(row.get("chat_id")), str(row.get("username"))}:
+                return row
+        return None
 
     @staticmethod
     def telegram_reference(row: dict):

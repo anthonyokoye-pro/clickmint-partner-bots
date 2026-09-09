@@ -33,28 +33,38 @@ from html import escape
 from aiogram import Bot, Dispatcher, types
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 from core import (CreditLedger, TransactionalCreditLedger, DeliveryLog, ReportRegistry,
                   PerformanceEngine, is_forward, forward_source, allows_receive)
 from channel_registry import ChannelRegistry
+from verification_store import VerificationStore
+from onboarding_api import redact
 from features import (ReferralLedger, AvailablePostQueue, BubbleNotifier,
                       AnnouncementBoard, RankVisibility, StatsBook, ReroutePlanner,
                       category_counts)
 from task_marketplace import TaskMarketplace, TaskUnavailable, TaskNotFound
 from channel_connection import TelegramPermissionSnapshot, verify_permissions
 from telegram_verification import BotCredentialStore, TelegramVerificationService, CredentialError
+import relay
 from credibility import tier_for_score
 from performance_snapshots import PerformanceSnapshotRepository
 from referral_ranking import ReferralRecord, rank_referrers, allocate_monthly_rewards
 from broadcast_queue import BroadcastQueue
+from enforcement import EnforcementStore, EnforcementError
+from enforcement_gate import EnforcementGate
+from ad_campaigns import AdCampaignStore, AdPolicyError
+from destination_state import (DestinationStateMachine, VState, IllegalTransition, classify_telegram_error,
+                               apply_verification_result, failed_result_from_reason)
 from currency import MINT_ICON, MINT_NAME, amount, amount_short, balance_line
 from store import JsonStore
 from scheduler import Scheduler
 from governance import (SubmissionGate, ReviewQueue, PartnerContractRegistry,
                         RoleRegistry, POST_CATEGORIES, TERMS_TEXT, daily_post_cap)
 import config
+import tg_entities
 import ui
+from platform_store import DeliveryAudit, SharedKV
 
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = config.REWARD_BOT_TOKEN          # from @BotFather, via env var
@@ -68,12 +78,16 @@ if config.MINT_LEDGER_MODE == "transactional":
 else:
     ledger = CreditLedger(store)
 ledger.owner_user_id = config.OWNER_USER_ID      # owner recognised by numeric id too
-audit = DeliveryLog(store)
+audit = DeliveryAudit(config.PLATFORM_DB_PATH, legacy=store)     # shared SQLite, JSON migrated once
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 sched = Scheduler(store)
-channels = ChannelRegistry(store)
-bot_credentials = BotCredentialStore(store)
+# Destinations + bot credentials live in the SQLite verification DB shared with
+# the other bot; every other key still goes to this bot's JsonStore.
+verification_store = VerificationStore(config.VERIFICATION_DB_PATH, legacy=store)
+channels = ChannelRegistry(verification_store)
+destination_states = DestinationStateMachine(channels)   # the ONLY writer of verified_state/status
+bot_credentials = BotCredentialStore(verification_store)
 telegram_verification = TelegramVerificationService(bot_credentials)
 referrals = ReferralLedger(store, ledger)
 available = AvailablePostQueue(store)
@@ -87,6 +101,12 @@ reroutes = ReroutePlanner(store)
 marketplace = TaskMarketplace(config.TASK_DB_PATH)
 credibility_snapshots = PerformanceSnapshotRepository(config.CREDIBILITY_DB_PATH)
 broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
+# Shared compliance boundary: every participation path asks this ONE gate.
+# It only reads states a human recorded; it never decides guilt.
+enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
+enforcement_gate = EnforcementGate(enforcement, owner_user_id=config.OWNER_USER_ID)
+# Advertising is a separate, consent-gated model. Disabled by default.
+ads = AdCampaignStore(config.ADS_DB_PATH, enabled=config.ADS_ENABLED)
 # PerformanceEngine consumes real observations when available; absent fields stay absent.
 perf.views_provider = stats.provider
 
@@ -102,19 +122,33 @@ def _is_connected(username: str) -> bool:
     return channels.participation_allowed(username)
 
 
+def _enforcement_block(uid: int, capability: str, *destinations) -> str | None:
+    """Return a user-facing block message, or None when the actor may proceed.
+
+    Checks the acting user AND every destination they act through, so a
+    restricted channel cannot be used by an unrestricted owner (or vice versa).
+    """
+    subjects = [(uid, "user")] + [(d, "channel") for d in destinations if d]
+    decision = enforcement_gate.check_many(subjects, capability, is_owner=roles.is_owner(uid))
+    if decision:
+        return None
+    return enforcement_gate.block_message(decision)
+
+
 def _audit_counts() -> dict[str, int]:
     return {
         "Review Queue": len(review.pending()),
         "Pending Posts": available.count(),
         "Scheduled Posts": sched.pending_count(),
-        "Direct Delivery": sum(1 for m in ledger.ledger.values() if m.get("direct_mode")),
+        "Auto-post destinations": sum(1 for r in channels._items().values() if r.get("auto_post")),
     }
 
 
 gate = SubmissionGate(store)
 review = ReviewQueue(store)
 contracts = PartnerContractRegistry(store)
-roles = RoleRegistry(store, owner_user_id=OWNER_USER_ID)
+platform_kv = SharedKV(config.PLATFORM_DB_PATH, legacy=store)
+roles = RoleRegistry(platform_kv, owner_user_id=OWNER_USER_ID)   # one role table for every bot
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -219,26 +253,21 @@ def _parse_registration(text: str):
 async def _register_from_telegram(msg, destination: str, kind: str = "channel") -> str:
     """Resolve, verify, and register a destination with the user's own bot."""
     owner = msg.from_user.id
+    blocked = _enforcement_block(owner, "registration", destination)
+    if blocked:
+        return blocked
     channels.add(owner, destination, destination, kind, ["General"], size=0, bot_added=False)
     row = channels.get(destination)
-    channels.update(owner, destination, status="VERIFYING")
+    destination_states.transition(owner, destination, VState.VERIFYING, reason="registration requested", source="register")
     result = await telegram_verification.verify(owner, destination)
-    if not result.eligible:
-        channels.update(owner, destination, status=result.state, bot_added=False)
+    ok, _ = _apply_verification(channels.get(destination), result, source="register")
+    if not ok:
         return (f"❌ <b>Verification failed for {escape(destination)}</b>\n\n" +
                 "\n".join(f"• {escape(reason)}" for reason in result.reasons) +
                 "\n\nAdd your bot as an administrator with posting permission, then use /scan.")
     size = result.member_count or 0
     m = ledger.register(destination, size)
-    channels.update(owner, destination, size=size, bot_added=True, status="ACTIVE",
-                    verified_state="VERIFIED", telegram_member_count=size,
-                    telegram_member_count_source="telegram_api",
-                    telegram_member_count_checked_at=result.checked_at,
-                    telegram_chat_type=result.chat_type,
-                    canonical_chat_id=result.chat_id,
-                    telegram_bot_id=bot_credentials.public(owner)["bot_id"],
-                    permissions=result.permissions or {}, verification_checks=result.checks or {},
-                    last_verified_at=result.checked_at)
+    channels.update(owner, destination, telegram_bot_id=bot_credentials.public(owner)["bot_id"])
     ledger.set_user_id(destination, owner)
     cap = daily_post_cap(size, perf.score(destination)["band"], m.get("status", "ACTIVE"),
                          m.get("is_owner", False), connected=True)
@@ -252,6 +281,18 @@ async def _register_from_telegram(msg, destination: str, kind: str = "channel") 
 # ---------------------------------------------------------------------------
 # User-owned bot connection and destination registration
 # ---------------------------------------------------------------------------
+def _connect_prompt():
+    """Prefer the HTTPS Mini App for the token; fall back to in-chat only when
+    no onboarding URL is configured."""
+    if config.ONBOARDING_WEBAPP_URL:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="🔐 Connect bot securely", web_app=WebAppInfo(url=config.ONBOARDING_WEBAPP_URL))]])
+        return ("🔐 <b>Connect your bot</b>\n\nTap the button to paste your BotFather token on a secure "
+                "page. It travels over HTTPS only, is encrypted at rest, and never appears in this chat.",), \
+               {"parse_mode": "HTML", "reply_markup": kb}
+    return ("Usage: /connectbot <token from BotFather>\nYour token is encrypted and never shown back.",), {}
+
+
 @dp.message(Command("connectbot"))
 async def connect_bot_cmd(msg: types.Message):
     if getattr(msg.chat, "type", "private") != "private":
@@ -259,8 +300,15 @@ async def connect_bot_cmd(msg: types.Message):
         return
     parts = (msg.text or "").split(maxsplit=1)
     if len(parts) != 2:
-        await msg.answer("Usage: /connectbot <token from BotFather>\nYour token is encrypted and never shown back.")
+        args, kwargs = _connect_prompt()
+        await msg.answer(*args, **kwargs)
         return
+    if config.ONBOARDING_WEBAPP_URL:
+        # A token was pasted into chat although the secure page exists: still
+        # honour it (deleting the message below) but tell the member to rotate.
+        pasted_in_chat = True
+    else:
+        pasted_in_chat = False
     previous = bot_credentials.public(msg.from_user.id)
     try:
         # Remove the token message immediately where Telegram permits it; tokens
@@ -271,15 +319,21 @@ async def connect_bot_cmd(msg: types.Message):
             logging.warning("could not delete bot-token message")
         identity = await telegram_verification.connect_bot(msg.from_user.id, parts[1].strip())
     except Exception as exc:
-        await msg.answer(f"❌ Bot connection failed: {escape(str(exc))}")
+        await msg.answer(f"❌ Bot connection failed: {escape(redact(str(exc))[:200])}")
         return
     if previous and int(previous.get("bot_id", -1)) != int(identity.get("bot_id", -2)):
         for row in channels.mine(msg.from_user.id):
-            channels.update(msg.from_user.id, row.get("chat_id") or row.get("username"),
-                            bot_added=False, status="DISCONNECTED", verified_state="DISCONNECTED",
-                            verification_reasons=["Connected bot changed; destination must be re-verified"])
+            try:
+                destination_states.transition(msg.from_user.id, row.get("chat_id") or row.get("username"),
+                                              VState.DISCONNECTED, reason="connected bot changed; re-verify",
+                                              source="owner",
+                                              verification_reasons=["Connected bot changed; destination must be re-verified"])
+            except IllegalTransition:
+                pass
     await msg.answer(f"✅ Connected @{escape(str(identity.get('username') or 'your bot'))}.\n"
-                     "Now add it as an administrator with posting permission, then use /register @destination.")
+                     "Now add it as an administrator with posting permission, then use /register @destination."
+                     + ("\n\n⚠️ You pasted the token into chat. Next time use the 🔐 secure page (/connectbot with no "
+                        "arguments); consider /revoke in @BotFather and reconnecting." if pasted_in_chat else ""))
 
 
 @dp.message(Command("botstatus"))
@@ -323,7 +377,16 @@ async def bot_status_callback(cb: types.CallbackQuery):
 @dp.message(Command("disconnectbot"))
 async def disconnect_bot_cmd(msg: types.Message):
     bot_credentials.remove(msg.from_user.id)
-    await msg.answer("✅ Your Telegram bot credential was removed from ClickMint.")
+    # Without a credential nothing can be verified or posted: every destination
+    # owned by this user drops to DISCONNECTED (previously they stayed VERIFIED).
+    for row in channels.mine(msg.from_user.id):
+        try:
+            destination_states.transition(msg.from_user.id, row.get("chat_id") or row.get("username"),
+                                          VState.DISCONNECTED, reason="Telegram bot credential removed",
+                                          source="owner", verification_reasons=["Telegram bot credential removed"])
+        except IllegalTransition:
+            pass
+    await msg.answer("✅ Your Telegram bot credential and destination access were removed from ClickMint.")
 
 
 # ---------------------------------------------------------------------------
@@ -386,9 +449,14 @@ async def remove_channel_cmd(msg: types.Message):
     target = parts[1] if parts[1].startswith("@") else "@" + parts[1]
     row = next((r for r in channels.mine(msg.from_user.id)
                 if r.get("username") == target or str(r.get("chat_id")) == target), None)
-    if not row or not channels.remove(msg.from_user.id, row["chat_id"]):
+    if not row:
         await msg.answer("That channel/group is not registered under your account.")
         return
+    try:
+        destination_states.transition(msg.from_user.id, row["chat_id"], VState.REMOVED, reason="owner removed", source="owner")
+    except IllegalTransition:
+        pass
+    channels.remove(msg.from_user.id, row["chat_id"])
     await msg.answer(f"✅ Removed {target} from My channels / groups.")
 
 
@@ -428,19 +496,133 @@ async def register_group_cmd(msg: types.Message):
 
 @dp.message(Command("mychannels"))
 async def mychannels_cmd(msg: types.Message):
-    """Show every channel/group owned by this Telegram user (not just one row)."""
-    rows = channels.mine(msg.from_user.id)
+    """Every channel/group owned by this user, each with inline controls."""
+    await _send_mychannels(msg, msg.from_user.id, edit=False)
+
+
+def _auto_post_enabled(target) -> bool:
+    """Direct delivery is a destination capability: the owner turned Auto-post on
+    AND a legal relay route still exists right now (rights can be lost later)."""
+    row = channels.get(target)
+    if not row or not row.get("auto_post") or not channels.participation_allowed(target):
+        return False
+    return _auto_post_explainer(row) is None
+
+
+def _auto_post_explainer(row: dict) -> str | None:
+    return relay.auto_post_blocker(row, platform_bot_id=_platform_bot_id(),
+                                   owner_rows=channels.mine(int(row["owner_id"])))
+
+
+def _dest_label(row: dict) -> str:
+    icon = {"ACTIVE": "✅", "DEGRADED": "⚠️", "VERIFYING": "⏳", "REGISTERED": "🆕"}.get(row.get("status"), "⛔")
+    return f"{icon} {row.get('username') or row.get('chat_id')} · {row.get('kind')} · {row.get('status')}"
+
+
+def _mychannels_view(uid: int):
+    rows = channels.mine(uid)
     if not rows:
-        await msg.answer("📂 You have no registered channels or groups yet.\n"
-                         "Use /connectbot, then /register @name to add one.")
-        return
+        return ("📂 You have no registered channels or groups yet.\n"
+                "Use /connectbot, then /register @name to add one.",), {"reply_markup": _menu("user", uid)}
     lines = ["📂 MY CHANNELS / GROUPS", ""]
-    for row in rows:
-        access = ("✅ VERIFIED" if row.get("verified_state") == "VERIFIED"
-                 else "⚠️ " + str(row.get("verified_state", "REGISTERED")))
-        lines.append(f"• {row.get('username')} · {row.get('kind')} · "
-                     f"performance tier {row.get('band')} · {row.get('status')} · {access}")
-    await msg.answer("\n".join(lines), reply_markup=_menu("user", msg.from_user.id))
+    kb = []
+    for i, row in enumerate(rows):
+        lines.append(f"• {_dest_label(row)} · tier {row.get('band')}")
+        if row.get("status") != "ACTIVE" and row.get("verification_reasons"):
+            lines.append(f"    ↳ {row['verification_reasons'][0][:90]}")
+        key = row.get("chat_id") or row.get("username")
+        auto = "⚡ Auto-post ON" if row.get("auto_post") else "⚡ Auto-post off"
+        kb.append([InlineKeyboardButton(text=f"🔄 Re-verify {row.get('username') or key}"[:60], callback_data=f"dest:verify:{i}"),
+                   InlineKeyboardButton(text="ℹ️", callback_data=f"dest:info:{i}"),
+                   InlineKeyboardButton(text="🗑", callback_data=f"dest:remove:{i}")])
+        kb.append([InlineKeyboardButton(text=auto, callback_data=f"dest:auto:{i}")])
+    lines += ["", "Re-verify runs a live Telegram permission check with YOUR bot.",
+              "⚡ Auto-post lets other members' forwards land here automatically (you choose per destination)."]
+    return ("\n".join(lines),), {"reply_markup": InlineKeyboardMarkup(inline_keyboard=kb)}
+
+
+async def _send_mychannels(msg_or_cb, uid: int, *, edit: bool):
+    args, kwargs = _mychannels_view(uid)
+    target = msg_or_cb.message if edit else msg_or_cb
+    try:
+        if edit:
+            await target.edit_text(*args, **kwargs)
+        else:
+            await target.answer(*args, **kwargs)
+    except Exception as exc:
+        if edit and "not modified" not in str(exc).lower():
+            await msg_or_cb.message.answer(*args, **kwargs)
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("dest:"))
+async def destination_control(cb: types.CallbackQuery):
+    """Inline verification controls. Every action is scoped to the caller's own
+    rows by index-at-render-time, then re-resolved by key to avoid stale taps."""
+    parts = cb.data.split(":")
+    if len(parts) != 3:
+        await cb.answer("Malformed action.", show_alert=True); return
+    action, idx = parts[1], parts[2]
+    uid = cb.from_user.id
+    rows = channels.mine(uid)
+    try:
+        row = rows[int(idx)]
+    except (ValueError, IndexError):
+        await cb.answer("That list is out of date — reopening.", show_alert=True)
+        await _send_mychannels(cb, uid, edit=True); return
+    key = row.get("chat_id") or row.get("username")
+    label = row.get("username") or key
+    if action == "info":
+        checks = row.get("verification_checks") or {}
+        icon = lambda name: "✅" if checks.get(name) == "passed" else ("⚠️" if checks.get(name) == "unavailable" else "❌")
+        hist = (row.get("state_history") or [])[-5:]
+        text = [f"ℹ️ <b>{escape(str(label))}</b>", f"State: {row.get('verified_state')} · status {row.get('status')}",
+                f"Members: {row.get('telegram_member_count', row.get('size', 0)):,} ({row.get('telegram_member_count_source', 'unknown')})",
+                f"Last verified: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(int(row.get('last_verified_at') or 0))) if row.get('last_verified_at') else 'never'}",
+                f"Last error: {row.get('last_error_kind') or 'none'}", "",
+                f"{icon('destination')} destination  {icon('bot_membership')} membership  {icon('administrator')} admin  {icon('permissions')} rights",
+                "", "Recent transitions:"] + [f"• {h['previous']} → {h['new']} ({h['source']}): {h['reason'][:60]}" for h in hist]
+        await cb.message.answer("\n".join(text), parse_mode="HTML")
+        await cb.answer(); return
+    if action == "auto":
+        if row.get("auto_post"):
+            channels.update(uid, key, auto_post=False)
+            await cb.answer("Auto-post off: you will get offers to accept instead.")
+        else:
+            why = _auto_post_explainer(row)
+            if why:
+                await cb.answer(f"Can't enable Auto-post: {why}"[:200], show_alert=True); return
+            channels.update(uid, key, auto_post=True)
+            await cb.answer("Auto-post on for this destination.")
+        await _send_mychannels(cb, uid, edit=True); return
+    if action == "remove":
+        try:
+            destination_states.transition(uid, key, VState.REMOVED, reason="owner removed via /mychannels", source="owner")
+        except IllegalTransition:
+            pass
+        channels.remove(uid, key)
+        await cb.answer(f"Removed {label}.")
+        await _send_mychannels(cb, uid, edit=True); return
+    if action == "verify":
+        blocked = _enforcement_block(uid, "registration", key)
+        if blocked:
+            await cb.answer(blocked[:200], show_alert=True); return
+        try:
+            destination_states.transition(uid, key, VState.VERIFYING, reason="owner requested re-verify", source="scan")
+        except IllegalTransition as exc:
+            await cb.answer(str(exc)[:200], show_alert=True); return
+        try:
+            result = await telegram_verification.verify(uid, channels.telegram_reference(row))
+        except CredentialError:
+            result = _failed_result(row, "connect your bot with /connectbot")
+        except Exception as exc:
+            info = classify_telegram_error(exc)
+            if info.kind.value == "unknown":
+                logging.exception("re-verify of %s raised", key)
+            result = _failed_result(row, f"Telegram verification failed: {info.kind.value}")
+        ok, why = _apply_verification(channels.get(key), result, source="scan")
+        await cb.answer(("✅ Verified" if ok else "❌ " + why)[:200], show_alert=not ok)
+        await _send_mychannels(cb, uid, edit=True); return
+    await cb.answer("Unknown action.", show_alert=True)
 
 
 @dp.message(Command("announce"))
@@ -643,6 +825,19 @@ def _record_outbox_admin_action(actor_id, action: str, event_id: str, reason: st
             actor_type="admin", actor_id=str(actor_id), action=action,
             object_type="outbox", object_id=str(event_id), reason=reason,
         )
+
+
+def _failed_result(row: dict, reason: str | None):
+    return failed_result_from_reason(row, reason)
+
+
+def _apply_verification(row: dict, result, *, source: str) -> tuple[bool, str]:
+    """Every verification outcome in this bot goes through the shared state machine."""
+    ok, why = apply_verification_result(destination_states, row, result, source=source,
+                                        on_change=_record_channel_state_change)
+    if not ok and "not permitted" in why:
+        logging.warning("verification result ignored for %s: %s", row.get("chat_id"), why)
+    return ok, why
 
 
 def _record_channel_state_change(row: dict, previous: str, current: str, reason: str):
@@ -1009,6 +1204,7 @@ async def create_forwarded_task(cb: types.CallbackQuery):
             payload={
                 "source_chat_id": pending["from_chat_id"],
                 "source_message_id": pending["from_message_id"],
+                **relay.Source.from_record(pending).as_record(),
                 "source": pending.get("source", "unknown"),
                 "silent": pending.get("ntf") == "silent",
             },
@@ -1120,11 +1316,15 @@ async def _verify_task_channel(row: dict):
         return None, "destination has no Telegram chat id"
     try:
         result = await telegram_verification.verify(int(row["owner_id"]), chat_id)
-        if not result.eligible:
-            return None, "; ".join(result.reasons)
-        return {"row": row, "chat_id": int(result.chat_id), "verification": result}, None
+    except CredentialError:
+        return None, "connect your bot with /connectbot"
     except Exception as exc:
-        return None, f"Telegram verification failed: {type(exc).__name__}"
+        return None, f"Telegram verification failed: {classify_telegram_error(exc).kind.value}"
+    # Record the real Telegram outcome either way, through the state machine.
+    _apply_verification(row, result, source="delivery")
+    if not result.eligible:
+        return None, "; ".join(result.reasons)
+    return {"row": row, "chat_id": int(result.chat_id), "verification": result}, None
 
 
 async def _reconcile_registered_channels(uid: int) -> list[str]:
@@ -1133,18 +1333,64 @@ async def _reconcile_registered_channels(uid: int) -> list[str]:
     for row in channels.mine(uid):
         before = row.get("status", "ACTIVE")
         verified, reason = await _verify_task_channel(row)
-        after = "ACTIVE" if verified else "DEGRADED"
-        if before != after or bool(row.get("bot_added")) != bool(verified):
-            channels.update(uid, row["chat_id"],
-                            bot_added=bool(verified), status=after,
-                            verified_state="VERIFIED" if verified else "DEGRADED",
-                            verification_reasons=[] if verified else [reason or "verification failed"],
-                            last_verified_at=int(time.time()) if verified else row.get("last_verified_at"))
-            _record_channel_state_change(row, before, after,
-                                         reason or "permissions verified")
+        if not verified:
+            failed = _failed_result(row, reason)
+            if failed is not None and channels.get(row["chat_id"]).get("status") == before:
+                _apply_verification(row, failed, source="scan")
+        after = channels.get(row["chat_id"]).get("status", before)
+        if before != after:
             label = row.get("username") or row.get("chat_id")
             changes.append(f"{label}: {after.lower()} ({reason or 'permissions verified'})")
     return changes
+
+
+class RelayUnavailable(RuntimeError):
+    """No bot can legally forward this source to this destination."""
+
+
+_PLATFORM_BOT_ID: int | None = None
+
+
+def _platform_bot_id() -> int | None:
+    global _PLATFORM_BOT_ID
+    if _PLATFORM_BOT_ID is None:
+        try:
+            _PLATFORM_BOT_ID = int(str(BOT_TOKEN).split(":", 1)[0])
+        except (ValueError, AttributeError):
+            _PLATFORM_BOT_ID = None
+    return _PLATFORM_BOT_ID
+
+
+def _relay_plan(source: relay.Source, target, *, platform_may_try: bool = False) -> tuple[relay.Plan, dict | None]:
+    row = channels.get(target)
+    if not row:
+        return relay.Plan("unavailable", "", None, None, "destination is not registered"), None
+    dest = relay.destination_from_registry(row, platform_bot_id=_platform_bot_id(),
+                                           owner_rows=channels.mine(int(row["owner_id"])) if row.get("owner_id") is not None else [])
+    return relay.resolve(source, dest, platform_may_try=platform_may_try), row
+
+
+async def _relay_forward(source: relay.Source, target, *, silent: bool = False, platform_may_try: bool = False):
+    """Forward `source` to `target` with the ONE bot that can legally read it.
+
+    Returns (sent_message, plan). Raises RelayUnavailable when no route exists so
+    callers fail closed and audit the reason instead of posting a stand-in.
+    """
+    plan, row = _relay_plan(source, target, platform_may_try=platform_may_try)
+    if not plan.ok:
+        raise RelayUnavailable(plan.reason)
+    if plan.forwarder == "platform":
+        sent = await bot.forward_message(chat_id=target, from_chat_id=plan.from_chat_id,
+                                         message_id=int(plan.message_id), disable_notification=silent)
+        return sent, plan
+    owned_bot = telegram_verification.make_bot(telegram_verification.credentials.token(int(row["owner_id"])))
+    try:
+        sent = await owned_bot.forward_message(chat_id=target, from_chat_id=plan.from_chat_id,
+                                               message_id=int(plan.message_id), disable_notification=silent)
+        return sent, plan
+    finally:
+        if owned_bot is not bot:
+            await owned_bot.session.close()
 
 
 async def _execute_task_payload(task: dict, chat_id, owner_id: int):
@@ -1154,24 +1400,19 @@ async def _execute_task_payload(task: dict, chat_id, owner_id: int):
     platform-generated tasks. A title alone is never fabricated into a post.
     """
     payload = task.get("payload") or {}
-    from aiogram import Bot as TelegramBot
-    owned_bot = TelegramBot(token=telegram_verification.credentials.token(int(owner_id)))
-    try:
-        source_chat_id = payload.get("source_chat_id")
-        source_message_id = payload.get("source_message_id")
-        if source_chat_id is not None and source_message_id is not None:
-            return await owned_bot.forward_message(
-                chat_id=chat_id,
-                from_chat_id=source_chat_id,
-                message_id=int(source_message_id),
-                disable_notification=bool(payload.get("silent", False)),
-            )
-        text = payload.get("text")
-        if text:
+    source = relay.Source.from_record(payload)
+    if source.has_inbox or source.has_channel_origin:
+        sent, _plan = await _relay_forward(source, chat_id, silent=bool(payload.get("silent", False)))
+        return sent
+    text = payload.get("text")
+    if text:
+        owned_bot = telegram_verification.make_bot(telegram_verification.credentials.token(int(owner_id)))
+        try:
             return await owned_bot.send_message(chat_id, text, parse_mode="HTML")
-        raise ValueError("task has no executable Telegram payload")
-    finally:
-        await owned_bot.session.close()
+        finally:
+            if owned_bot is not bot:
+                await owned_bot.session.close()
+    raise ValueError("task has no executable Telegram payload")
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("task:claim:"))
@@ -1191,6 +1432,10 @@ async def claim_task(cb: types.CallbackQuery):
     task = marketplace.get_task(task_id)
     if not task:
         await cb.answer("That task no longer exists.", show_alert=True)
+        return
+    blocked = _enforcement_block(cb.from_user.id, "tasks", selected_chat_id)
+    if blocked:
+        await cb.answer(blocked[:200], show_alert=True)
         return
     rows = channels.mine(cb.from_user.id)
     selected = next((row for row in rows
@@ -1297,17 +1542,13 @@ async def my_chat_member_changed(update: types.ChatMemberUpdated):
                     if str(item.get("chat_id")) == str(update.chat.id)), None)
     if not row:
         return
-    verified, reason = await _verify_task_channel(row)
-    status = "ACTIVE" if verified else "DEGRADED"
     previous = row.get("status", "ACTIVE")
-    channels.update(row["owner_id"], row.get("chat_id") or update.chat.id,
-                    bot_added=bool(verified), status=status,
-                    verified_state="VERIFIED" if verified else "DEGRADED",
-                    verification_reasons=[] if verified else [reason or "verification failed"],
-                    last_verified_at=int(time.time()) if verified else row.get("last_verified_at"))
-    if previous != status:
-        _record_channel_state_change(row, previous, status,
-                                     reason or "permissions verified")
+    verified, reason = await _verify_task_channel(row)
+    if not verified:
+        failed = _failed_result(row, reason)
+        if failed is not None and channels.get(row.get("chat_id") or update.chat.id).get("status") == previous:
+            _apply_verification(row, failed, source="telegram_event")
+    status = channels.get(row.get("chat_id") or update.chat.id).get("status", previous)
     if previous != status:
         label = row.get("username") or update.chat.id
         try:
@@ -1362,11 +1603,8 @@ async def stats_cmd(msg: types.Message):
     except CredentialError:
         await msg.answer("❌ Connect your own Telegram bot first with /connectbot.")
         return
-    if not result.eligible:
-        channels.update(msg.from_user.id, row["chat_id"], bot_added=False,
-                        status=result.state, verified_state=result.state,
-                        verification_reasons=list(result.reasons),
-                                verification_checks=result.checks or {})
+    ok, _ = _apply_verification(row, result, source="scan")
+    if not ok:
         await msg.answer("❌ <b>Verification failed</b>\n" + "\n".join(result.reasons), parse_mode="HTML")
         return
     if result.member_count is not None:
@@ -1392,11 +1630,8 @@ async def stats_all_callback(cb: types.CallbackQuery):
     for row in rows:
         try:
             result = await telegram_verification.verify(cb.from_user.id, channels.telegram_reference(row))
-            if not result.eligible:
-                channels.update(cb.from_user.id, row["chat_id"], bot_added=False,
-                                status=result.state, verified_state=result.state,
-                                verification_reasons=list(result.reasons),
-                                verification_checks=result.checks or {})
+            ok, _ = _apply_verification(row, result, source="scan")
+            if not ok:
                 lines.append(f"❌ {escape(str(row.get('username')))}: {'; '.join(result.reasons)}")
                 continue
             if result.member_count is None:
@@ -1437,38 +1672,28 @@ async def scan_cmd(msg: types.Message):
             lines.append(f"{icon('bot_membership')} Checking bot membership")
             lines.append(f"{icon('administrator')} Checking administrator status")
             lines.append(f"{icon('permissions')} Checking required permissions")
-            if not result.eligible:
-                previous = row.get("status", "ACTIVE")
-                channels.update(msg.from_user.id, row["chat_id"], bot_added=False,
-                                status=result.state, verified_state=result.state,
-                                verification_reasons=list(result.reasons),
-                                verification_checks=result.checks or {})
-                if previous != result.state:
-                    _record_channel_state_change(row, previous, result.state, "; ".join(result.reasons))
+            ok, _ = _apply_verification(row, result, source="scan")
+            if not ok:
                 lines.append(f"❌ {row['username']}: {'; '.join(result.reasons)}")
                 continue
             lines.append(f"{icon('accessibility')} Checking destination accessibility")
             lines.append(f"{icon('member_count')} Retrieving member count")
             lines.append(f"{icon('eligibility')} Checking eligibility")
-            previous = row.get("status", "ACTIVE")
             count = result.member_count or 0
             stats.record(row["chat_id"], subscribers=count)
-            channels.update(msg.from_user.id, row["chat_id"], size=count,
-                            bot_added=True, status="ACTIVE", verified_state="VERIFIED",
-                            telegram_member_count=count,
-                            telegram_member_count_source="telegram_api",
-                            telegram_member_count_checked_at=result.checked_at,
-                            canonical_chat_id=result.chat_id,
-                            permissions=result.permissions or {}, verification_checks=result.checks or {},
-                    last_verified_at=result.checked_at)
             ledger.register(row["username"], count)
             lines.append(f"✅ {row['username']}: verified; {count:,} members/subscribers (Telegram API)")
         except Exception as exc:
-            channels.update(msg.from_user.id, row["chat_id"],
-                            bot_added=False, status="DEGRADED",
-                            verified_state="DEGRADED",
-                            verification_reasons=[f"reconciliation failed: {type(exc).__name__}"])
-            lines.append(f"⚠️ {row['username']}: reconciliation failed ({type(exc).__name__})")
+            info = classify_telegram_error(exc)
+            try:
+                destination_states.transition(msg.from_user.id, row["chat_id"],
+                                              info.verification_state or VState.DEGRADED,
+                                              reason=f"reconciliation failed: {info.kind.value}", source="scan",
+                                              verification_reasons=[f"reconciliation failed: {info.kind.value}"],
+                                              last_error_kind=info.kind.value)
+            except IllegalTransition:
+                pass
+            lines.append(f"⚠️ {row['username']}: reconciliation failed ({info.kind.value})")
     lines.append("\nViews/reactions/forwards are recorded only when a real stats provider "
                  "or channel observation is available; no numbers are invented.")
     await msg.answer("\n".join(lines))
@@ -2032,10 +2257,10 @@ async def pick_category(cb: types.CallbackQuery):
         await cb.answer("Unknown category.", show_alert=True)
         return
     _session_set(cb.from_user.id, cat=cat)
-    # Pinning forwarded posts is intentionally unavailable to both owners and users.
+    # Delivery style is NOT a sender choice: a destination auto-posts only if its
+    # owner enabled Auto-post and a legal relay route exists (decision 2026-09-09 #1).
+    # Pinning forwarded posts is intentionally unavailable.
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔁 Forward", callback_data="style:fwd"),
-         InlineKeyboardButton(text="⚡ Direct", callback_data="style:direct")],
         [InlineKeyboardButton(text="🔔 Loud", callback_data="ntf:loud"),
          InlineKeyboardButton(text="🔕 Silent", callback_data="ntf:silent")],
         [InlineKeyboardButton(text="✅ Submit (you must FORWARD the post next)",
@@ -2044,33 +2269,25 @@ async def pick_category(cb: types.CallbackQuery):
          InlineKeyboardButton(text="❌ Cancel", callback_data="menu:cancel")],
     ])
     await cb.message.edit_text(
-        f"Category: **{cat}**\n\nChoose post style & notification:\n\n"
-        "Loud delivery is for groups. Silent delivery can target either a group or a channel.",
-        reply_markup=kb)
+        f"Category: <b>{escape(cat)}</b>\n\nChoose notification:\n\n"
+        "Loud delivery is for groups. Silent delivery can target either a group or a channel.\n"
+        "Destinations whose owner enabled ⚡ Auto-post receive your forward automatically; "
+        "others get an offer to accept.",
+        reply_markup=kb, parse_mode="HTML")
     await cb.answer()
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("style:"))
 async def pick_style(cb: types.CallbackQuery):
-    parts = cb.data.split(":")
-    style = parts[1]
-    if style == "submit":
+    """Only `style:submit` remains; legacy style:fwd/direct taps are explained away."""
+    if cb.data.split(":")[1] == "submit":
         await cb.message.edit_text(
             "Now **forward** the post you want to distribute here (so its "
             "attribution stays intact).\n\n" + gate.attribution_tip())
         await cb.answer()
         return
-    if style not in ("fwd", "direct"):
-        await cb.answer("Only forward or direct delivery is available; pinning is disabled.", show_alert=True)
-        return
-    _session_set(cb.from_user.id, style=style)
-    await cb.answer(f"Style: {style}")
-    await cb.message.edit_text(f"Post style set to **{style}**. Choose notification:",
-                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                   [InlineKeyboardButton(text="🔔 Loud", callback_data="ntf:loud"),
-                                    InlineKeyboardButton(text="🔕 Silent", callback_data="ntf:silent")],
-                                   [InlineKeyboardButton(text="✅ Submit", callback_data="style:submit")],
-                               ]))
+    await cb.answer("Delivery style is decided per destination by its owner (⚡ Auto-post in /mychannels).",
+                    show_alert=True)
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("ntf:"))
@@ -2130,6 +2347,10 @@ async def on_forward(msg: types.Message):
         await owner_forward(msg, u)
         return
 
+    blocked = _enforcement_block(uid, "distribution", u)
+    if blocked:
+        await msg.answer(blocked)
+        return
     sess = _session(uid)
     # 1) terms accepted? (per user — never a single global flag)
     if not sess.get("accepted_terms"):
@@ -2177,6 +2398,7 @@ async def on_forward(msg: types.Message):
     # ordered first; claimed history is retained for audit/new-member delivery.
     queue_item = {"id": f"{msg.chat.id}:{msg.message_id}",
                   "source_chat_id": msg.chat.id, "source_message_id": msg.message_id,
+                  **relay.Source.from_message(msg).as_record(),
                   "sender": u, "category": cat,
                   "related_categories": [c for c in POST_CATEGORIES if c != cat]}
     available.add(queue_item, owner=ledger._is_exempt(u))
@@ -2220,10 +2442,10 @@ def _submitted_text(msg) -> str:
 def _pending_from(msg, u: str, cat: str, sess: dict, owner_exempt: bool = False) -> dict:
     """Snapshot of the post being distributed.
 
-    We remember the copy the member forwarded INTO the bot chat
-    (chat_id + message_id). Re-forwarding that keeps Telegram's original
-    attribution header, and unlike forwarding from the source channel it works
-    without the bot being a member of that channel.
+    We remember BOTH the copy the member forwarded into this bot's inbox
+    (only the platform bot can re-forward that) and the origin channel message
+    (only a bot that administers the origin can forward that). `relay.resolve`
+    picks the legal route per destination; see relay.py.
     """
     return {
         "user": u, "tier": ledger.balance(u)["tier"], "post_type": cat,
@@ -2233,6 +2455,7 @@ def _pending_from(msg, u: str, cat: str, sess: dict, owner_exempt: bool = False)
         "ntf": sess.get("ntf", "silent"),
         "from_chat_id": msg.chat.id,
         "from_message_id": msg.message_id,
+        **relay.Source.from_message(msg).as_record(),
         "owner_exempt": owner_exempt,
     }
 
@@ -2374,13 +2597,16 @@ async def pick_spend(cb: types.CallbackQuery):
             return
 
     _session_clear(uid, "pending")          # one submission = one distribution
-    await cb.message.answer(f"Distributing to {len(targets)} channel(s): {targets or 'none'}.")
     source = pending.get("source", "unknown")
     style = pending.get("style", "fwd")
     ntf = pending.get("ntf", "loud") == "silent"
+    auto_n = sum(1 for t in targets if _auto_post_enabled(t))
+    await cb.message.answer(
+        f"Distributing to {len(targets)} destination(s): "
+        f"⚡ auto-posted to {auto_n} · 📨 offered to {len(targets) - auto_n}")
     for target in targets:
         perf.mark_offered(target)
-        if ledger.is_direct(target):
+        if _auto_post_enabled(target):
             await direct_deliver(cb, sender, target, pending, style=style, silent=ntf)
         else:
             audit.record(bot="reward", sender=sender, source=source,
@@ -2388,7 +2614,10 @@ async def pick_spend(cb: types.CallbackQuery):
                          target_channel=target, mode="chain", status="offered",
                          forward_valid=True, style=style,
                          source_chat_id=pending.get("from_chat_id"),
-                         source_message_id=pending.get("from_message_id"))
+                         source_message_id=pending.get("from_message_id"),
+                         origin_chat_id=pending.get("origin_chat_id"),
+                         origin_message_id=pending.get("origin_message_id"),
+                         origin_kind=pending.get("origin_kind"))
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ Agree (forward it)", callback_data=f"chain:agree:{sender}"),
                  InlineKeyboardButton(text="❌ Disagree (skip)", callback_data=f"chain:dis:{sender}")],
@@ -2432,23 +2661,24 @@ async def direct_deliver(cb, sender, target, pending, style="fwd", silent=False)
     if not destination or not channels.participation_allowed(target):
         await cb.message.answer(f"⚠ Destination {target} is not currently verified.")
         return
-    from aiogram import Bot as TelegramBot
-    owned_bot = TelegramBot(token=telegram_verification.credentials.token(int(destination["owner_id"])))
     try:
-        sent = await owned_bot.forward_message(chat_id=target, from_chat_id=f_chat_id,
-                                                message_id=f_msg_id,
-                                                disable_notification=silent)
+        _sent, plan = await _relay_forward(relay.Source.from_record(pending), target, silent=silent)
         perf.mark_posted(target)
         audit.record(bot="reward", sender=sender, target_channel=target,
-                     mode="direct", status="delivered", forward_valid=True, style=style)
+                     mode="direct", status="delivered", forward_valid=True, style=style, relay=plan.route)
         await cb.message.answer(f"⚡ Auto-posted to {target} (direct, {style}).")
+    except RelayUnavailable as e:
+        audit.record(bot="reward", sender=sender, target_channel=target,
+                     mode="direct", status="failed", forward_valid=False, relay="unavailable",
+                     error=str(e)[:120])
+        await cb.message.answer(f"⚠ Direct delivery to {target} isn't possible: {e}. "
+                                "The owner can add the platform bot as admin, or accept it as a chain offer.")
     except Exception as e:
+        info = classify_telegram_error(e)
         audit.record(bot="reward", sender=sender, target_channel=target,
                      mode="direct", status="offered", forward_valid=True,
-                     error=str(e)[:120])
-        await cb.message.answer(f"Direct delivery to {target} failed ({e}). Fell back to offer.")
-    finally:
-        await owned_bot.session.close()
+                     error=f"{info.kind.value}: {str(e)[:100]}")
+        await cb.message.answer(f"Direct delivery to {target} failed ({info.kind.value}). Fell back to offer.")
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("chain:"))
@@ -2466,10 +2696,7 @@ async def chain_delivery(cb: types.CallbackQuery):
         # The credit goes to the channel that SHARES someone else's post — i.e.
         # the target that just agreed. Crediting the sender would let anyone mint
         # credits simply by broadcasting their own posts.
-        offered = next((r for r in reversed(audit.all())
-                        if r.get("sender") == sender
-                        and r.get("target_channel") == target
-                        and r.get("status") == "offered"), None)
+        offered = audit.latest_for(sender=sender, target_channel=target, status="offered")
         if not offered:
             # Backward-compatible completion for offers created by an older
             # process before delivery rows were persisted. New UI offers always
@@ -2483,26 +2710,26 @@ async def chain_delivery(cb: types.CallbackQuery):
             await cb.answer()
             return
         if offered.get("source_chat_id") and offered.get("source_message_id"):
+            # forwardMessage preserves keyboard, caption, media and attribution.
+            # Which bot forwards is decided by relay.resolve — the agreeing
+            # owner's bot can only forward from an origin channel it administers.
             try:
-                # Telegram's forwardMessage preserves the original message's inline
-                # keyboard, caption, media, and attribution. Never rebuild it as
-                # plain text: that silently drops inline buttons.
-                await bot.forward_message(
-                    chat_id=target,
-                    from_chat_id=offered["source_chat_id"],
-                    message_id=offered["source_message_id"],
-                    disable_notification=False)
+                # The platform bot posted this offer inside `target`, so it acts as itself here.
+                _sent, plan = await _relay_forward(relay.Source.from_record(offered), target, platform_may_try=True)
+            except RelayUnavailable as exc:
+                audit.record(bot="reward", sender=sender, target_channel=target, mode="chain",
+                             status="failed", forward_valid=False, relay="unavailable", error=str(exc)[:120])
+                await cb.answer(f"Can't forward to {target}: {str(exc)[:150]}", show_alert=True)
+                return
             except Exception as exc:
-                await cb.answer(f"Could not forward to {target}: {str(exc)[:80]}",
+                await cb.answer(f"Could not forward to {target}: {classify_telegram_error(exc).kind.value}",
                                 show_alert=True)
                 return
         # Older offers created before source ids were persisted can still be
         # completed and credited; new offers always take the preservation path above.
         ledger.earn(target)
         perf.mark_posted(target)
-        offered["status"] = "delivered"
-        audit.store[audit.key] = audit.all()
-        audit.store.sync()
+        audit.update(offered["id"], status="delivered")
         bal = ledger.balance(target)["balance"]
         await cb.message.answer("✅ <b>POST SHARED</b>\n\n"
                                 "The original buttons and attribution were preserved.\n"
@@ -2532,6 +2759,13 @@ async def report_post(cb: types.CallbackQuery):
     item = reports.report(sender=sender, reporter=reporter,
                           reported_post={"target_channel": target},
                           reason="receiver flagged as inappropriate/scam/fraud")
+    # Mirror into the durable compliance store so the Admin Mini App sees it.
+    try:
+        enforcement.report(cb.from_user.id, sender, "channel",
+                           "receiver flagged as inappropriate/scam/fraud",
+                           subject=f"legacy_report:{item['id']}")
+    except EnforcementError as exc:
+        logging.warning("compliance report mirror failed: %s", exc)
     audit.record(bot="reward", sender=sender, target_channel=target,
                  mode="chain", status="skipped", forward_valid=True)
     await cb.message.answer(f"🚩 Report #{item['id']} logged against {sender}. "
@@ -2697,8 +2931,8 @@ async def partner_username_capture(msg: types.Message):
         return
     m = ledger._m(u)
     other_m = ledger._m(other)
-    if not (m.get("direct_mode") and other_m.get("direct_mode")):
-        await msg.answer("Both channels must have added the bot as admin (Post Messages) "
+    if not (channels.participation_allowed(u) and channels.participation_allowed(other)):
+        await msg.answer("Both channels must be VERIFIED with their owner's bot as admin (Post Messages) "
                          "so you can post into each other. Fix that on both sides, then retry.")
         _session_clear(uid, "partner_phase")
         return
@@ -2758,22 +2992,76 @@ async def _process_mint_outbox():
             tx.fail_outbox(event["event_id"], str(exc), retry_delay=delay)
 
 
+def _entities_from_payload(text: str, payload: dict) -> list | None:
+    from aiogram.types import MessageEntity
+    ents = tg_entities.sanitize_entities(text, payload.get("entities") or [])
+    return [MessageEntity(**e) for e in ents] or None
+
+
 async def _process_reward_broadcasts():
     """Deliver only Reward-scope campaigns through the shared durable queue."""
+    if enforcement_gate.safe_mode():
+        # Safe mode pauses the machine: leave deliveries pending, claim nothing.
+        return
     for delivery in broadcasts.claim(limit=20, bot_scope="reward"):
         try:
+            if not enforcement_gate.check(delivery["recipient_id"], "user", "campaigns"):
+                broadcasts.fail(delivery["delivery_id"], "recipient blocked by enforcement", blocked=True)
+                continue
             campaign = broadcasts.get_campaign(delivery["campaign_id"])
             payload = campaign.get("payload", {}) if campaign else {}
             text = payload.get("text")
             if not text:
                 broadcasts.fail(delivery["delivery_id"], "campaign has no explicit text payload", blocked=True)
                 continue
-            sent = await bot.send_message(int(delivery["recipient_id"]), text, parse_mode="HTML")
+            if "entities" in payload:
+                # Composed in Telegram or the Mini App: replay Telegram's own entities,
+                # no parse_mode, so nothing typed can be misread as markup.
+                sent = await bot.send_message(int(delivery["recipient_id"]), text, parse_mode=None,
+                                              entities=_entities_from_payload(text, payload))
+            else:
+                # Legacy drafts created before entities were captured.
+                sent = await bot.send_message(int(delivery["recipient_id"]), text, parse_mode="HTML")
             broadcasts.complete(delivery["delivery_id"], sent.message_id)
         except Exception as exc:
             blocked = any(token in str(exc).lower() for token in ("blocked", "chat not found", "deactivated"))
             broadcasts.fail(delivery["delivery_id"], str(exc)[:500], blocked=blocked,
                             retry_seconds=min(3600, 30 * (2 ** min(delivery.get("attempts", 1), 6))))
+
+
+async def _process_ad_deliveries():
+    """Deliver approved, consented ads through the DESTINATION OWNER's bot.
+
+    Every message is labelled as an ad with the disclosed advertiser. Consent
+    is re-checked at claim time inside the store; enforcement and safe mode
+    are checked here, at the shared boundary."""
+    if not ads.enabled or enforcement_gate.safe_mode():
+        return
+    for delivery in ads.claim(limit=10):
+        try:
+            campaign = ads.get_campaign(delivery["campaign_id"])
+            row = channels.get(delivery["destination_id"])
+            if not campaign or not row:
+                ads.fail(delivery["delivery_id"], "campaign or destination missing", blocked=True)
+                continue
+            if not enforcement_gate.check_many([(row.get("owner_id"), "user"), (delivery["destination_id"], "channel")], "campaigns"):
+                ads.fail(delivery["delivery_id"], "destination blocked by enforcement", blocked=True)
+                continue
+            verified, why = await _verify_task_channel(row)
+            if not verified:
+                ads.fail(delivery["delivery_id"], f"verification: {why}", retry_seconds=1800)
+                continue
+            text = (f"📢 <b>Ad · {escape(campaign['advertiser_label'])}</b>\n\n"
+                    f"{escape(campaign['payload']['text'])}\n\n"
+                    f"<i>Sponsored content. This channel opted in to CLICKMINT ads (terms v{campaign['terms_version']}).</i>")
+            sent = await _execute_task_payload({"payload": {"text": text}}, verified["chat_id"], int(row["owner_id"]))
+            ads.complete(delivery["delivery_id"], sent.message_id)
+            audit.record(bot="reward", sender=f"ad:{campaign['campaign_id']}", target_channel=delivery["destination_id"],
+                         mode="direct", status="delivered", forward_valid=True)
+        except Exception as exc:
+            blocked = any(t in str(exc).lower() for t in ("blocked", "chat not found", "not enough rights", "deactivated"))
+            ads.fail(delivery["delivery_id"], str(exc)[:500], blocked=blocked,
+                     retry_seconds=min(3600, 60 * (2 ** min(int(delivery.get("attempts", 1)), 6))))
 
 
 async def _notify_owner(text: str):
@@ -3211,7 +3499,7 @@ async def panel(cb: types.CallbackQuery):
         await cb.answer()
         return
     if which == "direct":
-        rows = [f"{u:<22} {'direct ✔' if m.get('direct_mode') else 'chain —'}"
+        rows = [f"{u:<22} {'auto ⚡' if (channels.get(u) or {}).get('auto_post') else 'offer —'}"
                 for u, m in ledger.ledger.items()]
         await _panel_edit(cb, "⚡ DELIVERY MODE PER CHANNEL\n\n" +
                           ("\n".join(rows[:40]) or "No channels registered yet."),
@@ -3279,7 +3567,7 @@ def _rank_text() -> str:
         s = perf.score(username)
         cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"), connected=_is_connected(username))
         lines.append(f"{username:<22} {s['band']}  {s['score']:.2f}  {s['status']}  "
-                     f"direct={'✔' if ledger.is_direct(username) else '—'}  "
+                     f"auto={'⚡' if (channels.get(username) or {}).get('auto_post') else '—'}  "
                      f"cap={cap}  ({m.get('size', 0)})")
     if len(lines) == 2:
         lines.append("No channels registered yet.")
@@ -3457,6 +3745,60 @@ async def _monitor_operational_health():
                  f"\n\nAudit events: {health['total']}\nUse /audithealth for details.")
 
 
+_REVERIFY_BATCH = int(config.env("REVERIFY_BATCH", "5") or 5)
+
+
+async def _background_reverify(*, now: int | None = None) -> list[str]:
+    """State-aware automatic re-verification.
+
+    Previously every member's every destination was re-verified on every 15 s
+    tick — O(destinations) Bot API calls per tick, a flood-limit incident
+    waiting to happen. Now `destination_state.RECHECK_INTERVAL` decides who is
+    due (healthy 6 h, degraded 30 min, revoked never), at most REVERIFY_BATCH
+    per tick, oldest check first. Safe mode pauses it. Owners are messaged only
+    when the operational status actually changed.
+    """
+    if enforcement_gate.safe_mode():
+        return []
+    # Index-served candidate set (ix_dest_next), then the state machine's own
+    # schedule rule as the authority — two views that must agree.
+    candidates = verification_store.destinations_due(now=now, limit=_REVERIFY_BATCH * 4)
+    due = destination_states.due_for_recheck(candidates, now=now)
+    notes = []
+    for row in due[:_REVERIFY_BATCH]:
+        key = row.get("chat_id") or row.get("username")
+        before = row.get("status")
+        try:
+            result = await telegram_verification.verify(int(row["owner_id"]), channels.telegram_reference(row))
+        except CredentialError:
+            result = _failed_result(row, "connect your bot with /connectbot")
+        except Exception as exc:
+            info = classify_telegram_error(exc)
+            if info.kind.value == "unknown":
+                logging.exception("background re-verify of %s raised", key)
+            result = _failed_result(row, f"Telegram verification failed: {info.kind.value}")
+        if result is None:
+            continue
+        _apply_verification(row, result, source="background")
+        after = (channels.get(key) or {}).get("status", before)
+        # Even when nothing changed, stamp the recheck so we don't re-probe next tick.
+        try:
+            channels.update(int(row["owner_id"]), key, last_recheck_at=int(now if now is not None else time.time()))
+        except (KeyError, ValueError):
+            pass
+        if before != after:
+            note = f"{row.get('username') or key}: {before} → {after}"
+            notes.append(note)
+            try:
+                await bot.send_message(int(row["owner_id"]),
+                                       f"🔎 Destination access changed\n• {note}\n"
+                                       + ("" if after == "ACTIVE" else
+                                          "\nTap /mychannels → Re-verify after fixing the bot's admin rights."))
+            except Exception as exc:
+                logging.warning("reverify notice to %s failed: %s", row.get("owner_id"), classify_telegram_error(exc).kind.value)
+    return notes
+
+
 async def notify_loop():
     """Background: hand out queued review outcomes to the senders (reward scope)."""
     while True:
@@ -3466,25 +3808,14 @@ async def notify_loop():
                 logging.info("task recovery: %s", recovery)
             await _process_mint_outbox()
             await _process_reward_broadcasts()
+            await _process_ad_deliveries()
             await _monitor_operational_health()
             for item in review.pending_notify("reward"):
                 if await _notify_review_sender(item):
                     review.clear_notify(item["id"])
-            # Reconcile Telegram permissions before calculating eligibility.
-            for member in ledger.ledger.values():
-                recipient = member.get("user_id")
-                if not recipient:
-                    continue
-                try:
-                    changes = await _reconcile_registered_channels(int(recipient))
-                    if changes:
-                        await bot.send_message(
-                            int(recipient),
-                            "🔎 Channel access updated:\n" + "\n".join(f"• {item}" for item in changes) +
-                            "\n\nMarketplace tasks require ACTIVE Telegram permissions.",
-                        )
-                except Exception:
-                    logging.exception("channel reconciliation failed for %s", recipient)
+            # Background re-verification: only destinations whose state-specific
+            # interval has elapsed, a bounded batch per tick, owner told on change.
+            await _background_reverify()
             # Keep one replaceable availability bubble per known member.
             for member in ledger.ledger.values():
                 recipient = member.get("user_id")
@@ -3572,6 +3903,151 @@ async def audit_view(msg: types.Message):
     await msg.answer("\n".join(lines[:55]))
 
 
+@dp.message(Command("report"))
+async def report_cmd(msg: types.Message):
+    """Group-scoped report entry point.
+
+    • Inside a registered GROUP, replying to a message with `/report <reason>`
+      files a report against that group (entity_type=group) with the replied
+      message as evidence. Members of the group need no CLICKMINT account.
+    • In private chat, `/report @target <reason>` reports a channel/group.
+    Filing NEVER changes anyone's state — a human reviews it.
+    """
+    uid = _uid(msg)
+    chat_type = getattr(msg.chat, "type", "private")
+    parts = (msg.text or "").split(maxsplit=2)
+    if chat_type in {"group", "supergroup"}:
+        row = channels.find_by_telegram_chat(msg.chat.id) or (
+            channels.find_by_telegram_chat("@" + msg.chat.username) if getattr(msg.chat, "username", None) else None)
+        if row is None:
+            await msg.reply("This group is not registered with CLICKMINT, so there is nothing to report here.")
+            return
+        reason = parts[1] + (" " + parts[2] if len(parts) > 2 else "") if len(parts) > 1 else ""
+        if not reason.strip():
+            await msg.reply("Usage: reply to the offending message with /report <reason>.")
+            return
+        entity_id = row.get("username") or row.get("chat_id")
+        subject = f"group_message:{msg.chat.id}/{msg.reply_to_message.message_id}" if msg.reply_to_message else f"group:{msg.chat.id}"
+        try:
+            item = enforcement.report(uid, entity_id, "group", reason.strip()[:500], subject=subject)
+            if msg.reply_to_message:
+                enforcement.add_evidence(entity_id, "group", "message", f"telegram:{msg.chat.id}/{msg.reply_to_message.message_id}",
+                                         captured_by=uid, report_id=item["report_id"], notes="reported in-group")
+        except EnforcementError as exc:
+            await msg.reply(f"⚠ {exc}")
+            return
+        await msg.reply(f"🚩 Report {item['report_id'][-6:]} filed. A human reviews every report — nothing is automatic.")
+        owner_notify(f"🚩 In-group report {item['report_id']} on group {entity_id}: {reason.strip()[:120]}")
+        return
+    # private chat: /report @target reason
+    if len(parts) < 3 or not parts[1].startswith("@"):
+        await msg.answer("Usage: /report @channel_or_group <reason>\n"
+                         "Inside a registered group you can also reply to a message with /report <reason>.")
+        return
+    target, reason = parts[1], parts[2].strip()
+    row = channels.get(target)
+    if row is None:
+        await msg.answer("That destination is not registered with CLICKMINT.")
+        return
+    if int(row.get("owner_id", -1)) == uid:
+        await msg.answer("You cannot report your own destination. Use /removechannel or /ads off instead.")
+        return
+    try:
+        item = enforcement.report(uid, target, row.get("kind", "channel"), reason[:500], subject="private_report")
+    except EnforcementError as exc:
+        await msg.answer(f"⚠ {exc}")
+        return
+    await msg.answer(f"🚩 Report {item['report_id'][-6:]} filed against {target}. "
+                     "A human reviews every report — nothing is auto-banned.")
+    owner_notify(f"🚩 Report {item['report_id']} on {row.get('kind', 'channel')} {target}: {reason[:120]}")
+
+
+@dp.message(Command("ads"))
+async def ads_cmd(msg: types.Message):
+    """Destination owners opt IN (or out) of receiving ads — per channel, under
+    the current terms version. Nothing is ever posted to a channel that has
+    not opted in; consent can be withdrawn at any time with immediate effect."""
+    uid = _uid(msg)
+    parts = (msg.text or "").split()
+    terms = ads.current_terms()
+    mine = channels.mine(uid)
+    if len(parts) < 3 or parts[1] not in {"on", "off"}:
+        lines = ["📢 ADVERTISING CONSENT", ""]
+        if terms is None:
+            lines.append("No advertising terms are published yet, so nothing can be advertised.")
+        else:
+            lines.append(f"Current terms v{terms['version']}:")
+            lines.append(terms["text"][:1200])
+            lines.append("")
+        for row in mine:
+            dest = row.get("username") or row.get("chat_id")
+            c = ads.consent(dest)
+            lines.append(f"• {dest}: " + (f"✅ opted in (terms v{c['terms_version']})" if c else "⛔ not opted in"))
+        lines += ["", "Usage: /ads on @channel   ·   /ads off @channel",
+                  "Opting in means an approved, clearly labelled ad may be posted to that "
+                  "channel by YOUR bot. You can opt out at any time."]
+        await msg.answer("\n".join(lines))
+        return
+    action, dest = parts[1], parts[2]
+    row = next((r for r in mine if (r.get("username") or r.get("chat_id")) == dest), None)
+    if row is None:
+        await msg.answer("You can only manage consent for a destination you registered.")
+        return
+    if action == "off":
+        ads.revoke_consent(dest, owner_id=uid, reason="owner opted out via /ads off")
+        await msg.answer(f"⛔ {dest} opted out of advertising. Any pending ads for it were cancelled.")
+        return
+    if terms is None:
+        await msg.answer("No advertising terms are published yet.")
+        return
+    blocked = _enforcement_block(uid, "campaigns", dest)
+    if blocked:
+        await msg.answer(blocked)
+        return
+    try:
+        ads.grant_consent(dest, owner_id=uid, terms_version=terms["version"],
+                          categories=row.get("categories") or [])
+    except AdPolicyError as exc:
+        await msg.answer(f"⚠ {exc}")
+        return
+    await msg.answer(f"✅ {dest} opted in to advertising under terms v{terms['version']} "
+                     f"(categories: {', '.join(row.get('categories') or ['any'])}). "
+                     "Use /ads off to withdraw at any time.")
+
+
+@dp.message(Command("appeal"))
+async def appeal_cmd(msg: types.Message):
+    """Let a restricted member put their side on the record. Filing an appeal
+    changes nothing by itself — a human decides, and only the owner can
+    overturn an enforcement action."""
+    uid = _uid(msg)
+    statement = (msg.text or "").split(maxsplit=1)[1].strip() if len((msg.text or "").split(maxsplit=1)) > 1 else ""
+    if not statement:
+        await msg.answer("Usage: /appeal <your explanation>\n"
+                         "Tell us why the restriction is a mistake. A human reviews every appeal.")
+        return
+    if len(statement) > 1500:
+        await msg.answer("Please keep your appeal under 1500 characters.")
+        return
+    # Appeal against whichever of the member's records is currently enforced.
+    subjects = [(uid, "user")] + [(row.get("username") or row.get("chat_id"), "channel")
+                                  for row in channels.mine(uid)]
+    target = next(((eid, etype) for eid, etype in subjects
+                   if eid and enforcement.get(eid, etype)["state"] != "ACTIVE"), None)
+    if target is None:
+        await msg.answer("✅ Nothing to appeal — your account and channels are active.")
+        return
+    try:
+        item = enforcement.appeal(target[0], target[1], submitted_by=uid, statement=statement)
+    except EnforcementError as exc:
+        await msg.answer(f"⚠ {exc}")
+        return
+    await msg.answer(f"📨 Appeal {item['appeal_id']} filed for {target[1]} {target[0]}. "
+                     "A human will review it; you'll be notified of the decision.")
+    owner_notify(f"📨 New appeal {item['appeal_id']} from {_uname(msg)} ({target[1]} {target[0]}). "
+                 "Review it in the Admin Mini App.")
+
+
 @dp.message(Command("reports"))
 async def view_reports(msg: types.Message):
     if not _can_panel(msg.from_user.id, "reward"):
@@ -3626,7 +4102,10 @@ async def schedule_direct(msg: types.Message):
     rec = sched.schedule(at=at, target=target, sender=pending.get("user", _uname(msg)),
                          from_chat_id=pending.get("from_chat_id"),
                          from_message_id=pending.get("from_message_id"),
-                         post_type=pending.get("post_type", "General"))
+                         post_type=pending.get("post_type", "General"),
+                         origin_chat_id=pending.get("origin_chat_id"),
+                         origin_message_id=pending.get("origin_message_id"),
+                         origin_kind=pending.get("origin_kind"))
     await msg.answer(f"⏰ Scheduled #{rec['id']} to {target} at {day_str} {hm} UTC.")
     audit.record(bot="reward", sender=pending.get("user", _uname(msg)),
                  target_channel=target, mode="direct", status="scheduled",
@@ -3636,10 +4115,29 @@ async def schedule_direct(msg: types.Message):
 async def run_due():
     for rec in sched.due():
         try:
+            sender_uid = ledger._m(rec["sender"]).get("user_id") if rec.get("sender") else None
+            subjects = [(rec["target"], "channel")] + ([(sender_uid, "user")] if sender_uid else [])
+            decision = enforcement_gate.check_many(subjects, "automated_posting",
+                                                   is_owner=bool(sender_uid and roles.is_owner(int(sender_uid))))
+            if not decision:
+                if decision.safe_mode:
+                    # Safe mode pauses the machine; the slot is retried later.
+                    continue
+                sched.mark_done(rec["id"], note="blocked by enforcement — skipped")
+                audit.record(bot="reward", sender=rec["sender"], target_channel=rec["target"],
+                             mode="direct", status="failed", forward_valid=False,
+                             error="blocked by enforcement: " + decision.reason[:100])
+                continue
             if rec.get("from_chat_id") is not None and rec.get("from_message_id") is not None:
-                await bot.forward_message(chat_id=rec["target"],
-                                          from_chat_id=rec["from_chat_id"],
-                                          message_id=rec["from_message_id"])
+                try:
+                    # Legacy /schedule always fired with the platform bot; keep that and let Telegram judge.
+                    await _relay_forward(relay.Source.from_record(rec), rec["target"], platform_may_try=True)
+                except RelayUnavailable as exc:
+                    sched.mark_done(rec["id"], note=f"no legal relay route — {exc}"[:120])
+                    audit.record(bot="reward", sender=rec["sender"], target_channel=rec["target"],
+                                 mode="direct", status="failed", forward_valid=False, relay="unavailable",
+                                 error=str(exc)[:120])
+                    continue
             else:
                 # Forward-only: without the original message there is nothing
                 # genuine to deliver, so we do NOT post a fabricated stand-in.

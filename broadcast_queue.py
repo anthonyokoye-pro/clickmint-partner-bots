@@ -174,6 +174,19 @@ class BroadcastQueue:
             )
             return cur.rowcount == 1
 
+    def release(self, delivery_id: str, *, retry_seconds: int = 300) -> bool:
+        """Return a claimed delivery to pending WITHOUT counting the attempt.
+
+        Used when the worker itself decides not to send (e.g. safe mode) —
+        that is not a delivery failure and must not burn the retry budget."""
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE broadcast_recipients SET status='pending',attempts=MAX(attempts-1,0),next_attempt_at=? "
+                "WHERE delivery_id=? AND status='processing'",
+                (int(time.time()) + max(1, retry_seconds), delivery_id),
+            )
+            return cur.rowcount == 1
+
     def fail(self, delivery_id: str, error: str, *, blocked: bool = False,
              retry_seconds: int = 60) -> bool:
         with self._tx() as conn:

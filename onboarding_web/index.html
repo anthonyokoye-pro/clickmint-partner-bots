@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Connect your bot · ClickMint</title>
+  <link rel="stylesheet" href="/admin_web/styles.css">
+  <style>
+    .hint{font-size:.9em;opacity:.8;margin:.5em 0}
+    .steps li{margin:.35em 0}
+    input[type=password]{width:100%;font-family:monospace;letter-spacing:.05em}
+    .ok{color:#2e7d32}.err{color:#c62828}
+  </style>
+</head>
+<body>
+  <main id="app" aria-live="polite">
+    <header class="topbar"><div><span class="eyebrow">CLICKMINT</span><h1>Connect your bot</h1></div></header>
+    <p id="notice" class="notice">Authenticating with Telegram…</p>
+    <section class="panel" id="status-panel"><div class="panel-head"><h2>Current connection</h2><span id="conn-pill" class="pill">…</span></div><div id="status" class="list"></div></section>
+    <section class="panel">
+      <div class="panel-head"><h2>Connect a bot token</h2></div>
+      <ol class="steps muted">
+        <li>Open <b>@BotFather</b> → <code>/newbot</code> (or <code>/token</code> for an existing bot).</li>
+        <li>Paste the token below. It is sent <b>only</b> to ClickMint over HTTPS, encrypted at rest, and never posted into any chat.</li>
+        <li>Then add your bot as an <b>administrator</b> of your channel/group and run <code>/register @name</code> in the bot.</li>
+      </ol>
+      <div class="compose">
+        <input id="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="text" placeholder="123456789:AA…" aria-label="Bot token">
+        <button id="connect">Connect securely</button>
+        <button id="disconnect" class="secondary">Disconnect</button>
+      </div>
+      <p class="hint">Never send your token as a chat message. If you already did, revoke it in @BotFather (<code>/revoke</code>) and paste the new one here.</p>
+      <p id="result" class="muted"></p>
+    </section>
+  </main>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="/onboarding_web/app.js"></script>
+</body>
+</html>

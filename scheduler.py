@@ -29,8 +29,10 @@ class Scheduler:
 
     def schedule(self, at: float, target: str, sender: str,
                  from_chat_id=None, from_message_id=None,
-                 post_type="General") -> dict:
-        """Add a posting to fire at unix time `at`. Returns its record."""
+                 post_type="General", **source_fields) -> dict:
+        """Add a posting to fire at unix time `at`. Returns its record.
+        Extra keyword fields (origin_chat_id/origin_message_id/origin_kind) are
+        persisted so relay.resolve can pick a legal route at fire time."""
         rec = {
             "id": uuid.uuid4().hex[:10],
             "at": float(at),
@@ -39,6 +41,7 @@ class Scheduler:
             "post_type": post_type,
             "from_chat_id": from_chat_id,
             "from_message_id": from_message_id,
+            **{k: v for k, v in source_fields.items() if k.startswith("origin_")},
             "fire_once": True,
             "done": False,
             "attempts": 0,
