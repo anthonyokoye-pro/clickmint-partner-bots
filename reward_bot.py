@@ -260,6 +260,7 @@ async def connect_bot_cmd(msg: types.Message):
     if len(parts) != 2:
         await msg.answer("Usage: /connectbot <token from BotFather>\nYour token is encrypted and never shown back.")
         return
+    previous = bot_credentials.public(msg.from_user.id)
     try:
         # Remove the token message immediately where Telegram permits it; tokens
         # must not remain visible in the conversation history.
@@ -271,6 +272,11 @@ async def connect_bot_cmd(msg: types.Message):
     except Exception as exc:
         await msg.answer(f"❌ Bot connection failed: {escape(str(exc))}")
         return
+    if previous and int(previous.get("bot_id", -1)) != int(identity.get("bot_id", -2)):
+        for row in channels.mine(msg.from_user.id):
+            channels.update(msg.from_user.id, row.get("chat_id") or row.get("username"),
+                            bot_added=False, status="DISCONNECTED", verified_state="DISCONNECTED",
+                            verification_reasons=["Connected bot changed; destination must be re-verified"])
     await msg.answer(f"✅ Connected @{escape(str(identity.get('username') or 'your bot'))}.\n"
                      "Now add it as an administrator with posting permission, then use /register @destination.")
 
