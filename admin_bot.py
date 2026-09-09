@@ -176,7 +176,9 @@ async def show_caps(cb):
             continue
         s = rperf.score(username)
         row = (rstore.get("managed_channels", {}) or {}).get(username)
-        connected = True if row is None else bool(row.get("bot_added"))
+        connected = bool(row and row.get("verified_state") == "VERIFIED"
+                         and row.get("bot_added") is True
+                         and row.get("status") == "ACTIVE")
         cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"),
                              connected=connected)
         cap_txt = "unlimited" if cap == -1 else str(cap)

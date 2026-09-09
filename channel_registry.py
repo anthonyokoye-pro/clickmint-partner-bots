@@ -43,7 +43,8 @@ class ChannelRegistry:
             **old, "chat_id": chat_id, "username": username,
             "owner_id": int(owner_id), "kind": kind, "categories": cats,
             "size": max(0, int(size)), "bot_added": bool(bot_added),
-            "status": old.get("status", "ACTIVE"),
+            "status": old.get("status", "ACTIVE" if bot_added else "REGISTERED"),
+            "verified_state": old.get("verified_state", "VERIFIED" if bot_added else "REGISTERED"),
             "band": old.get("band", "C" if not bot_added else "B"),
             "created_at": old.get("created_at", now), "updated_at": now,
         }
@@ -99,7 +100,9 @@ class ChannelRegistry:
         row["bot_added"] = bool(added)
         # Unverified destinations always start in the lowest band. They can
         # improve later through real delivery/statistics, never fabricated data.
+        row["verified_state"] = "VERIFIED" if added else "DISCONNECTED"
         if not added:
+            row["status"] = "DISCONNECTED"
             row["band"] = "C"
         row["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         self.store[self.key] = self._items(); self.store.sync(); return row

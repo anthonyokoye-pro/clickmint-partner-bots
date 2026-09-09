@@ -1086,7 +1086,10 @@ async def _reconcile_registered_channels(uid: int) -> list[str]:
         after = "ACTIVE" if verified else "DEGRADED"
         if before != after or bool(row.get("bot_added")) != bool(verified):
             channels.update(uid, row["chat_id"],
-                            bot_added=bool(verified), status=after)
+                            bot_added=bool(verified), status=after,
+                            verified_state="VERIFIED" if verified else "DEGRADED",
+                            verification_reasons=[] if verified else [reason or "verification failed"],
+                            last_verified_at=int(time.time()) if verified else row.get("last_verified_at"))
             _record_channel_state_change(row, before, after,
                                          reason or "permissions verified")
             label = row.get("username") or row.get("chat_id")
@@ -1240,12 +1243,18 @@ async def my_chat_member_changed(update: types.ChatMemberUpdated):
     """React immediately when Telegram changes the bot's membership or rights."""
     row = channels.get(update.chat.id)
     if not row:
+        row = next((item for item in channels.mine(update.from_user.id)
+                    if str(item.get("chat_id")) == str(update.chat.id)), None)
+    if not row:
         return
     verified, reason = await _verify_task_channel(row)
     status = "ACTIVE" if verified else "DEGRADED"
     previous = row.get("status", "ACTIVE")
-    channels.update(row["owner_id"], update.chat.id,
-                    bot_added=bool(verified), status=status)
+    channels.update(row["owner_id"], row.get("chat_id") or update.chat.id,
+                    bot_added=bool(verified), status=status,
+                    verified_state="VERIFIED" if verified else "DEGRADED",
+                    verification_reasons=[] if verified else [reason or "verification failed"],
+                    last_verified_at=int(time.time()) if verified else row.get("last_verified_at"))
     if previous != status:
         _record_channel_state_change(row, previous, status,
                                      reason or "permissions verified")
@@ -1361,7 +1370,9 @@ async def scan_cmd(msg: types.Message):
             lines.append(f"✅ {row['username']}: verified; {count:,} members/subscribers (Telegram API)")
         except Exception as exc:
             channels.update(msg.from_user.id, row["chat_id"],
-                            bot_added=False, status="DEGRADED")
+                            bot_added=False, status="DEGRADED",
+                            verified_state="DEGRADED",
+                            verification_reasons=[f"reconciliation failed: {type(exc).__name__}"])
             lines.append(f"⚠️ {row['username']}: reconciliation failed ({type(exc).__name__})")
     lines.append("\nViews/reactions/forwards are recorded only when a real stats provider "
                  "or channel observation is available; no numbers are invented.")
