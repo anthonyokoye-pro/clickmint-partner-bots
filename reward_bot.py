@@ -44,6 +44,7 @@ from features import (ReferralLedger, AvailablePostQueue, BubbleNotifier,
 from task_marketplace import TaskMarketplace, TaskUnavailable, TaskNotFound
 from channel_connection import TelegramPermissionSnapshot, verify_permissions
 from telegram_verification import BotCredentialStore, TelegramVerificationService, CredentialError
+import relay
 from credibility import tier_for_score
 from performance_snapshots import PerformanceSnapshotRepository
 from referral_ranking import ReferralRecord, rank_referrers, allocate_monthly_rewards
@@ -1146,6 +1147,7 @@ async def create_forwarded_task(cb: types.CallbackQuery):
             payload={
                 "source_chat_id": pending["from_chat_id"],
                 "source_message_id": pending["from_message_id"],
+                **relay.Source.from_record(pending).as_record(),
                 "source": pending.get("source", "unknown"),
                 "silent": pending.get("ntf") == "silent",
             },
@@ -1285,6 +1287,55 @@ async def _reconcile_registered_channels(uid: int) -> list[str]:
     return changes
 
 
+class RelayUnavailable(RuntimeError):
+    """No bot can legally forward this source to this destination."""
+
+
+_PLATFORM_BOT_ID: int | None = None
+
+
+def _platform_bot_id() -> int | None:
+    global _PLATFORM_BOT_ID
+    if _PLATFORM_BOT_ID is None:
+        try:
+            _PLATFORM_BOT_ID = int(str(BOT_TOKEN).split(":", 1)[0])
+        except (ValueError, AttributeError):
+            _PLATFORM_BOT_ID = None
+    return _PLATFORM_BOT_ID
+
+
+def _relay_plan(source: relay.Source, target, *, platform_may_try: bool = False) -> tuple[relay.Plan, dict | None]:
+    row = channels.get(target)
+    if not row:
+        return relay.Plan("unavailable", "", None, None, "destination is not registered"), None
+    dest = relay.destination_from_registry(row, platform_bot_id=_platform_bot_id(),
+                                           owner_rows=channels.mine(int(row["owner_id"])) if row.get("owner_id") is not None else [])
+    return relay.resolve(source, dest, platform_may_try=platform_may_try), row
+
+
+async def _relay_forward(source: relay.Source, target, *, silent: bool = False, platform_may_try: bool = False):
+    """Forward `source` to `target` with the ONE bot that can legally read it.
+
+    Returns (sent_message, plan). Raises RelayUnavailable when no route exists so
+    callers fail closed and audit the reason instead of posting a stand-in.
+    """
+    plan, row = _relay_plan(source, target, platform_may_try=platform_may_try)
+    if not plan.ok:
+        raise RelayUnavailable(plan.reason)
+    if plan.forwarder == "platform":
+        sent = await bot.forward_message(chat_id=target, from_chat_id=plan.from_chat_id,
+                                         message_id=int(plan.message_id), disable_notification=silent)
+        return sent, plan
+    owned_bot = telegram_verification.make_bot(telegram_verification.credentials.token(int(row["owner_id"])))
+    try:
+        sent = await owned_bot.forward_message(chat_id=target, from_chat_id=plan.from_chat_id,
+                                               message_id=int(plan.message_id), disable_notification=silent)
+        return sent, plan
+    finally:
+        if owned_bot is not bot:
+            await owned_bot.session.close()
+
+
 async def _execute_task_payload(task: dict, chat_id, owner_id: int):
     """Publish only content explicitly stored with the task.
 
@@ -1292,26 +1343,19 @@ async def _execute_task_payload(task: dict, chat_id, owner_id: int):
     platform-generated tasks. A title alone is never fabricated into a post.
     """
     payload = task.get("payload") or {}
-    # Same factory seam the verification service uses, so the owner-bot path
-    # is one code path in production and mockable offline.
-    owned_bot = telegram_verification.make_bot(telegram_verification.credentials.token(int(owner_id)))
-    try:
-        source_chat_id = payload.get("source_chat_id")
-        source_message_id = payload.get("source_message_id")
-        if source_chat_id is not None and source_message_id is not None:
-            return await owned_bot.forward_message(
-                chat_id=chat_id,
-                from_chat_id=source_chat_id,
-                message_id=int(source_message_id),
-                disable_notification=bool(payload.get("silent", False)),
-            )
-        text = payload.get("text")
-        if text:
+    source = relay.Source.from_record(payload)
+    if source.has_inbox or source.has_channel_origin:
+        sent, _plan = await _relay_forward(source, chat_id, silent=bool(payload.get("silent", False)))
+        return sent
+    text = payload.get("text")
+    if text:
+        owned_bot = telegram_verification.make_bot(telegram_verification.credentials.token(int(owner_id)))
+        try:
             return await owned_bot.send_message(chat_id, text, parse_mode="HTML")
-        raise ValueError("task has no executable Telegram payload")
-    finally:
-        if owned_bot is not bot:
-            await owned_bot.session.close()
+        finally:
+            if owned_bot is not bot:
+                await owned_bot.session.close()
+    raise ValueError("task has no executable Telegram payload")
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("task:claim:"))
@@ -2305,6 +2349,7 @@ async def on_forward(msg: types.Message):
     # ordered first; claimed history is retained for audit/new-member delivery.
     queue_item = {"id": f"{msg.chat.id}:{msg.message_id}",
                   "source_chat_id": msg.chat.id, "source_message_id": msg.message_id,
+                  **relay.Source.from_message(msg).as_record(),
                   "sender": u, "category": cat,
                   "related_categories": [c for c in POST_CATEGORIES if c != cat]}
     available.add(queue_item, owner=ledger._is_exempt(u))
@@ -2348,10 +2393,10 @@ def _submitted_text(msg) -> str:
 def _pending_from(msg, u: str, cat: str, sess: dict, owner_exempt: bool = False) -> dict:
     """Snapshot of the post being distributed.
 
-    We remember the copy the member forwarded INTO the bot chat
-    (chat_id + message_id). Re-forwarding that keeps Telegram's original
-    attribution header, and unlike forwarding from the source channel it works
-    without the bot being a member of that channel.
+    We remember BOTH the copy the member forwarded into this bot's inbox
+    (only the platform bot can re-forward that) and the origin channel message
+    (only a bot that administers the origin can forward that). `relay.resolve`
+    picks the legal route per destination; see relay.py.
     """
     return {
         "user": u, "tier": ledger.balance(u)["tier"], "post_type": cat,
@@ -2361,6 +2406,7 @@ def _pending_from(msg, u: str, cat: str, sess: dict, owner_exempt: bool = False)
         "ntf": sess.get("ntf", "silent"),
         "from_chat_id": msg.chat.id,
         "from_message_id": msg.message_id,
+        **relay.Source.from_message(msg).as_record(),
         "owner_exempt": owner_exempt,
     }
 
@@ -2516,7 +2562,10 @@ async def pick_spend(cb: types.CallbackQuery):
                          target_channel=target, mode="chain", status="offered",
                          forward_valid=True, style=style,
                          source_chat_id=pending.get("from_chat_id"),
-                         source_message_id=pending.get("from_message_id"))
+                         source_message_id=pending.get("from_message_id"),
+                         origin_chat_id=pending.get("origin_chat_id"),
+                         origin_message_id=pending.get("origin_message_id"),
+                         origin_kind=pending.get("origin_kind"))
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ Agree (forward it)", callback_data=f"chain:agree:{sender}"),
                  InlineKeyboardButton(text="❌ Disagree (skip)", callback_data=f"chain:dis:{sender}")],
@@ -2560,23 +2609,24 @@ async def direct_deliver(cb, sender, target, pending, style="fwd", silent=False)
     if not destination or not channels.participation_allowed(target):
         await cb.message.answer(f"⚠ Destination {target} is not currently verified.")
         return
-    from aiogram import Bot as TelegramBot
-    owned_bot = TelegramBot(token=telegram_verification.credentials.token(int(destination["owner_id"])))
     try:
-        sent = await owned_bot.forward_message(chat_id=target, from_chat_id=f_chat_id,
-                                                message_id=f_msg_id,
-                                                disable_notification=silent)
+        _sent, plan = await _relay_forward(relay.Source.from_record(pending), target, silent=silent)
         perf.mark_posted(target)
         audit.record(bot="reward", sender=sender, target_channel=target,
-                     mode="direct", status="delivered", forward_valid=True, style=style)
+                     mode="direct", status="delivered", forward_valid=True, style=style, relay=plan.route)
         await cb.message.answer(f"⚡ Auto-posted to {target} (direct, {style}).")
+    except RelayUnavailable as e:
+        audit.record(bot="reward", sender=sender, target_channel=target,
+                     mode="direct", status="failed", forward_valid=False, relay="unavailable",
+                     error=str(e)[:120])
+        await cb.message.answer(f"⚠ Direct delivery to {target} isn't possible: {e}. "
+                                "The owner can add the platform bot as admin, or accept it as a chain offer.")
     except Exception as e:
+        info = classify_telegram_error(e)
         audit.record(bot="reward", sender=sender, target_channel=target,
                      mode="direct", status="offered", forward_valid=True,
-                     error=str(e)[:120])
-        await cb.message.answer(f"Direct delivery to {target} failed ({e}). Fell back to offer.")
-    finally:
-        await owned_bot.session.close()
+                     error=f"{info.kind.value}: {str(e)[:100]}")
+        await cb.message.answer(f"Direct delivery to {target} failed ({info.kind.value}). Fell back to offer.")
 
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("chain:"))
@@ -2611,17 +2661,19 @@ async def chain_delivery(cb: types.CallbackQuery):
             await cb.answer()
             return
         if offered.get("source_chat_id") and offered.get("source_message_id"):
+            # forwardMessage preserves keyboard, caption, media and attribution.
+            # Which bot forwards is decided by relay.resolve — the agreeing
+            # owner's bot can only forward from an origin channel it administers.
             try:
-                # Telegram's forwardMessage preserves the original message's inline
-                # keyboard, caption, media, and attribution. Never rebuild it as
-                # plain text: that silently drops inline buttons.
-                await bot.forward_message(
-                    chat_id=target,
-                    from_chat_id=offered["source_chat_id"],
-                    message_id=offered["source_message_id"],
-                    disable_notification=False)
+                # The platform bot posted this offer inside `target`, so it acts as itself here.
+                _sent, plan = await _relay_forward(relay.Source.from_record(offered), target, platform_may_try=True)
+            except RelayUnavailable as exc:
+                audit.record(bot="reward", sender=sender, target_channel=target, mode="chain",
+                             status="failed", forward_valid=False, relay="unavailable", error=str(exc)[:120])
+                await cb.answer(f"Can't forward to {target}: {str(exc)[:150]}", show_alert=True)
+                return
             except Exception as exc:
-                await cb.answer(f"Could not forward to {target}: {str(exc)[:80]}",
+                await cb.answer(f"Could not forward to {target}: {classify_telegram_error(exc).kind.value}",
                                 show_alert=True)
                 return
         # Older offers created before source ids were persisted can still be
@@ -3989,7 +4041,10 @@ async def schedule_direct(msg: types.Message):
     rec = sched.schedule(at=at, target=target, sender=pending.get("user", _uname(msg)),
                          from_chat_id=pending.get("from_chat_id"),
                          from_message_id=pending.get("from_message_id"),
-                         post_type=pending.get("post_type", "General"))
+                         post_type=pending.get("post_type", "General"),
+                         origin_chat_id=pending.get("origin_chat_id"),
+                         origin_message_id=pending.get("origin_message_id"),
+                         origin_kind=pending.get("origin_kind"))
     await msg.answer(f"⏰ Scheduled #{rec['id']} to {target} at {day_str} {hm} UTC.")
     audit.record(bot="reward", sender=pending.get("user", _uname(msg)),
                  target_channel=target, mode="direct", status="scheduled",
@@ -4013,9 +4068,15 @@ async def run_due():
                              error="blocked by enforcement: " + decision.reason[:100])
                 continue
             if rec.get("from_chat_id") is not None and rec.get("from_message_id") is not None:
-                await bot.forward_message(chat_id=rec["target"],
-                                          from_chat_id=rec["from_chat_id"],
-                                          message_id=rec["from_message_id"])
+                try:
+                    # Legacy /schedule always fired with the platform bot; keep that and let Telegram judge.
+                    await _relay_forward(relay.Source.from_record(rec), rec["target"], platform_may_try=True)
+                except RelayUnavailable as exc:
+                    sched.mark_done(rec["id"], note=f"no legal relay route — {exc}"[:120])
+                    audit.record(bot="reward", sender=rec["sender"], target_channel=rec["target"],
+                                 mode="direct", status="failed", forward_valid=False, relay="unavailable",
+                                 error=str(exc)[:120])
+                    continue
             else:
                 # Forward-only: without the original message there is nothing
                 # genuine to deliver, so we do NOT post a fabricated stand-in.

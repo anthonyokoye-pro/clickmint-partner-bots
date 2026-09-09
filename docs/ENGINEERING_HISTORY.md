@@ -90,3 +90,9 @@ appeal decisions are delivered to the member via the outbox.
 **Decision:** Single `DestinationStateMachine` (`destination_state.py`) with an explicit legal-edge table, derived `status`, mandatory reason+source, and a per-row history. Structured `classify_telegram_error` chooses the target state (revoked / inaccessible / disconnected / degraded) and whether to back off. Background re-verification is schedule-driven per state with a bounded batch and pauses in safe mode. Owners get inline Re-verify/Details/Remove controls in `/mychannels`.
 
 **Not done here:** live Telegram integration tests — they require real bot tokens and a test channel, which this environment does not have.
+
+## 2026-09-09 — Source-message relay architecture
+
+**Finding:** Owner-bot delivery paths forwarded from the member's private chat with the *platform* bot. A bot cannot read another bot's private chats, so every owner-bot forward would fail live with "message to forward not found". The offline mock accepted every `ForwardMessage`, hiding it.
+
+**Decision:** `relay.py` resolves one legal route per destination — platform bot forwards its inbox copy when it administers the destination; owner's bot forwards from the origin channel only when it administers that channel; otherwise fail closed with audit. No `copyMessage`, no rebuilt posts, no MTProto. The mock session now enforces Telegram's read rule so this class of bug cannot regress silently. See `docs/RELAY_ARCHITECTURE.md`.

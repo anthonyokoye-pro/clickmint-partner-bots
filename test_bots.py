@@ -62,10 +62,22 @@ class MockSession(BaseSession):
     async def stream_content(self, *args, **kwargs):    # pragma: no cover
         yield b""
 
+    # Telegram semantics the old mock ignored: a bot can only forward a message it
+    # can read. Inbox copies belong to the bot whose token received them. Set
+    # `visible_chats[token_prefix]` to the chat ids that bot may read from; when a
+    # bot forwards from anything else we raise like Telegram does. Unset → lenient.
+    visible_chats: dict | None = None
+
     async def make_request(self, bot, method, timeout=None):
         name = type(method).__name__
         data = method.model_dump(exclude_none=True)
         self.calls.append((name, data))
+        if name == "ForwardMessage" and self.visible_chats is not None:
+            from aiogram.exceptions import TelegramBadRequest
+            who = str(bot.token).split(":", 1)[0]
+            allowed = {str(c) for c in self.visible_chats.get(who, ())}
+            if str(data.get("from_chat_id")) not in allowed:
+                raise TelegramBadRequest(method=method, message="Bad Request: message to forward not found")
         if name in ("SendMessage", "ForwardMessage", "EditMessageText"):
             return Message(message_id=len(self.calls) + 1000,
                            date=dt.datetime.now(dt.timezone.utc),
@@ -424,6 +436,71 @@ def test_destination_inline_controls_and_background_reverify():
     assert_no_errors(errs, "remove tap")
     assert reward_bot.channels.get("@alice") is None
     print("OK inline re-verify + scheduled background re-verification")
+
+
+def test_direct_delivery_uses_a_bot_that_can_read_the_source():
+    """Regression for the relay bug: with Telegram's read rules enforced by the mock,
+    the owner's bot must never be asked to forward the platform bot's inbox copy.
+    Route 1: platform bot administers the destination → platform forwards.
+    Route 2: owner bot administers the ORIGIN channel → owner forwards from origin.
+    Otherwise: fail closed, audited, no fabricated post."""
+    from aiogram.types import MessageOriginChannel
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    _register(reward_bot, "bob", 1002, 2500)
+    reward_bot.ledger.earn("@alice")
+    for u in ("@alice", "@bob"):
+        reward_bot.perf.mark_offered(u); reward_bot.perf.mark_posted(u)
+    reward_bot.ledger.grant_direct("@bob")
+    # bob's own bot (9002) is connected; the platform bot is 111111.
+    reward_bot.bot_credentials.save(1002, "9002:test-token", {"id": 9002, "username": "bobbot"})
+    from aiogram import Bot as TgBot
+    owner_bot = TgBot(token="9002:test-token"); owner_bot.session = s
+    reward_bot.telegram_verification.bot_factory = lambda token: owner_bot
+    # Strict Telegram semantics: platform bot can read alice's private chat (1001);
+    # bob's bot can read only the channel it administers (-100777).
+    s.visible_chats = {"111111": {1001}, "9002": {-100777}}
+    run(feed(reward_bot, make_callback("terms:accept", 1001, "alice")))
+    run(feed(reward_bot, make_callback("cat:Airdrops", 1001, "alice")))
+
+    def submit_and_route(origin=None):
+        msg = make_message("A verified airdrop guide.", uid=1001, username="alice", forwarded=True)
+        if origin is not None:
+            msg = msg.model_copy(update={"forward_origin": origin})
+        errs = run(feed(reward_bot, msg)); assert_no_errors(errs, "forward")
+        s.reset()
+        errs = run(feed(reward_bot, make_callback("s:1", 1001, "alice"))); assert_no_errors(errs, "route")
+        return [(n, d) for n, d in s.calls if n == "ForwardMessage"]
+
+    # Case A — bob's destination verified with HIS bot, origin is a user forward:
+    # nobody can legally forward → no ForwardMessage succeeds, audit says why.
+    reward_bot.channels.update(1002, "@bob", telegram_bot_id=9002)
+    fwds = submit_and_route()
+    assert not fwds, f"a forward was attempted with no legal route: {fwds}"
+    last = reward_bot.audit.all()[-1]
+    assert last["status"] == "failed" and last.get("relay") == "unavailable", last
+    assert "isn't possible" in s.texts()
+
+    # Case B — origin is a channel bob's bot administers → bob's bot forwards from origin.
+    reward_bot.channels.add(1002, "-100777", "@bobnews", "channel", ["General"], size=100, bot_added=True)
+    reward_bot.channels.update(1002, "-100777", verified_state="VERIFIED", status="ACTIVE", canonical_chat_id=-100777)
+    origin = MessageOriginChannel(type="channel", date=dt.datetime.now(dt.timezone.utc),
+                                  chat=Chat(id=-100777, type="channel", title="Bob News"), message_id=9)
+    reward_bot.ledger.earn("@alice")
+    fwds = submit_and_route(origin)
+    assert fwds and fwds[-1][1]["from_chat_id"] == -100777 and fwds[-1][1]["message_id"] == 9, fwds
+    assert reward_bot.audit.all()[-1].get("relay") == "owner_origin"
+
+    # Case C — bob's destination is administered by the PLATFORM bot → platform forwards inbox copy.
+    reward_bot.channels.update(1002, "@bob", telegram_bot_id=111111)
+    reward_bot.ledger.earn("@alice")
+    fwds = submit_and_route()
+    assert fwds and fwds[-1][1]["from_chat_id"] == 1001, fwds
+    assert reward_bot.audit.all()[-1].get("relay") == "platform"
+    s.visible_chats = None
+    reward_bot.telegram_verification.bot_factory = None
+    print("OK direct delivery is routed to the one bot that can read the source; otherwise fails closed")
 
 
 def test_report_is_filed_pending_for_a_human():
@@ -1011,6 +1088,7 @@ ALL_TESTS = [
     test_chain_agree_credits_the_sharer_not_the_sender,
     test_destination_inline_controls_and_background_reverify,
     test_partnership_inline_controls_and_background_reverify,
+    test_direct_delivery_uses_a_bot_that_can_read_the_source,
     test_report_is_filed_pending_for_a_human,
     test_owner_bypasses_credits_caps_and_funnel,
     test_non_owner_cannot_route_to_all,
