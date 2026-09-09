@@ -227,19 +227,17 @@ def test_menus_build_without_positional_args():
 # ---------------------------------------------------------------------------
 # 2) Reward bot — registration, funnel, credits, caps
 # ---------------------------------------------------------------------------
-def test_start_registers_a_channel():
+def test_start_requires_user_bot_and_rejects_manual_count():
     s = _fresh_bot(reward_bot)
     errs = run(feed(reward_bot, make_message("/start @MyChan 1200", uid=1001)))
-    assert_no_errors(errs, "/start with args")
-    assert "@MyChan" in reward_bot.ledger.ledger
-    assert reward_bot.ledger.ledger["@MyChan"]["size"] == 1200
-    assert "Registered @MyChan" in s.texts()
-    # a typo answers with help instead of exploding
+    assert_no_errors(errs, "/start with manual count")
+    assert "@MyChan" not in reward_bot.ledger.ledger
+    assert "Telegram" in s.texts() or "Usage" in s.texts()
     s.reset()
     errs = run(feed(reward_bot, make_message("/register @Other twelve", uid=1002)))
-    assert_no_errors(errs, "/register with a bad number")
-    assert "not a number" in s.texts()
-    print("OK /start and /register actually register a channel")
+    assert_no_errors(errs, "/register with legacy count")
+    assert "Usage" in s.texts()
+    print("OK registration rejects manual counts and requires Telegram verification")
 
 
 def test_menu_and_cap_screens_render():
@@ -254,8 +252,17 @@ def test_menu_and_cap_screens_render():
 
 
 def _register(module, username: str, uid: int, size: int, **flags):
-    m = module.ledger.register("@" + username, size, **flags)
-    module.ledger.set_user_id("@" + username, uid)
+    handle = "@" + username
+    m = module.ledger.register(handle, size, **flags)
+    module.ledger.set_user_id(handle, uid)
+    # Test fixtures represent a destination that has completed the new
+    # user-owned-bot verification flow; manual ledger rows are intentionally
+    # not eligible for participation.
+    registry = getattr(module, "channels", None)
+    if registry is not None:
+        registry.add(uid, handle, handle, "channel", ["General"], size=size, bot_added=True)
+        registry.update(uid, handle, verified_state="VERIFIED", status="ACTIVE",
+                        telegram_member_count=size, telegram_member_count_source="telegram_api")
     return m
 
 
@@ -490,13 +497,14 @@ def test_partnership_start_and_contract():
     errs = run(feed(partnership_bot, make_message("/start @PartnerChan 3000", uid=2001,
                                                   username="partner")))
     assert_no_errors(errs, "partnership /start")
-    assert partnership_bot.ledger.ledger["@PartnerChan"]["is_partner"] is True
-    # a bad subscriber count must not raise out of the handler
+    assert "@PartnerChan" not in partnership_bot.ledger.ledger
+    assert "bot" in s.texts().lower() or "usage" in s.texts().lower()
+    # Manual counts are no longer accepted by the partnership bot either.
     s.reset()
     errs = run(feed(partnership_bot, make_message("/start @X lots", uid=2001,
                                                   username="partner")))
-    assert_no_errors(errs, "partnership /start with a bad number")
-    assert "Usage" in s.texts()
+    assert_no_errors(errs, "partnership /start with a legacy count")
+    assert "bot" in s.texts().lower() or "usage" in s.texts().lower()
     # a user with NO telegram username used to crash the contract flow ("@"+None)
     s.reset()
     errs = run(feed(partnership_bot, make_message("/contract", uid=2002, username=None)))
@@ -526,6 +534,12 @@ def test_partnership_offer_respects_receive_types_and_cap():
     other = partnership_bot.ledger.register("@doesnt", 2000, is_partner=True)
     other["receive_types"] = ["DeFi"]
     partnership_bot.ledger.save()
+    for handle, owner in (("@sender", 2010), ("@wants", 2020), ("@doesnt", 2030)):
+        partnership_bot.channels.add(owner, handle, handle, "channel", ["General"],
+                                      size=2000, bot_added=True)
+        partnership_bot.channels.update(owner, handle, verified_state="VERIFIED",
+                                        status="ACTIVE", telegram_member_count=2000,
+                                        telegram_member_count_source="telegram_api")
     run(feed(partnership_bot, make_callback("terms:accept", 2010, "sender")))
     run(feed(partnership_bot, make_callback("cat:Airdrops", 2010, "sender")))
     s.reset()
@@ -628,7 +642,7 @@ ALL_TESTS = [
     test_all_handlers_are_coroutines,
     test_expected_callbacks_are_registered,
     test_menus_build_without_positional_args,
-    test_start_registers_a_channel,
+    test_start_requires_user_bot_and_rejects_manual_count,
     test_menu_and_cap_screens_render,
     test_full_submission_funnel_distributes_and_charges,
     test_two_members_do_not_share_funnel_state,

@@ -17,8 +17,8 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
         /start
    🤖 → 1001
         Welcome to CLICKMINT. ⏎ To use the network, register your channel first: ⏎ Send: /register
-        @yourchannel <subscriber_count> ⏎ e.g.  /register @MyChan 1200
-        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Rank / leaderboard ]
+        /connectbot <BotFather token>, then /register @MyChan (Telegram retrieves the member count)
+        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Leaderboard ]
    ✓ a brand-new user is told how to register
 
 ━━ STEP 2: Everyone registers a channel ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -27,26 +27,26 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
    🤖 → 1001
         ✅ Registered @alphadrops — 12000 subs, tier T4, band C. ⏎ Daily post cap: 2 (size × performance,
         not size alone). ⏎ Credits: 2 (onboarding seed). Earn more by sharing other members' posts.
-        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Rank / leaderboard ]
+        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Leaderboard ]
    ✓ /register parses '@channel <subs>'
    👤 @bravoai sends
         /register @bravoai 4300
    🤖 → 1002
         ✅ Registered @bravoai — 4300 subs, tier T3, band C. ⏎ Daily post cap: 1 (size × performance, not
         size alone). ⏎ Credits: 2 (onboarding seed). Earn more by sharing other members' posts.
-        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Rank / leaderboard ]
+        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Leaderboard ]
    👤 @charliedefi sends
         /register @charliedefi 2600
    🤖 → 1003
         ✅ Registered @charliedefi — 2600 subs, tier T2, band C. ⏎ Daily post cap: 1 (size × performance,
         not size alone). ⏎ Credits: 2 (onboarding seed). Earn more by sharing other members' posts.
-        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Rank / leaderboard ]
+        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Leaderboard ]
    👤 @deltaguides sends
         /register @deltaguides 300
    🤖 → 1004
         ✅ Registered @deltaguides — 300 subs, tier T1, band C. ⏎ Daily post cap: 1 (size × performance,
         not size alone). ⏎ Credits: 2 (onboarding seed). Earn more by sharing other members' posts.
-        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Rank / leaderboard ]
+        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Leaderboard ]
    the audited build never parsed these args — everyone stayed at size 0
    👤 @alphadrops sends
         /balance
@@ -60,8 +60,8 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
         /start
    🤖 → 1001
         Welcome to CLICKMINT. ⏎ To use the network, register your channel first: ⏎ Send: /register
-        @yourchannel <subscriber_count> ⏎ e.g.  /register @MyChan 1200
-        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Rank / leaderboard ]
+        /connectbot <BotFather token>, then /register @MyChan (Telegram retrieves the member count)
+        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Leaderboard ]
    👤 @alphadrops taps
         [📤 Submit a post]  →  menu:submit
    🤖 ✎ 1001 (same screen)
@@ -231,8 +231,8 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
         /start
    🤖 → 1003
         Welcome to CLICKMINT. ⏎ To use the network, register your channel first: ⏎ Send: /register
-        @yourchannel <subscriber_count> ⏎ e.g.  /register @MyChan 1200
-        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Rank / leaderboard ]
+        /connectbot <BotFather token>, then /register @MyChan (Telegram retrieves the member count)
+        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Leaderboard ]
    👤 @charliedefi taps
         [📤 Submit a post]  →  menu:submit
    🤖 ✎ 1003 (same screen)
@@ -308,7 +308,7 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
    🤖 → 555000555
         🛠 Welcome, Owner. Your menu controls everyone — users, admins, contracts, and the
         reward/partnership networks.
-        [ 🛠 Owner Panel (controls everyone) ] [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Rank / leaderboard ]
+        [ 🛠 Owner Panel (controls everyone) ] [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Leaderboard ]
    ✓ the owner gets the owner menu
    👤 @clickminthq taps
         [🛠 Owner Panel (controls everyone)]  →  menu:owner
@@ -316,7 +316,7 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
         🚩 New report #1: @bravoai flagged @alphadrops. Review it in the admin panel.
    🤖 ✎ 555000555 (same screen)
         🛠 Owner Panel
-        [ 📁 Audit log ] [ 🚩 Pending reports ] [ 🧾 Review queue ] [ 🏆 Rank ] [ ⚡ Direct delivery ] [ ⏰ Scheduled ] [ 👤 Manage admins ] [ 📜 Post terms ] [ ⬅️ Back to main ]
+        [ 📁 Audit log ] [ 🚩 Pending reports ] [ 🧾 Review queue ] [ 🏆 Leaderboard ] [ ⚡ Direct delivery ] [ ⏰ Scheduled ] [ 👤 Manage admins ] [ 📜 Post terms ] [ ⬅️ Back to main ]
    👤 @clickminthq taps
         [🚩 Pending reports]  →  panel:reports
    🤖 ✎ 555000555 (same screen)
@@ -329,7 +329,7 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
         #1 confirmed: restrict.
    🤖 ✎ 555000555 (same screen)
         ✅ No pending reports.
-        [ 📁 Audit log ] [ 🚩 Pending reports ] [ 🧾 Review queue ] [ 🏆 Rank ] [ ⚡ Direct delivery ] [ ⏰ Scheduled ] [ 👤 Manage admins ] [ 📜 Post terms ] [ ⬅️ Back to main ]
+        [ 📁 Audit log ] [ 🚩 Pending reports ] [ 🧾 Review queue ] [ 🏆 Leaderboard ] [ ⚡ Direct delivery ] [ ⏰ Scheduled ] [ 👤 Manage admins ] [ 📜 Post terms ] [ ⬅️ Back to main ]
    ✓ only now — after a human acted — is Alpha restricted
 
 ━━ STEP 15: A member tries to open the owner panel ━━━━━━━━━━━━━━━━━━━━
@@ -350,8 +350,8 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
         /start
    🤖 → 1004
         Welcome to CLICKMINT. ⏎ To use the network, register your channel first: ⏎ Send: /register
-        @yourchannel <subscriber_count> ⏎ e.g.  /register @MyChan 1200
-        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Rank / leaderboard ]
+        /connectbot <BotFather token>, then /register @MyChan (Telegram retrieves the member count)
+        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Leaderboard ]
    👤 @deltaguides taps
         [📤 Submit a post]  →  menu:submit
    🤖 ✎ 1004 (same screen)
@@ -417,7 +417,7 @@ state dir: /tmp/clickmint-sim-17qhpd8r   owner user id: 555000555
         /start
    🤖 → 1002
         Partnership bot. Set your terms with /contract (what you ACCEPT & RECEIVE). Button menu below.
-        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Rank / leaderboard ]
+        [ 📤 Submit a post ] [ 📊 My post limit ] [ 🤝 Partnerships ] [ 📜 My contract ] [ 📁 Audit / Reports ] [ 🏆 Leaderboard ]
    ✓ partnership bot answers /start
    👤 @bravoai sends
         /partner @charliedefi
