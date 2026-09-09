@@ -37,6 +37,11 @@ class FakeMemberFailure(FakeBot):
         return {"status": "member"}
 
 
+class FakeRevoked(FakeBot):
+    async def get_chat(self, ref):
+        raise RuntimeError("Unauthorized: bot token is invalid")
+
+
 def store():
     return JsonStore(os.path.join(tempfile.mkdtemp(), "state.json"))
 
@@ -99,6 +104,15 @@ def test_verification_requires_admin_post_permission():
     assert result.eligible is False
     assert result.state == "DEGRADED"
     assert any("administrator" in reason for reason in result.reasons)
+
+
+def test_revoked_bot_token_requires_reconnect():
+    os.environ["CLICKMINT_CREDENTIAL_KEY"] = "test-secret"
+    c = BotCredentialStore(store())
+    c.save(10, "123:secret-token", {"id": 77, "username": "owner_bot"})
+    result = __import__('asyncio').run(TelegramVerificationService(c, bot_factory=FakeRevoked).verify(10, "@example"))
+    assert result.state == "REVOKED"
+    assert "reconnect" in result.reasons[0]
 
 
 def test_verification_retrieves_telegram_count():

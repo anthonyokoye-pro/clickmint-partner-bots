@@ -91,7 +91,7 @@ class BotCredentialStore:
             if not hmac.compare_digest(actual, base64.b64decode(record["mac"])):
                 raise CredentialError("stored Telegram bot credential failed integrity validation")
             return _crypt_bytes(ciphertext, nonce, key).decode()
-        except (InvalidTag, ValueError, KeyError, TypeError) as exc:
+        except (InvalidTag, ValueError, KeyError, TypeError, UnicodeError) as exc:
             raise CredentialError("stored Telegram bot credential failed integrity validation") from exc
 
     def remove(self, owner_id: int) -> bool:
@@ -190,9 +190,15 @@ class TelegramVerificationService:
                                      status, count, checked, tuple(reasons), permissions)
         except Exception as exc:
             text = str(exc).lower()
+            if any(x in text for x in ("unauthorized", "invalid token", "token is invalid")):
+                return VerificationResult("REVOKED", False, str(chat_ref), checked_at=checked,
+                                         reasons=("Telegram rejected this bot token; reconnect the bot with /connectbot.",))
             state = "INACCESSIBLE" if any(x in text for x in ("not found", "chat not found", "forbidden")) else "DEGRADED"
+            reason = ("Telegram could not access this destination; add the bot as an administrator and try again."
+                      if state == "INACCESSIBLE" else
+                      "Telegram is temporarily unavailable; retry verification.")
             return VerificationResult(state, False, str(chat_ref), checked_at=checked,
-                                     reasons=("Telegram could not access this destination; add the bot as an administrator and try again.",))
+                                     reasons=(reason,))
         finally:
             session = getattr(bot, "session", None); close = getattr(session, "close", None)
             if close:
