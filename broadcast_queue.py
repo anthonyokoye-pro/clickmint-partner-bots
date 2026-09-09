@@ -173,12 +173,29 @@ class BroadcastQueue:
                 result.append(dict(item))
             return result
 
+    @staticmethod
+    def _refresh_campaign_status(conn, campaign_id: str) -> None:
+        row = conn.execute(
+            "SELECT status FROM broadcast_campaigns WHERE campaign_id=?", (campaign_id,)
+        ).fetchone()
+        if not row or row["status"] not in {"queued", "running"}:
+            return
+        open_count = conn.execute(
+            "SELECT COUNT(*) FROM broadcast_recipients WHERE campaign_id=? AND status IN ('pending','processing')",
+            (campaign_id,),
+        ).fetchone()[0]
+        if int(open_count) == 0:
+            conn.execute("UPDATE broadcast_campaigns SET status='completed' WHERE campaign_id=?", (campaign_id,))
+
     def complete(self, delivery_id: str, telegram_message_id: int) -> bool:
         with self._tx() as conn:
+            row = conn.execute("SELECT campaign_id FROM broadcast_recipients WHERE delivery_id=?", (delivery_id,)).fetchone()
             cur = conn.execute(
                 "UPDATE broadcast_recipients SET status='sent',telegram_message_id=?,sent_at=? WHERE delivery_id=? AND status='processing'",
                 (int(telegram_message_id), int(time.time()), delivery_id),
             )
+            if cur.rowcount == 1 and row:
+                self._refresh_campaign_status(conn, row["campaign_id"])
             return cur.rowcount == 1
 
     def release(self, delivery_id: str, *, retry_seconds: int = 300) -> bool:
@@ -214,11 +231,14 @@ class BroadcastQueue:
             attempts = int(row["attempts"])
             terminal = blocked or attempts >= int(max_attempts)
             status = "blocked" if blocked else ("failed" if terminal else "pending")
+            row = conn.execute("SELECT campaign_id FROM broadcast_recipients WHERE delivery_id=?", (delivery_id,)).fetchone()
             cur = conn.execute(
                 "UPDATE broadcast_recipients SET status=?,last_error=?,next_attempt_at=? WHERE delivery_id=? AND status='processing'",
                 (status, str(error)[:500],
                  int(time.time()) + (0 if terminal else max(1, retry_seconds)), delivery_id),
             )
+            if cur.rowcount == 1 and terminal and row:
+                self._refresh_campaign_status(conn, row["campaign_id"])
             return cur.rowcount == 1
 
     def recover_stale_processing(self, *, older_than_seconds: int = 900,

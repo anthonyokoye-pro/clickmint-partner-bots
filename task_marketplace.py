@@ -355,6 +355,31 @@ class TaskMarketplace:
                 (str(user_id), str(destination_id), int(since)),
             ).fetchone()[0])
 
+    def reconcile(self) -> dict:
+        """Repair derived task states and expire stale claims atomically.
+
+        Claims/completions are the durable facts. ``tasks.status`` is a derived
+        index used for discovery, so this method makes it safe to run after a
+        crash or manual database restore.
+        """
+        now = self._now()
+        with self._tx() as conn:
+            expired_tasks, expired_claims, reopened = self._expire_tasks_tx(conn, now)
+            full = conn.execute(
+                "UPDATE tasks SET status='full' WHERE status='published' "
+                "AND (SELECT COUNT(*) FROM task_claims c WHERE c.task_id=tasks.task_id "
+                "AND c.status IN ('claimed','completed')) >= required_performers"
+            ).rowcount
+            reopened += conn.execute(
+                "UPDATE tasks SET status='published' WHERE status='full' "
+                "AND (expires_at IS NULL OR expires_at>?) "
+                "AND (SELECT COUNT(*) FROM task_claims c WHERE c.task_id=tasks.task_id "
+                "AND c.status IN ('claimed','completed')) < required_performers",
+                (now,),
+            ).rowcount
+            return {"expired_tasks": expired_tasks, "expired_claims": expired_claims,
+                    "marked_full": full, "reopened_tasks": reopened}
+
     def progress(self, task_id: str) -> dict:
         with self._connect() as conn:
             task = conn.execute("SELECT * FROM tasks WHERE task_id=?", (task_id,)).fetchone()

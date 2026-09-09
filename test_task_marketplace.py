@@ -112,6 +112,21 @@ def test_recovery_expires_claim_and_reopens_capacity():
         directory.cleanup()
 
 
+def test_reconcile_repairs_derived_full_state():
+    directory, repo = fresh()
+    try:
+        task_id = repo.create_task(creator_user_id=1, category="Guides", title="Repair", required_performers=1)
+        repo.publish(task_id)
+        claim = repo.claim(task_id, user_id=10, destination_id="channel-a")
+        with repo._tx() as conn:
+            conn.execute("UPDATE tasks SET status='published' WHERE task_id=?", (task_id,))
+        result = repo.reconcile()
+        assert result["marked_full"] == 1
+        assert repo.get_task(task_id)["status"] == "full"
+    finally:
+        directory.cleanup()
+
+
 def test_releasing_last_claim_reopens_full_task():
     directory, repo = fresh()
     try:
@@ -159,6 +174,7 @@ if __name__ == "__main__":
         test_user_cannot_claim_same_task_twice,
         test_claim_count_since_supports_daily_limits,
         test_recovery_expires_claim_and_reopens_capacity,
+        test_reconcile_repairs_derived_full_state,
         test_releasing_last_claim_reopens_full_task,
         test_expired_claim_cannot_complete,
     ):

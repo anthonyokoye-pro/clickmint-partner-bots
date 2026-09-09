@@ -35,6 +35,27 @@ def test_draft_delete_prevents_queueing():
             raise AssertionError("deleted draft remained queueable")
 
 
+def test_campaign_completes_only_after_all_deliveries_are_terminal():
+    with tempfile.TemporaryDirectory() as directory:
+        queue = BroadcastQueue(Path(directory) / "broadcast.sqlite3")
+        campaign_id = queue.create_campaign(bot_scope="reward", created_by=1, payload={"text": "hi"})
+        queue.queue_campaign(campaign_id, [10, 11])
+        claimed = queue.claim(limit=5)
+        assert queue.complete(claimed[0]["delivery_id"], 100)
+        assert queue.get_campaign(campaign_id)["status"] == "queued"
+        assert queue.fail(claimed[1]["delivery_id"], "blocked", blocked=True)
+        assert queue.get_campaign(campaign_id)["status"] == "completed"
+
+
+def test_invalid_campaign_transitions_are_rejected():
+    with tempfile.TemporaryDirectory() as directory:
+        queue = BroadcastQueue(Path(directory) / "broadcast.sqlite3")
+        campaign_id = queue.create_campaign(bot_scope="reward", created_by=1, payload={"text": "hi"})
+        assert not queue.pause(campaign_id)
+        assert not queue.resume(campaign_id)
+        assert queue.cancel(campaign_id) == 0
+
+
 def test_retry_budget_becomes_terminal_and_stale_workers_are_recovered():
     with tempfile.TemporaryDirectory() as directory:
         queue = BroadcastQueue(Path(directory) / "broadcast.sqlite3")
@@ -69,6 +90,8 @@ def test_release_returns_delivery_without_burning_an_attempt():
 if __name__ == "__main__":
     for test_case in (test_named_draft_edit_delete_and_queue_boundaries,
                       test_draft_delete_prevents_queueing,
+                      test_campaign_completes_only_after_all_deliveries_are_terminal,
+                      test_invalid_campaign_transitions_are_rejected,
                       test_retry_budget_becomes_terminal_and_stale_workers_are_recovered,
                       test_release_returns_delivery_without_burning_an_attempt):
         test_case()

@@ -100,6 +100,15 @@ class WorkerScope:
     burst: int = 1
 
 
+def admit_delivery(store: WorkerStore, scope: str, item: dict, *, rate_per_second: float, burst: int) -> bool:
+    """Centralized admission helper for existing bot loops during extraction."""
+    bucket = f"{scope}:{item.get('recipient_id', 'global')}"
+    allowed = store.acquire(bucket, rate_per_second=rate_per_second, burst=burst)
+    if not allowed:
+        store.record(scope, "rate_limited")
+    return allowed
+
+
 class UnifiedDeliveryWorker:
     """Run all registered delivery scopes with one operational policy."""
     def __init__(self, store: WorkerStore, *, batch_size: int = 20):

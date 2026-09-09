@@ -36,7 +36,7 @@ import config
 import relay
 import ui
 from platform_store import DeliveryAudit, SharedKV
-from delivery_worker import WorkerStore
+from delivery_worker import WorkerStore, admit_delivery
 
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = config.PARTNER_BOT_TOKEN
@@ -840,10 +840,10 @@ async def _process_partnership_broadcasts():
         return
     for delivery in broadcasts.claim(limit=20, bot_scope="partnership"):
         try:
-            bucket = f"partnership:{delivery['recipient_id']}"
-            if not worker_store.acquire(bucket, rate_per_second=config.WORKER_RATE_PER_SECOND, burst=config.WORKER_RATE_BURST):
+            if not admit_delivery(worker_store, "partnership", delivery,
+                                  rate_per_second=config.WORKER_RATE_PER_SECOND,
+                                  burst=config.WORKER_RATE_BURST):
                 broadcasts.fail(delivery["delivery_id"], "central delivery rate limit", retry_seconds=1)
-                worker_store.record("partnership", "rate_limited")
                 continue
             started = time.perf_counter()
             if not enforcement_gate.check(delivery["recipient_id"], "user", "campaigns"):

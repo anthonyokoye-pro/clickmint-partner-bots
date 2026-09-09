@@ -77,22 +77,16 @@ clicks buttons **by their label**, so a dead button or a missing menu entry fail
 mocked session, so a dead handler, an unrenderable menu or a broken funnel is caught before
 deploy.
 
-> **CI note:** `.github/workflows/tests.yml` in this working tree already runs all four
-> checks, but that file is **not pushed** — GitHub refuses workflow edits from the
-> assistant's app ("without `workflows` permission"). Commit it yourself:
-> ```bash
-> git add .github/workflows/tests.yml
-> git commit -m "CI: run the bot wiring suite + branding check"
-> git push
-> ```
-> (Or paste the same two steps into the file via GitHub's web editor.)
+> **CI:** `.github/workflows/tests.yml` installs `requirements.txt` and runs the
+> dependency-aware `run_all_tests.py` suite. Local runs should use the same
+> environment, for example `/tmp/cmvenv/bin/python run_all_tests.py`.
 
 ## 5. Files
 | File | Purpose |
 |---|---|
 | `core.py` | The engine: tiering, credit ledger, earn/spend, anti-cheat, **report system**, **performance engine**, contract, distribution. Verified. |
 | `store.py` | Legacy JSON persistence for existing network state. |
-| `mint_ledger.py` | Transactional Mint/referral/posting foundation backed by SQLite; migrate to PostgreSQL before scale. |
+| `mint_ledger.py` | Canonical transactional Mint/user account source backed by SQLite; legacy JSON is migration metadata, not authority. |
 | `migrate_mint.py` | Additive migration and balance verification from the legacy JSON ledger. |
 | `reward_bot.py` | aiogram wiring for reward bot. |
 | `partnership_bot.py` | aiogram wiring for partnership bot. |
@@ -103,6 +97,8 @@ deploy.
 | `branding.py` | The approved branding copy (`docs/BOT_BRANDING.md`) + a pusher for the Bot API. |
 | `views_provider.py` | **Optional** MTProto observer — the only way to read live channel views. |
 | `telegram_verification.py` | User-owned Telegram bot credential storage, Bot API verification, and real member-count retrieval. |
+| `delivery_worker.py` | Shared delivery rate limiting, recovery coordination, and SQLite metrics. |
+| `staging_telegram_check.py` | Opt-in read-only real Telegram staging smoke test. |
 | `test_core.py` | Engine tests (28). |
 | `test_governance.py` | Rules/roles/branding tests (33). |
 | `test_bots.py` | Bot wiring tests (26) — handlers, menus, funnel, roles, owner bypass. |

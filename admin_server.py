@@ -27,6 +27,7 @@ from performance_snapshots import PerformanceSnapshotRepository
 from store import JsonStore
 from task_marketplace import TaskMarketplace
 from delivery_worker import WorkerStore
+from migrate_mint import migrate
 
 
 class _LedgerFacade:
@@ -48,6 +49,11 @@ def build_runtime_app(*, dev: bool = False):
     snapshots = PerformanceSnapshotRepository(config.CREDIBILITY_DB_PATH)
     broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
     ledger = _LedgerFacade(TransactionalMintLedger(config.MINT_DB_PATH))
+    # One-time idempotent compatibility migration seeds canonical SQLite users
+    # and balances before the Admin audience resolver is constructed.
+    migration = migrate(config.REWARD_STORE_PATH, config.MINT_DB_PATH)
+    if migration["errors"]:
+        raise RuntimeError("Mint migration failed: " + str(migration["errors"][:3]))
     enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
     worker_store = WorkerStore(config.WORKER_DB_PATH)
     ads = AdCampaignStore(config.ADS_DB_PATH, enabled=config.ADS_ENABLED)

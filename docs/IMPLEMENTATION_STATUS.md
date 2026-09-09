@@ -56,7 +56,7 @@ Phase 7 remains focused on production hardening: authoritative storage migration
 | Credibility/performance | Implemented foundation | `credibility.py`, `performance_snapshots.py`, tests |
 | Enforcement and safe mode | Implemented foundation | `enforcement.py`, `test_enforcement.py`, `docs/COMPLIANCE_AND_ENFORCEMENT.md` |
 | Referral/ranking support | Partial | `referral_ranking.py` exists; complete product referral economy is not established |
-| Mint/credit ledger | Partial/implemented foundation | `mint_ledger.py`, `currency.py`, `economics.py`, tests; this is not a completed deposit/withdrawal economy |
+| Mint/credit ledger | Implemented internal foundation | `mint_ledger.py` SQLite is canonical for Mint accounts/balances; legacy JSON is migration metadata; this is not a completed deposit/withdrawal economy |
 | Human verification | Partial/foundation | `human_verification.py` exists; no universal CAPTCHA provider integration is confirmed |
 | Channel connection | Partial | `channel_connection.py`, `channel_registry.py`, `telegram_verification.py` |
 
@@ -82,7 +82,7 @@ Phase 7 remains focused on production hardening: authoritative storage migration
 | Broadcast queue | Implemented foundation | `broadcast_queue.py`, lifecycle tests |
 | Campaign titles | Implemented backend foundation | Queue/model supports titles; frontend parity must be verified |
 | Reward draft create/edit/delete | Implemented backend | Admin API/HTTP routes and queue methods |
-| Reward draft queueing | Implemented with state checks | Queue supports draft/paused transitions; tests must cover all forbidden states |
+| Reward draft queueing | Implemented with state checks | Queue supports draft/paused transitions and rejects invalid transitions; campaign completion is derived from terminal deliveries |
 | Pause/resume/cancel | Implemented foundation | Queue/admin routes |
 | Scheduled-delivery verification gate | Implemented in remote tip | `d9fcb6d`, `telegram_verification.py` integration |
 | Complete Reward draft Mini App controls | Partial | Frontend does not yet demonstrate complete Edit/Continue/Cancel/Delete lifecycle |
@@ -113,8 +113,8 @@ Phase 7 remains focused on production hardening: authoritative storage migration
 |---|---|
 | `task_marketplace.py` foundation | Implemented/partial |
 | Replace exclusive offers with shared marketplace | Research/design; not confirmed complete |
-| Task capacity and multi-performer slots | Partial/design pending |
-| Claim/start/complete/expire/cancel state machine | Partial/design pending |
+| Task capacity and multi-performer slots | Implemented foundation | Durable slots and claim reconciliation are implemented; product matching remains separate |
+| Claim/start/complete/expire/cancel state machine | Partial/implemented foundation | Claim, complete, release, expiry, and reconciliation are implemented; explicit task cancellation remains |
 | Eligibility by band/status/performance | Foundation exists; marketplace integration incomplete |
 | Channel connection required before channel-posting tasks | Approved requirement; integration incomplete |
 | Task notifications and button-first flow | Pending/partial |

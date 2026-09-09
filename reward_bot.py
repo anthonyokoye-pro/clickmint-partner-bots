@@ -65,7 +65,7 @@ import config
 import tg_entities
 import ui
 from platform_store import DeliveryAudit, SharedKV
-from delivery_worker import WorkerStore
+from delivery_worker import WorkerStore, admit_delivery
 
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = config.REWARD_BOT_TOKEN          # from @BotFather, via env var
@@ -3004,15 +3004,16 @@ async def _process_reward_broadcasts():
     """Deliver only Reward-scope campaigns through the shared durable queue."""
     # Recover claims abandoned by a crashed poll tick before taking new work.
     broadcasts.recover_stale_processing(older_than_seconds=900, retry_seconds=60)
+    marketplace.reconcile()
     if enforcement_gate.safe_mode():
         # Safe mode pauses the machine: leave deliveries pending, claim nothing.
         return
     for delivery in broadcasts.claim(limit=20, bot_scope="reward"):
         try:
-            bucket = f"reward:{delivery['recipient_id']}"
-            if not worker_store.acquire(bucket, rate_per_second=config.WORKER_RATE_PER_SECOND, burst=config.WORKER_RATE_BURST):
+            if not admit_delivery(worker_store, "reward", delivery,
+                                  rate_per_second=config.WORKER_RATE_PER_SECOND,
+                                  burst=config.WORKER_RATE_BURST):
                 broadcasts.fail(delivery["delivery_id"], "central delivery rate limit", retry_seconds=1)
-                worker_store.record("reward", "rate_limited")
                 continue
             started = time.perf_counter()
             if not enforcement_gate.check(delivery["recipient_id"], "user", "campaigns"):

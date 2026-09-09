@@ -38,8 +38,8 @@ OWNER_USER_ID = int(env("OWNER_USER_ID", "0") or 0)
 STORE_DIR = env("STORE_DIR", ".")
 REWARD_STORE_PATH = os.path.join(STORE_DIR, "reward_ledger.json")
 PARTNER_STORE_PATH = os.path.join(STORE_DIR, "partnership_state.json")
-# Transactional Mint/referral foundation. This is separate from legacy JSON until
-# the reward flows are migrated to the ledger in a later compatibility step.
+# Canonical Mint/user account source. Legacy JSON remains a compatibility
+# metadata store during migration, never the authority for balances or audiences.
 MINT_DB_PATH = env("MINT_DB_PATH", os.path.join(STORE_DIR, "mint.sqlite3"))
 # Marketplace state is isolated during the additive migration. It can later be
 # moved into the authoritative platform database after the task schema is verified.
@@ -72,6 +72,6 @@ WORKER_RATE_BURST = int(env("WORKER_RATE_BURST", "20"))
 # A successful Telegram verification is cached briefly, then participation
 # requires another real Bot API verification.
 VERIFICATION_MAX_AGE_SECONDS = int(env("VERIFICATION_MAX_AGE_SECONDS", "86400") or 86400)
-# Keep legacy mode until `python3 migrate_mint.py` has been run and the
-# transactional backend has been verified in staging.
-MINT_LEDGER_MODE = env("MINT_LEDGER_MODE", "legacy").strip().lower()
+# SQLite is the canonical mode. Set legacy only for a deliberate rollback or
+# migration dry-run; it is not suitable for production runtime.
+MINT_LEDGER_MODE = env("MINT_LEDGER_MODE", "transactional").strip().lower()

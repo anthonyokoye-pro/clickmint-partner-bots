@@ -111,7 +111,7 @@ The approved Phase 0–6 pass completed the following safe reliability and UX wo
 - Admin Reward campaign queueing now resolves known Reward Bot recipients through `AudienceDirectory`; it no longer reads the empty Admin ledger compatibility facade.
 - Campaign draft deletion now creates an auditable tombstone with `deleted_at` and `deleted_by`; deleted records are not queueable.
 - Mini App campaign cards now expose state-appropriate Edit, Continue, Cancel, and Delete controls, with destructive confirmations.
-- Automated Reward and Partnership broadcast/task delivery no longer passes uncontrolled text through HTML parse mode. Entity-based rich editing remains a later step.
+- Automated Reward and Partnership broadcast/task delivery no longer passes uncontrolled text through HTML parse mode; entity payloads are validated and preserved for Admin campaigns.
 - Admin bind host is configurable through `ADMIN_BIND_HOST` and defaults to `0.0.0.0` for container/live-preview compatibility.
 - Audience and Admin queue regression tests were added.
 - A dependency-aware run using `/tmp/cmvenv` installed `requirements.txt`; `run_all_tests.py` completed successfully.
