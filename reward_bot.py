@@ -1921,6 +1921,7 @@ async def menu_nav(cb: types.CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="➕ Add channel", callback_data="menu:add_channel"),
                  InlineKeyboardButton(text="➕ Add group", callback_data="menu:add_group")],
+                [InlineKeyboardButton(text="📊 Check Stats", callback_data="stats:all")],
                 [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")],
             ]))
     elif which == "owner":
