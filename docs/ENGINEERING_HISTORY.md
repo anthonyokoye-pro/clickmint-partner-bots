@@ -28,6 +28,22 @@
 
 **Decision:** Keep aiogram-dependent tests explicit and require `pip install -r requirements.txt` in Windows/CI before claiming full bot coverage. Never treat import-only checks as live Telegram validation.
 
+## 2026-09-09 — Documentation reconciliation and source-of-truth handoff
+
+**Problem:** Requirements, research, decisions, implementation status, and future roadmap items were distributed across conversation history and partially overlapping Markdown files. A new session could not reliably distinguish implemented behavior from proposals.
+
+**Investigation:** Compared the current checkout with fetched remote tip `d9fcb6d` without resetting the dirty worktree. Sampled implementation and documentation files matched the remote tip. Inspected the repository Markdown inventory and ran the available validation commands.
+
+**Decision:** Add three explicit portable documents:
+
+- `docs/CLICKMINT_AI_HANDOFF.md` for continuation context;
+- `docs/IMPLEMENTATION_STATUS.md` for evidence-based feature state;
+- `docs/DECISION_REGISTER.md` for approved, pending, rejected, and binding constraints.
+
+**Validation result:** Python compilation passed. Core (28) and governance (34) tests passed. The broad non-Aiogram tests passed, including broadcast lifecycle, Mint ledger, admin, verification, and integration checks. The suite stopped at `test_bots.py`, and `simulate.py` could not run, because `aiogram` is not installed in the active environment. This is recorded as an environment limitation, not hidden as a green result.
+
+**Lesson:** A test runner and a feature description are not proof of production completeness. Future sessions must reconcile source, tests, Git state, and documentation before implementation.
+
 ## 2026-09-08 — AI and verification scope decision
 
 **Decision:** Keep AI and human verification out of the core transaction path. Add provider-neutral interfaces and structured risk/audit data first. Use progressive, risk-based challenges only for sensitive or suspicious actions. Do not add vector databases, autonomous production changes, or a CAPTCHA on every screen at the 1,000–10,000 target.
