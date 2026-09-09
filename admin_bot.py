@@ -182,7 +182,7 @@ async def show_caps(cb):
         cap = daily_post_cap(m.get("size", 0), s["band"], m.get("status", "ACTIVE"),
                              connected=connected)
         cap_txt = "unlimited" if cap == -1 else str(cap)
-        lines.append(f"{username:<22} {s['band']}  {s['status']}  cap={cap_txt}  ({m.get('size',0)} sub)")
+        lines.append(f"{username:<22} performance tier {s['band']}  {s['status']}  cap={cap_txt}  ({m.get('size',0)} members)")
     await _safe_edit(cb, "\n".join(lines[:50]), _kb([[_back("dash:back")]]))
 
 
