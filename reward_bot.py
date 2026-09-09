@@ -39,6 +39,7 @@ from core import (CreditLedger, TransactionalCreditLedger, DeliveryLog, ReportRe
                   PerformanceEngine, is_forward, forward_source, allows_receive)
 from channel_registry import ChannelRegistry
 from verification_store import VerificationStore
+from onboarding_api import redact
 from features import (ReferralLedger, AvailablePostQueue, BubbleNotifier,
                       AnnouncementBoard, RankVisibility, StatsBook, ReroutePlanner,
                       category_counts)
@@ -315,7 +316,7 @@ async def connect_bot_cmd(msg: types.Message):
             logging.warning("could not delete bot-token message")
         identity = await telegram_verification.connect_bot(msg.from_user.id, parts[1].strip())
     except Exception as exc:
-        await msg.answer(f"❌ Bot connection failed: {escape(str(exc))}")
+        await msg.answer(f"❌ Bot connection failed: {escape(redact(str(exc))[:200])}")
         return
     if previous and int(previous.get("bot_id", -1)) != int(identity.get("bot_id", -2)):
         for row in channels.mine(msg.from_user.id):

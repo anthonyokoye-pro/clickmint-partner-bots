@@ -18,6 +18,8 @@ Nothing here talks to Telegram. It is pure and fully testable offline.
 """
 from __future__ import annotations
 
+import re
+
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -247,6 +249,13 @@ def _retry_after(exc) -> int | None:
     return None
 
 
+_TOKEN_SHAPE = re.compile(r"\d{4,12}:[A-Za-z0-9_-]{30,}")
+
+
+def _redact(text: str) -> str:
+    return _TOKEN_SHAPE.sub("<redacted-token>", text)
+
+
 def classify_telegram_error(exc: BaseException) -> ClassifiedError:
     """Stable classification for any exception raised while calling Telegram.
 
@@ -275,7 +284,9 @@ def classify_telegram_error(exc: BaseException) -> ClassifiedError:
     if kind is None:
         kind = TelegramErrorKind.UNKNOWN
     permanent, vstate = _POLICY[kind]
-    return ClassifiedError(kind, permanent, _retry_after(exc), vstate, str(exc)[:300])
+    # aiogram network/HTTP errors can embed the request URL, which contains the
+    # bot token. Never let that reach a log, an audit row or a user message.
+    return ClassifiedError(kind, permanent, _retry_after(exc), vstate, _redact(str(exc))[:300])
 
 
 def backoff_seconds(attempt: int, *, base: int = 30, cap: int = 3600, retry_after: int | None = None) -> int:

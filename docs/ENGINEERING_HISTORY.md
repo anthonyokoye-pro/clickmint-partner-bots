@@ -108,3 +108,7 @@ appeal decisions are delivered to the member via the outbox.
 **Finding:** `/connectbot <token>` transmits the member's bot secret through Telegram chat; message deletion is best-effort and the token is already in history on every device.
 
 **Decision:** Mini App onboarding (`onboarding_api.py`, `/onboarding_web/`). Identity is taken solely from server-validated `initData` signed by the reward bot; the token goes HTTPS → server → `getMe` → AES-GCM in the shared verification DB and is redacted from every error, audit and response. The in-chat command remains as fallback when no HTTPS URL is configured and warns the member to rotate. See `docs/ONBOARDING_WEBAPP.md`.
+
+## 2026-09-09 — Final offline audit
+
+**Done:** secret redaction closed in three more places (partnership connect error, `ClassifiedError.message`, go-live check for onboarding URL). Full offline suite and simulation green. See `docs/FINAL_AUDIT_2026-09-09.md` for the executed checks, known limitations and the live-Telegram checklist that still needs real credentials.

@@ -26,6 +26,7 @@ from destination_state import (DestinationStateMachine, VState, IllegalTransitio
                                apply_verification_result, failed_result_from_reason)
 from channel_registry import ChannelRegistry
 from verification_store import VerificationStore
+from onboarding_api import redact
 from telegram_verification import BotCredentialStore, TelegramVerificationService, CredentialError
 from features import StatsBook
 from store import JsonStore
@@ -203,7 +204,7 @@ async def connect_bot_cmd(msg: types.Message):
             logging.warning("could not delete bot-token message")
         identity = await telegram_verification.connect_bot(msg.from_user.id, parts[1].strip())
     except Exception as exc:
-        await msg.answer(f"❌ Bot connection failed: {str(exc)}")
+        await msg.answer(f"❌ Bot connection failed: {redact(str(exc))[:200]}")
         return
     if previous and int(previous.get("bot_id", -1)) != int(identity.get("bot_id", -2)):
         _disconnect_all(msg.from_user.id, "Connected bot changed; destination must be re-verified")
