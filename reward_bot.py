@@ -299,6 +299,26 @@ async def bot_status_cmd(msg: types.Message):
         parse_mode="HTML")
 
 
+@dp.callback_query(lambda c: c.data == "bot:status")
+async def bot_status_callback(cb: types.CallbackQuery):
+    identity = bot_credentials.public(cb.from_user.id)
+    if not identity:
+        text = "❌ <b>No Telegram bot connected</b>\n\nUse /connectbot in this private chat."
+    else:
+        destinations = channels.mine(cb.from_user.id)
+        verified = sum(1 for row in destinations if row.get("verified_state") == "VERIFIED"
+                       and row.get("bot_added") is True)
+        text = ("🤖 <b>CONNECTED TELEGRAM BOT</b>\n\n"
+                f"Username: @{escape(str(identity.get('username') or 'unknown'))}\n"
+                f"Bot ID: <code>{identity.get('bot_id')}</code>\n"
+                f"Verified destinations: {verified}/{len(destinations)}")
+    await cb.message.edit_text(text, parse_mode="HTML",
+                               reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                   [InlineKeyboardButton(text="🔄 Refresh verification", callback_data="stats:all")],
+                                   [InlineKeyboardButton(text="⬅️ Back", callback_data="menu:hub")]]))
+    await cb.answer()
+
+
 @dp.message(Command("disconnectbot"))
 async def disconnect_bot_cmd(msg: types.Message):
     bot_credentials.remove(msg.from_user.id)
