@@ -23,6 +23,17 @@ def test_legacy_migration_preserves_balance():
         assert len(db.entries(42)) == 3
 
 
+def test_migration_dry_run_does_not_write_or_consume_stale_data():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        store_path = root / "legacy.json"
+        store_path.write_text(json.dumps({"ledger": {"@stale": {"user_id": 7, "balance": 2, "earned": 2, "spent": 0}}}))
+        report = migrate(str(store_path), str(root / "mint.sqlite3"), dry_run=True)
+        assert report["members"] == 1
+        assert not (root / "mint.sqlite3").exists()
+        assert "stale" in store_path.read_text()
+
+
 def test_transactional_facade_uses_ledger_for_spend_and_reward():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

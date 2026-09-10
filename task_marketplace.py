@@ -66,6 +66,18 @@ CREATE TABLE IF NOT EXISTS task_completions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_completion_user
     ON task_completions(task_id, user_id);
+CREATE TABLE IF NOT EXISTS task_outbox (
+    event_id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','processing','sent','failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at INTEGER NOT NULL,
+    last_error TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_outbox_ready ON task_outbox(status, available_at);
 """
 
 
@@ -142,6 +154,13 @@ class TaskMarketplace:
     def _id(prefix: str) -> str:
         return f"{prefix}_{secrets.token_hex(10)}"
 
+    def _emit(self, conn, event_type: str, task_id: str, payload: dict) -> None:
+        stamp = self._now()
+        conn.execute(
+            "INSERT INTO task_outbox(event_id,event_type,task_id,payload,status,available_at,created_at) VALUES(?,?,?,?,?,?,?)",
+            (self._id("taskevt"), event_type, task_id, json.dumps(payload, separators=(",", ":")), "pending", stamp, stamp),
+        )
+
     def create_task(self, *, creator_user_id, category: str, title: str,
                     required_performers: int, payload: dict | None = None,
                     expires_at: int | None = None, reward_amount: int = 1,
@@ -167,6 +186,7 @@ class TaskMarketplace:
                  int(reward_amount), minimum_tier,
                  json.dumps(list(allowed_categories or [category.strip()]))) ,
             )
+            self._emit(conn, "TASK_CREATED", task_id, {"creator_user_id": str(creator_user_id)})
         return task_id
 
     def get_task(self, task_id: str) -> dict | None:
@@ -180,6 +200,8 @@ class TaskMarketplace:
                 "WHERE task_id=? AND status='draft'",
                 (self._now(), task_id),
             )
+            if cur.rowcount:
+                self._emit(conn, "TASK_PUBLISHED", task_id, {})
             return cur.rowcount == 1
 
     def cancel(self, task_id: str) -> bool:
@@ -191,6 +213,7 @@ class TaskMarketplace:
             )
             if cur.rowcount:
                 conn.execute("UPDATE task_claims SET status='released' WHERE task_id=? AND status='claimed'", (task_id,))
+                self._emit(conn, "TASK_CANCELLED", task_id, {})
             return cur.rowcount == 1
 
     def _expire_tasks_tx(self, conn, now: int):
@@ -291,6 +314,7 @@ class TaskMarketplace:
                 (claim_id, task_id, str(user_id), str(destination_id), "claimed",
                  now, now + int(lease_seconds)),
             )
+            self._emit(conn, "TASK_CLAIMED", task_id, {"claim_id": claim_id, "user_id": str(user_id), "destination_id": str(destination_id)})
             return self._row(conn.execute("SELECT * FROM task_claims WHERE claim_id=?", (claim_id,)).fetchone())
 
     def complete(self, claim_id: str, *, telegram_chat_id,
@@ -330,6 +354,7 @@ class TaskMarketplace:
             ).fetchone()[0]
             if occupied >= task["required_performers"]:
                 conn.execute("UPDATE tasks SET status='full' WHERE task_id=?", (claim["task_id"],))
+            self._emit(conn, "TASK_COMPLETED", claim["task_id"], {"completion_id": completion_id, "claim_id": claim_id, "user_id": claim["user_id"], "reward_event_id": reward_event_id})
             row = conn.execute("SELECT * FROM task_completions WHERE completion_id=?", (completion_id,)).fetchone()
             return self._row(row)
 
@@ -390,6 +415,47 @@ class TaskMarketplace:
             ).rowcount
             return {"expired_tasks": expired_tasks, "expired_claims": expired_claims,
                     "marked_full": full, "reopened_tasks": reopened}
+
+    def reconcile_rewards(self, mint_ledger) -> dict:
+        """Idempotently reconcile verified completions into canonical Mint.
+
+        The task database remains the source of delivery evidence; Mint remains
+        the source of balance authority. The deterministic key prevents a retry
+        or restart from issuing a second reward.
+        """
+        with self._connect() as conn:
+            rows = conn.execute("SELECT c.*, t.reward_amount FROM task_completions c JOIN tasks t ON t.task_id=c.task_id WHERE c.status='verified'").fetchall()
+        credited = skipped = 0
+        for row in rows:
+            key = row["reward_event_id"] or f"task:{row['completion_id']}"
+            existing = {entry.get("idempotency_key") for entry in mint_ledger.entries(row["user_id"], limit=100000)}
+            if key in existing:
+                skipped += 1
+            else:
+                mint_ledger.credit(row["user_id"], int(row["reward_amount"]), entry_type="TASK_REWARD", idempotency_key=key, reference_type="task_completion", reference_id=row["completion_id"])
+                credited += 1
+            with self._tx() as conn:
+                conn.execute("UPDATE task_completions SET reward_event_id=? WHERE completion_id=?", (key, row["completion_id"]))
+        return {"checked": len(rows), "credited": credited, "already_reconciled": skipped}
+
+    def claim_outbox(self, limit: int = 20):
+        now = self._now()
+        with self._tx() as conn:
+            rows = conn.execute("SELECT event_id FROM task_outbox WHERE status IN ('pending','failed') AND available_at<=? ORDER BY created_at LIMIT ?", (now, max(1, int(limit)))).fetchall()
+            result = []
+            for row in rows:
+                conn.execute("UPDATE task_outbox SET status='processing', attempts=attempts+1 WHERE event_id=?", (row["event_id"],))
+                item = conn.execute("SELECT * FROM task_outbox WHERE event_id=?", (row["event_id"],)).fetchone()
+                data = dict(item); data["payload"] = json.loads(data["payload"] or "{}"); result.append(data)
+            return result
+
+    def complete_outbox(self, event_id: str) -> bool:
+        with self._tx() as conn:
+            return conn.execute("UPDATE task_outbox SET status='sent' WHERE event_id=? AND status='processing'", (event_id,)).rowcount == 1
+
+    def fail_outbox(self, event_id: str, error: str, retry_delay: int = 60) -> bool:
+        with self._tx() as conn:
+            return conn.execute("UPDATE task_outbox SET status='failed', last_error=?, available_at=? WHERE event_id=? AND status='processing'", (str(error)[:500], self._now()+max(1, int(retry_delay)), event_id)).rowcount == 1
 
     def progress(self, task_id: str) -> dict:
         with self._connect() as conn:

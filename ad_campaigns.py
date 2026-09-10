@@ -241,6 +241,30 @@ class AdCampaignStore:
             self._event(conn, "EDITED", campaign["created_by"], campaign_id=campaign_id)
         return True
 
+    def delete_draft(self, campaign_id: str, *, actor_id) -> bool:
+        with self._tx() as conn:
+            row = conn.execute("SELECT status FROM ad_campaigns WHERE campaign_id=?", (campaign_id,)).fetchone()
+            if not row or row["status"] not in {"draft", "rejected"}:
+                return False
+            self._event(conn, "DRAFT_DELETED", actor_id, campaign_id=campaign_id, reason="auditable ad draft deletion")
+            conn.execute("UPDATE ad_campaigns SET status='cancelled', updated_at=? WHERE campaign_id=?", (self._now(), campaign_id))
+            return True
+
+    def deliveries(self, campaign_id: str, limit: int = 100) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM ad_deliveries WHERE campaign_id=? ORDER BY delivery_id LIMIT ?",
+                (campaign_id, max(1, int(limit))),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def retry_delivery(self, delivery_id: str, *, actor_id, delay: int = 0) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute("UPDATE ad_deliveries SET status='pending', next_attempt_at=?, last_error=NULL WHERE delivery_id=? AND status IN ('failed','blocked')", (self._now() + max(0, int(delay)), delivery_id))
+            if cur.rowcount:
+                self._event(conn, "DELIVERY_RETRIED", actor_id, reason=delivery_id)
+            return cur.rowcount == 1
+
     def submit_for_review(self, campaign_id: str, *, actor_id) -> bool:
         return self._transition(campaign_id, {"draft", "rejected"}, "in_review", actor_id, "SUBMITTED")
 

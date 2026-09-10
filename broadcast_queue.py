@@ -275,6 +275,15 @@ class BroadcastQueue:
                     recovered += 1
             return {"recovered": recovered, "terminal": terminal}
 
+    def deliveries(self, campaign_id: str, limit: int = 100) -> list[dict]:
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT * FROM broadcast_recipients WHERE campaign_id=? ORDER BY delivery_id LIMIT ?", (campaign_id, max(1, int(limit))).fetchall())]
+
+    def retry_delivery(self, delivery_id: str, *, delay: int = 0) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute("UPDATE broadcast_recipients SET status='pending', next_attempt_at=?, last_error=NULL WHERE delivery_id=? AND status IN ('failed','blocked')", (int(time.time()) + max(0, int(delay)), delivery_id))
+            return cur.rowcount == 1
+
     def campaign_summary(self, campaign_id: str) -> dict | None:
         with self._connect() as conn:
             campaign = conn.execute("SELECT * FROM broadcast_campaigns WHERE campaign_id=?", (campaign_id,)).fetchone()

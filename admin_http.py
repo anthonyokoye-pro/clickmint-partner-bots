@@ -234,8 +234,14 @@ class AdminWSGI:
             if method == "GET" and path.startswith("/api/admin/referrals/"):
                 period = unquote(path.split("/api/admin/referrals/", 1)[1])
                 return self._response(start_response, "200 OK", self.api.referral_snapshot(init_data, period), correlation_id)
+            if method == "GET" and path.startswith("/api/admin/broadcasts/") and path.endswith("/deliveries"):
+                campaign_id = unquote(path[len("/api/admin/broadcasts/"):-len("/deliveries")].rstrip("/"))
+                return self._response(start_response, "200 OK", self.api.broadcast_deliveries(init_data, campaign_id), correlation_id)
             if method == "GET" and path == "/api/admin/ads":
                 return self._response(start_response, "200 OK", self.api.ads_overview(init_data), correlation_id)
+            if method == "GET" and path.startswith("/api/admin/ads/") and path.endswith("/deliveries"):
+                campaign_id = unquote(path[len("/api/admin/ads/"):-len("/deliveries")].rstrip("/"))
+                return self._response(start_response, "200 OK", self.api.ad_deliveries(init_data, campaign_id), correlation_id)
             if method == "GET" and path == "/api/admin/safety":
                 return self._response(start_response, "200 OK", self.api.safety_overview(init_data), correlation_id)
             if method == "GET" and path == "/api/admin/reports":
@@ -285,6 +291,12 @@ class AdminWSGI:
                 if replay is not None:
                     return replay
                 parts = [unquote(item) for item in path.strip("/").split("/")]
+                if parts[:4] == ["api", "admin", "broadcasts", "delivery"] and len(parts) == 6 and parts[5] == "retry":
+                    result = self.api.retry_broadcast_delivery(init_data, parts[4], int(body.get("delay", 0)))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
+                if parts[:3] == ["api", "admin", "tasks"] and len(parts) == 5:
+                    result = self.api.task_action(init_data, parts[3], parts[4], body.get("reason", ""))
+                    return self._mutation_result(start_response, "200 OK", result, correlation_id, idempotency_key)
                 if parts == ["api", "admin", "broadcasts", "recover"]:
                     result = self.api.recover_broadcast_deliveries(
                         init_data, older_than_seconds=int(body.get("older_than_seconds", 900)))

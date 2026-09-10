@@ -22,8 +22,16 @@ def test_task_service_exposes_transactional_lifecycle():
         task_id = service.repo.create_task(creator_user_id=1, category="Guides", title="Service", required_performers=1)
         assert service.publish(task_id)["status"] == "published"
         claim = service.claim(task_id, user_id=2, destination_id="@dest")
-        service.complete(claim["claim_id"], telegram_chat_id="-100", telegram_message_id=1)
+        completion = service.complete(claim["claim_id"], telegram_chat_id="-100", telegram_message_id=1)
         assert service.reconcile()["marked_full"] == 0
+        mint = TransactionalMintLedger(Path(directory) / "mint.sqlite3")
+        result = service.reconcile_rewards(mint)
+        assert result["credited"] == 1
+        assert mint.balance(2) == 1
+        assert service.reconcile_rewards(mint)["already_reconciled"] == 1
+        events = []
+        assert service.drain_outbox(events.append)["sent"] >= 3
+        assert events[0]["event_type"] == "TASK_CREATED"
 
 
 if __name__ == "__main__":

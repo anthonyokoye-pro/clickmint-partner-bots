@@ -89,8 +89,8 @@ Phase 7 remains focused on production hardening: authoritative storage migration
 | Complete Reward draft Mini App controls | Partial | Frontend does not yet demonstrate complete Edit/Continue/Cancel/Delete lifecycle |
 | Deleted/cancelled queue protection | Partial/needs final verification | Backend guards exist in foundation; frontend and regression coverage require confirmation |
 | Dedicated Ad Campaign model | Not implemented as complete feature | No complete distinct service/UI/API lifecycle established |
-| Ad Campaign edit/cancel/delete/queue | Pending | Future implementation after data-model decision |
-| Visual queue management | Pending/partial | View/edit/cancel/delete/retry/reschedule parity is not complete |
+| Ad Campaign edit/cancel/delete/queue | Implemented foundation | API and Admin UI now expose edit/delete plus existing review/queue/pause/resume/cancel transitions |
+| Visual queue management | Partial/implemented foundation | Campaign delivery inspection and retry APIs are available; full reschedule/editor parity remains |
 | Telegram-oriented visual editor | Partial | Admin accepts validated Telegram entity JSON and preserves captured entities; a full visual rich editor is still pending |
 | Unsupported markup prevention | Constraint | Must use Telegram-supported entities/parse modes; do not invent markup |
 
@@ -115,7 +115,7 @@ Phase 7 remains focused on production hardening: authoritative storage migration
 | `task_marketplace.py` foundation | Implemented/partial |
 | Replace exclusive offers with shared marketplace | Research/design; not confirmed complete |
 | Task capacity and multi-performer slots | Implemented foundation | Durable slots and claim reconciliation are implemented; product matching remains separate |
-| Claim/start/complete/expire/cancel state machine | Partial/implemented foundation | Claim, complete, release, expiry, and reconciliation are implemented; explicit task cancellation remains |
+| Claim/start/complete/expire/cancel state machine | Implemented foundation | Claim, complete, release, expiry, cancellation, reconciliation, and lifecycle outbox are implemented; production notification consumers remain deployable integration work |
 | Eligibility by band/status/performance | Foundation exists; marketplace integration incomplete |
 | Channel connection required before channel-posting tasks | Approved requirement; integration incomplete |
 | Task notifications and button-first flow | Pending/partial |

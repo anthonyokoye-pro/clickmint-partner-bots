@@ -91,6 +91,12 @@ class AdminReadAPI:
         self._audit(identity.user_id, "AD_CAMPAIGN_EDITED", "ad_campaign", campaign_id, "Mini App edit")
         return {"campaign_id": campaign_id, "status": "draft"}
 
+    def ad_deliveries(self, init_data: str, campaign_id: str) -> dict:
+        self.authenticate(init_data)
+        if self.ads is None:
+            raise RuntimeError("advertising store required")
+        return {"campaign_id": campaign_id, "deliveries": self.ads.deliveries(campaign_id)}
+
     def ad_campaign_action(self, init_data: str, campaign_id: str, action: str, reason: str = "") -> dict:
         if action in {"approve", "reject"}:
             # Safety review is the OWNER's call, and it always carries a reason.
@@ -103,6 +109,16 @@ class AdminReadAPI:
             self._audit(identity.user_id, f"AD_CAMPAIGN_{action.upper()}D", "ad_campaign", campaign_id, reason)
             return {"campaign_id": campaign_id, "status": result["status"]}
         identity = self._ads_manager(init_data)
+        if action == "delete":
+            ok = self.ads.delete_draft(campaign_id, actor_id=identity.user_id)
+            if not ok:
+                raise ValueError("only a draft or rejected campaign can be deleted")
+            return {"campaign_id": campaign_id, "status": "cancelled"}
+        if action == "retry_delivery":
+            ok = self.ads.retry_delivery(reason, actor_id=identity.user_id)
+            if not ok:
+                raise ValueError("delivery is not retryable")
+            return {"campaign_id": campaign_id, "status": "retry scheduled"}
         if action == "submit":
             ok = self.ads.submit_for_review(campaign_id, actor_id=identity.user_id)
         elif action == "queue":
@@ -370,11 +386,37 @@ class AdminReadAPI:
             "control": self.snapshots.control(destination_id),
         }
 
+    def task_action(self, init_data: str, task_id: str, action: str, reason: str = "") -> dict:
+        identity = self.authenticate(init_data)
+        from services.task_service import TaskService
+        service = TaskService(self.marketplace)
+        if action == "publish":
+            task = service.publish(task_id)
+        elif action == "cancel":
+            task = service.cancel(task_id)
+        elif action == "reconcile":
+            return service.reconcile()
+        else:
+            raise ValueError("unsupported task action")
+        self._audit(identity.user_id, f"TASK_{action.upper()}", "task", task_id, reason or "Admin action")
+        return {"task_id": task_id, "status": task["status"]}
+
     def worker_metrics(self, init_data: str, *, since: int = 0) -> dict:
         self.authenticate(init_data)
         if self.worker is None:
             raise RuntimeError("worker metrics are not configured")
         return {"scopes": self.worker.summary(since=since)}
+
+    def broadcast_deliveries(self, init_data: str, campaign_id: str) -> dict:
+        self.authenticate(init_data)
+        return {"campaign_id": campaign_id, "deliveries": self.broadcasts.deliveries(campaign_id)}
+
+    def retry_broadcast_delivery(self, init_data: str, delivery_id: str, delay: int = 0) -> dict:
+        identity = self.authenticate(init_data)
+        if not self.broadcasts.retry_delivery(delivery_id, delay=delay):
+            raise ValueError("delivery is not retryable")
+        self._audit(identity.user_id, "BROADCAST_DELIVERY_RETRIED", "delivery", delivery_id, "Admin retry")
+        return {"delivery_id": delivery_id, "status": "pending"}
 
     def recover_broadcast_deliveries(self, init_data: str, *, older_than_seconds: int = 900) -> dict:
         identity = self.authenticate(init_data)
@@ -426,8 +468,10 @@ class AdminReadAPI:
         return {
             "user": {"id": identity.user_id, "username": identity.username},
             "channels": channel_views,
-            "tasks": [{"task_id": task["task_id"], "title": task["title"],
-                       "category": task["category"], "reward_amount": task.get("reward_amount", 1)}
+            "tasks": [{**{"task_id": task["task_id"], "title": task["title"],
+                       "category": task["category"], "reward_amount": task.get("reward_amount", 1),
+                       "status": task.get("status"), "occupied_slots": task.get("occupied_slots", 0)},
+                      "progress": self.marketplace.progress(task["task_id"])}
                       for task in tasks],
             "broadcasts": [{
                 "campaign_id": campaign["campaign_id"],
