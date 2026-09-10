@@ -66,6 +66,9 @@ import tg_entities
 import ui
 from platform_store import DeliveryAudit, SharedKV
 from delivery_worker import WorkerStore, admit_delivery
+from user_directory import UserDirectory
+from audience import AudienceDirectory
+from services.broadcast_service import BroadcastService
 
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = config.REWARD_BOT_TOKEN          # from @BotFather, via env var
@@ -80,6 +83,9 @@ else:
     ledger = CreditLedger(store)
 ledger.owner_user_id = config.OWNER_USER_ID      # owner recognised by numeric id too
 audit = DeliveryAudit(config.PLATFORM_DB_PATH, legacy=store)     # shared SQLite, JSON migrated once
+users = UserDirectory(ledger.tx) if hasattr(ledger, "tx") else None
+if users is not None:
+    users.migrate_legacy_members(store.get("ledger", {}))
 reports = ReportRegistry(store)
 perf = PerformanceEngine(ledger, store, views_provider=None)
 sched = Scheduler(store)
@@ -102,6 +108,7 @@ reroutes = ReroutePlanner(store)
 marketplace = TaskMarketplace(config.TASK_DB_PATH)
 credibility_snapshots = PerformanceSnapshotRepository(config.CREDIBILITY_DB_PATH)
 broadcasts = BroadcastQueue(config.BROADCAST_DB_PATH)
+broadcast_service = BroadcastService(broadcasts, AudienceDirectory(authoritative=users)) if users is not None else None
 worker_store = WorkerStore(config.WORKER_DB_PATH)
 # Shared compliance boundary: every participation path asks this ONE gate.
 # It only reads states a human recorded; it never decides guilt.
@@ -1832,7 +1839,7 @@ async def broadcast_preview_cmd(msg: types.Message):
     if not text:
         await msg.answer("Usage: /broadcastpreview <explicit message text>")
         return
-    recipients = [member.get("user_id") for member in ledger.ledger.values() if member.get("user_id")]
+    recipients = users.list_active_user_ids() if users is not None else []
     campaign_id = broadcasts.create_campaign(
         bot_scope="reward", created_by=msg.from_user.id,
         payload={"text": text, "audience": "known_reward_members"},
@@ -1860,9 +1867,9 @@ async def broadcast_queue_cmd(msg: types.Message):
     if not campaign or campaign.get("bot_scope") != "reward":
         await msg.answer("Reward campaign not found.")
         return
-    recipients = [member.get("user_id") for member in ledger.ledger.values() if member.get("user_id")]
     try:
-        inserted = broadcasts.queue_campaign(parts[1], recipients)
+        result = broadcast_service.queue_reward(parts[1]) if broadcast_service is not None else {"new_deliveries": 0}
+        inserted = result["new_deliveries"]
     except (KeyError, ValueError) as exc:
         await msg.answer(str(exc))
         return

@@ -98,6 +98,8 @@ deploy.
 | `views_provider.py` | **Optional** MTProto observer — the only way to read live channel views. |
 | `telegram_verification.py` | User-owned Telegram bot credential storage, Bot API verification, and real member-count retrieval. |
 | `delivery_worker.py` | Shared delivery rate limiting, recovery coordination, and SQLite metrics. |
+| `user_directory.py` | Canonical SQLite Mint user/account boundary; legacy JSON is migration input only. |
+| `services/` | Application service boundaries for broadcast and task lifecycle orchestration. |
 | `staging_telegram_check.py` | Opt-in read-only real Telegram staging smoke test. |
 | `test_core.py` | Engine tests (28). |
 | `test_governance.py` | Rules/roles/branding tests (33). |

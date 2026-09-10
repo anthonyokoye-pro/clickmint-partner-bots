@@ -38,6 +38,7 @@ Completed in the Phase 0–6 reliability pass and Phase 7 hardening pass:
 - Added real Admin Telegram verification scans backed by `TelegramVerificationService`, including structured check results and failure reasons.
 - Added optional Telegram entity payload validation/preservation for Admin campaign creation and editing.
 - Added regression coverage for retry exhaustion, crashed-worker recovery, task reopening, and authoritative audience selection.
+- Added `user_directory.py` and application service boundaries for user, task, and broadcast orchestration; bot broadcast commands now resolve through the canonical user directory.
 - Installed repository dependencies in `/tmp/cmvenv` and completed the broad test runner successfully.
 
 Phase 7 remains focused on production hardening: authoritative storage migration, complete verification scan UX, final Telegram-native editing, unified worker operations, and full Admin capability parity. Payments, withdrawals, advanced AI, attribution, and multi-platform expansion remain deferred.

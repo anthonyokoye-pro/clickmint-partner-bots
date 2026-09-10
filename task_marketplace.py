@@ -182,6 +182,17 @@ class TaskMarketplace:
             )
             return cur.rowcount == 1
 
+    def cancel(self, task_id: str) -> bool:
+        """Cancel a draft or published task and release active claims."""
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE tasks SET status='cancelled' WHERE task_id=? AND status IN ('draft','published','full')",
+                (task_id,),
+            )
+            if cur.rowcount:
+                conn.execute("UPDATE task_claims SET status='released' WHERE task_id=? AND status='claimed'", (task_id,))
+            return cur.rowcount == 1
+
     def _expire_tasks_tx(self, conn, now: int):
         tasks = conn.execute(
             "UPDATE tasks SET status='expired' WHERE status IN ('published','full') "

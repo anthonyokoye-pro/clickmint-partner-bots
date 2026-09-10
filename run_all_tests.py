@@ -12,7 +12,7 @@ import sys
 TESTS = [
     "test_core.py", "test_governance.py", "test_bots.py", "simulate.py", "branding.py",
     "test_enforcement.py", "test_ad_campaigns.py", "test_destination_state.py", "test_relay.py", "test_verification_store.py", "test_platform_store.py", "test_tg_entities.py", "test_onboarding.py", "test_human_verification.py", "test_broadcast_lifecycle.py",
-    "test_audience.py", "test_delivery_worker.py", "test_platform_foundations.py", "test_task_marketplace.py", "test_performance_snapshots.py",
+    "test_audience.py", "test_delivery_worker.py", "test_service_boundaries.py", "test_platform_foundations.py", "test_task_marketplace.py", "test_performance_snapshots.py",
     "test_credibility.py", "test_economics.py", "test_mint_ledger.py", "test_db_backup.py",
     "test_integration_smoke.py", "test_admin_service.py", "test_admin_deploy.py",
     "test_admin_http.py", "test_admin_api.py", "test_admin_idempotency.py", "test_webapp_auth.py",

@@ -28,6 +28,7 @@ from store import JsonStore
 from task_marketplace import TaskMarketplace
 from delivery_worker import WorkerStore
 from migrate_mint import migrate
+from user_directory import UserDirectory
 
 
 class _LedgerFacade:
@@ -51,9 +52,12 @@ def build_runtime_app(*, dev: bool = False):
     ledger = _LedgerFacade(TransactionalMintLedger(config.MINT_DB_PATH))
     # One-time idempotent compatibility migration seeds canonical SQLite users
     # and balances before the Admin audience resolver is constructed.
-    migration = migrate(config.REWARD_STORE_PATH, config.MINT_DB_PATH)
-    if migration["errors"]:
-        raise RuntimeError("Mint migration failed: " + str(migration["errors"][:3]))
+    if not ledger.tx.active_user_ids(limit=1):
+        migration = migrate(config.REWARD_STORE_PATH, config.MINT_DB_PATH)
+        if migration["errors"]:
+            raise RuntimeError("Mint migration failed: " + str(migration["errors"][:3]))
+    users = UserDirectory(ledger.tx)
+    users.migrate_legacy_members(shared_store.get("ledger", {}))
     enforcement = EnforcementStore(config.ENFORCEMENT_DB_PATH)
     worker_store = WorkerStore(config.WORKER_DB_PATH)
     ads = AdCampaignStore(config.ADS_DB_PATH, enabled=config.ADS_ENABLED)
@@ -70,7 +74,7 @@ def build_runtime_app(*, dev: bool = False):
         ledger=ledger,
         # Production audience reads authoritative SQLite accounts; the legacy
         # JSON adapter remains available only for migration/tests.
-        audience=AudienceDirectory(shared_store, authoritative=ledger.tx),
+        audience=AudienceDirectory(authoritative=users),
         enforcement=enforcement,
         ads=ads,
         verification=verification,

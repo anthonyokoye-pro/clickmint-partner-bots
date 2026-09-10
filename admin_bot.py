@@ -26,6 +26,7 @@ from store import JsonStore
 from verification_store import VerificationStore
 from core import CreditLedger, PerformanceEngine, ReportRegistry
 from mint_ledger import TransactionalMintLedger
+from user_directory import UserDirectory
 from governance import ReviewQueue, RoleRegistry, daily_post_cap
 from platform_store import SharedKV
 from broadcast_queue import BroadcastQueue
@@ -148,7 +149,7 @@ def _dashboard_text():
     rledger = CreditLedger(rstore)
     rrev = ReviewQueue(rstore)
     prev = ReviewQueue(pstore)
-    ledger_members = len(rledger.ledger)
+    ledger_members = len(UserDirectory(TransactionalMintLedger(config.MINT_DB_PATH)).list_active_user_ids())
     pending_reward = len(rrev.pending())
     pending_partner = len(prev.pending())
     # open contracts (ACTIVE / RENEWED / CLOSE_REQUESTED) in partnership store

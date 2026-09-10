@@ -33,8 +33,11 @@ class AudienceDirectory:
         query = query or AudienceQuery()
         if query.scope != "reward":
             return []
-        if self.authoritative is not None and hasattr(self.authoritative, "active_user_ids"):
-            result = list(dict.fromkeys(str(value) for value in self.authoritative.active_user_ids()))
+        if self.authoritative is not None:
+            getter = getattr(self.authoritative, "list_active_user_ids", None) or getattr(self.authoritative, "active_user_ids", None)
+            if getter is None:
+                raise RuntimeError("authoritative audience directory has no active-user query")
+            result = list(dict.fromkeys(str(value) for value in getter()))
             requested = {str(value) for value in (query.user_ids or ())}
             return [value for value in result if not requested or value in requested]
         if self.reward_store is None:
