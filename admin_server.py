@@ -6,6 +6,7 @@ from pathlib import Path
 from wsgiref.simple_server import make_server
 
 import config
+from launch_scope import assert_nonfinancial_scope
 from admin_api import AdminReadAPI
 from admin_http import AdminWSGI
 from admin_idempotency import IdempotencyStore
@@ -41,6 +42,7 @@ class _LedgerFacade:
 
 
 def build_runtime_app(*, dev: bool = False):
+    assert_nonfinancial_scope(config)
     shared_store = JsonStore(config.REWARD_STORE_PATH)
     roles = RoleRegistry(SharedKV(config.PLATFORM_DB_PATH, legacy=shared_store), config.OWNER_USER_ID)
     # Destinations + credentials live in the SQLite verification DB shared by both bots.

@@ -5,12 +5,13 @@ import json
 from pathlib import Path
 
 from admin_deploy import admin_preflight
+from launch_scope import financial_scope_report
 
 
 def run_go_live_check(root: str | Path, *, bot_token: str, owner_id: str,
                       allowed_origins: list[str], database_paths: dict[str, str | Path],
                       ads_enabled: bool = False, ads_terms_published: bool = False,
-                      onboarding_url: str = "") -> dict:
+                      onboarding_url: str = "", scope_config=None) -> dict:
     root = Path(root)
     checks = {}
     errors = admin_preflight(root, bot_token=bot_token, owner_id=owner_id,
@@ -22,9 +23,10 @@ def run_go_live_check(root: str | Path, *, bot_token: str, owner_id: str,
         name: {"configured": bool(str(path)), "path": str(path)}
         for name, path in database_paths.items()
     }
-    checks["financial_features"] = {
+    checks["financial_features"] = financial_scope_report(scope_config) if scope_config is not None else {
         "revenue": "disabled", "deposits": "disabled", "withdrawals": "disabled",
-        "external_payouts": "disabled",
+        "external_payouts": "disabled", "payments": "disabled", "boost": "disabled",
+        "currency_conversion": "disabled", "ok": True,
     }
     # Advertising may only be ON when versioned terms exist for consent to reference.
     checks["advertising"] = {
@@ -43,7 +45,7 @@ def run_go_live_check(root: str | Path, *, bot_token: str, owner_id: str,
                  "ONBOARDING_WEBAPP_URL unset — members will paste tokens into chat (weaker); set it before launch"),
     }
     return {"ok": checks["admin_preflight"]["ok"] and checks["frontend"]["ok"] and checks["advertising"]["ok"]
-            and checks["token_onboarding"]["ok"],
+            and checks["token_onboarding"]["ok"] and checks["financial_features"]["ok"],
             "checks": checks}
 
 
@@ -57,6 +59,7 @@ def main() -> int:
         owner_id=str(config.OWNER_USER_ID),
         allowed_origins=config.ADMIN_ALLOWED_ORIGINS,
         onboarding_url=config.ONBOARDING_WEBAPP_URL,
+        scope_config=config,
         database_paths={
             "mint": config.MINT_DB_PATH,
             "tasks": config.TASK_DB_PATH,

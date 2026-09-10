@@ -56,6 +56,17 @@ ADS_DB_PATH = env("ADS_DB_PATH", os.path.join(STORE_DIR, "ads.sqlite3"))
 # Advertising kill switch. OFF by default: consents/terms/drafts/review can be
 # prepared, but nothing queues or delivers until the owner flips this on.
 ADS_ENABLED = env("ADS_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+# Non-financial MVP launch guard. These capabilities are intentionally disabled.
+def bool_flag(key: str) -> bool:
+    return env(key, "false").strip().lower() in {"1", "true", "yes", "on"}
+DEPOSITS_ENABLED = bool_flag("DEPOSITS_ENABLED")
+WITHDRAWALS_ENABLED = bool_flag("WITHDRAWALS_ENABLED")
+CRYPTO_PAYMENTS_ENABLED = bool_flag("CRYPTO_PAYMENTS_ENABLED")
+FIAT_PAYMENTS_ENABLED = bool_flag("FIAT_PAYMENTS_ENABLED")
+TELEGRAM_STARS_ENABLED = bool_flag("TELEGRAM_STARS_ENABLED")
+BOOST_PURCHASES_ENABLED = bool_flag("BOOST_PURCHASES_ENABLED")
+EXTERNAL_PAYOUTS_ENABLED = bool_flag("EXTERNAL_PAYOUTS_ENABLED")
+CURRENCY_CONVERSION_ENABLED = bool_flag("CURRENCY_CONVERSION_ENABLED")
 ADMIN_ALLOWED_ORIGINS = [item.strip() for item in env("ADMIN_ALLOWED_ORIGINS", "").split(",") if item.strip()]
 # Public HTTPS URL of the member onboarding Mini App (served by admin_server at
 # /onboarding_web/). When unset the bots fall back to the in-chat /connectbot flow.
