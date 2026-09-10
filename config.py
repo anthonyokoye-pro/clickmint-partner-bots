@@ -75,7 +75,7 @@ ONBOARDING_WEBAPP_URL = env("ONBOARDING_WEBAPP_URL", "").strip()
 # reverse proxy and ADMIN_ALLOWED_ORIGINS in production.
 ADMIN_BIND_HOST = env("ADMIN_BIND_HOST", "0.0.0.0")
 # Shared low-cost worker coordination: rate buckets and delivery metrics.
-WORKER_DB_PATH = os.path.join(STORE_DIR, "worker.sqlite3")
+WORKER_DB_PATH = env("WORKER_DB_PATH", os.path.join(STORE_DIR, "worker.sqlite3"))
 WORKER_RATE_PER_SECOND = float(env("WORKER_RATE_PER_SECOND", "1"))
 # A modest burst avoids penalising a restart while the sustained rate still
 # protects Telegram; operators can reduce this for stricter staging tests.
