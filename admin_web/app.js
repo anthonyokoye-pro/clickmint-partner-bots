@@ -13,7 +13,7 @@
   }
   async function campaignAction(action, id, campaign) {
     if (action === "inspect") { try { const data=await api(`/api/admin/broadcasts/${encodeURIComponent(id)}/deliveries`); const d=data.deliveries||[]; $("notice").textContent=`${d.length} deliveries: ${d.filter(x=>x.status==='sent').length} sent, ${d.filter(x=>x.status==='failed').length} failed, ${d.filter(x=>x.status==='pending').length} pending`; } catch(e) { $("notice").textContent=e.message; } return; }
-    if (["cancel", "delete"].includes(action)) && !confirm(`${action === "delete" ? "Delete" : "Cancel"} ${campaign.title || campaign.campaign_id}?`)) return;
+    if (["cancel", "delete"].includes(action) && !confirm(`${action === "delete" ? "Delete" : "Cancel"} ${campaign.title || campaign.campaign_id}?`)) return;
     let body = {reason: `Admin Mini App ${action}`};
     if (action === "edit") {
       const title = prompt("Campaign title", campaign.title || "");
