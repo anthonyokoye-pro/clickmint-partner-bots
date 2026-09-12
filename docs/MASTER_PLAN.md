@@ -64,6 +64,11 @@ posts* is the signal, not raw subscriber count.
 
 ## PART 2 — BOT SYSTEM DESIGN (directory library)
 
+> ⚠️ **HISTORICAL (2026-09-04).** Parts 2 and 3 describe the original three-bot/JSON design and the
+> audit of that date. Storage, verification, delivery routing, admin surface and test counts have all
+> changed since; see **`docs/STATUS.md`** for the current state. Part 1 (growth strategy) and Part 4
+> (handoff) remain valid.
+
 This is how the codebase is structured, so the next AI session can read it fast and
 accurately (no wasted session/limit).
 
@@ -278,3 +283,32 @@ All saved in `CLICKMINT_Quality_Partnership_Research.md` and Part 1 above.
   report loop) and 17 medium issues — all fixed, all covered by tests.
 - **Handoff** (Part 4): a ready repo to push + a ready prompt so the next session starts from
   verified state and doesn't burn its limit.
+
+## 2026-09 compliance-first continuation
+
+Before financial or growth expansion, the platform must complete:
+
+- Admin enforcement/report/evidence/timeline UI and appeal workflow;
+- safe-mode wiring into every broadcast, task, registration, reward, and posting worker;
+- campaign title/edit/delete lifecycle and separate consent-aware Ad Campaign model;
+- Telegram-supported formatting editor using message entities/parse modes, never invented markup;
+- cross-platform persistence/concurrency verification and a real requirements-installed bot test run;
+- named HTTPS deployment only when a stable domain/host is available.
+
+Quick Cloudflare tunnels remain development/testing infrastructure only. Financial features
+remain disabled until these safety and operational controls are validated.
+
+## Future AI intelligence and anti-bot roadmap
+
+AI is an optional intelligence layer, never a core dependency. The staged path is
+Observe → Propose → Test → Controlled implementation → Limited automation. High-impact
+security, enforcement, authentication, financial, and production changes require human
+approval. The knowledge base should remain versioned documentation, structured events,
+SQLite records, and engineering decision records until scale justifies search/indexing
+infrastructure.
+
+Human verification is risk-based, not universal. Telegram identity, rate limits, behavior,
+reputation, enforcement, and a replaceable provider result must be combined. Turnstile is a
+candidate for a free provider, but it must be validated server-side, single-use, and
+short-lived; it is not proof of innocence or humanity. Do not challenge normal read-only
+navigation or every Mini App session.

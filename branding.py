@@ -29,7 +29,7 @@ REWARD = {
     "description": (
         "CLICKMINT is a partner & reward network for AI, crypto and airdrop "
         "channels.\n\n"
-        "Earn credits by sharing another channel's post, then spend them to get your "
+        "Earn 🪙 MINT by sharing another channel's post, then spend it to get your "
         "own posts shared across the network. Every post is vetted: niche content "
         "only, no spam, no money-asking, no scam, no third-party ads.\n\n"
         "Performance beats size — your daily cap scales with size x how well you "
@@ -37,13 +37,12 @@ REWARD = {
         "Partner with channels you choose, agree a contract, and the owner mediates."
     ),
     "short_description": (
-        "Verified partner & reward network for AI/crypto channels. Earn credits, share "
-        "posts, partner safely."
+        "Verified partner & reward network for AI/crypto channels. Earn 🪙 MINT, share posts safely."
     ),
     "commands": [
         ("start", "Open the menu / register your channel"),
         ("register", "Register: /register @yourchannel <subscribers>"),
-        ("balance", "Your credits, earned and spent"),
+        ("balance", "Your 🪙 MINT wallet, earned and spent"),
         ("adminlogin", "Redeem a one-time admin invite code"),
     ],
 }

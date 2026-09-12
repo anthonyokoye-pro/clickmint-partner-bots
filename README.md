@@ -4,7 +4,7 @@ Three bots (reward · partnership · owner admin panel) sharing one verified eng
 (`core.py` + `governance.py`). Zero budget, free hosting, JSON store.
 
 **Status:** `python3 test_core.py` 28/28 · `python3 test_governance.py` 33/33 ·
-`python3 test_bots.py` 26/26 (bot wiring) · `python3 simulate.py` clean dry run.
+`python3 test_bots.py` 37/37 (bot wiring) · `python3 simulate.py` clean dry run.
 See `docs/AUDIT_REPORT.md` and the readable transcript in `docs/DRY_RUN.md`.
 
 **New here / not comfortable with the terminal?** Read **[START_HERE.md](START_HERE.md)** —
@@ -33,8 +33,11 @@ Tiered network, strict 1:1 credits, accept/reject chain.
 - **+2 onboarding seed** on join.
 - **Owner (CLICKMINT) is exempt** — no funnel, no credits, no cap; can route anywhere.
 
-Commands: `/start @chan 1200` · `/register @chan 1200` · `/balance` · `/rank` · `/audit` ·
-`/reports` · `/schedule` · `/adminlogin <CODE>` · or just **forward a post** to distribute.
+Commands: `/start @chan` · `/register @chan` · `/balance` · `/rank` · `/audit` ·
+`/reports` · `/schedule` · `/appeal <why>` · `/report @target <why>` (or reply `/report <why>` inside a
+registered group) · `/ads` (advertising consent, see `docs/ADVERTISING.md`) · `/adminlogin <CODE>` ·
+or just **forward a post** to distribute. Telegram member/subscriber counts are retrieved from
+Telegram after the user's own bot is verified; manual counts are not authoritative.
 (There is no `/agree` command — agreeing happens on the offer's buttons, so the credit
 goes to the channel that actually shares someone else's post.)
 
@@ -74,21 +77,17 @@ clicks buttons **by their label**, so a dead button or a missing menu entry fail
 mocked session, so a dead handler, an unrenderable menu or a broken funnel is caught before
 deploy.
 
-> **CI note:** `.github/workflows/tests.yml` in this working tree already runs all four
-> checks, but that file is **not pushed** — GitHub refuses workflow edits from the
-> assistant's app ("without `workflows` permission"). Commit it yourself:
-> ```bash
-> git add .github/workflows/tests.yml
-> git commit -m "CI: run the bot wiring suite + branding check"
-> git push
-> ```
-> (Or paste the same two steps into the file via GitHub's web editor.)
+> **CI:** `.github/workflows/tests.yml` installs `requirements.txt` and runs the
+> dependency-aware `run_all_tests.py` suite. Local runs should use the same
+> environment, for example `/tmp/cmvenv/bin/python run_all_tests.py`.
 
 ## 5. Files
 | File | Purpose |
 |---|---|
 | `core.py` | The engine: tiering, credit ledger, earn/spend, anti-cheat, **report system**, **performance engine**, contract, distribution. Verified. |
-| `store.py` | JSON persistence (swap for SQLite/Supabase later). |
+| `store.py` | Legacy JSON persistence for existing network state. |
+| `mint_ledger.py` | Canonical transactional Mint/user account source backed by SQLite; legacy JSON is migration metadata, not authority. |
+| `migrate_mint.py` | Additive migration and balance verification from the legacy JSON ledger. |
 | `reward_bot.py` | aiogram wiring for reward bot. |
 | `partnership_bot.py` | aiogram wiring for partnership bot. |
 | `governance.py` | Rules layer: daily cap, submission gate, review queue, partner contracts, roles. |
@@ -97,6 +96,11 @@ deploy.
 | `ui.py` | Shared button menus + role routing. |
 | `branding.py` | The approved branding copy (`docs/BOT_BRANDING.md`) + a pusher for the Bot API. |
 | `views_provider.py` | **Optional** MTProto observer — the only way to read live channel views. |
+| `telegram_verification.py` | User-owned Telegram bot credential storage, Bot API verification, and real member-count retrieval. |
+| `delivery_worker.py` | Shared delivery rate limiting, recovery coordination, and SQLite metrics. |
+| `user_directory.py` | Canonical SQLite Mint user/account boundary; legacy JSON is migration input only. |
+| `services/` | Application service boundaries for broadcast and task lifecycle orchestration. |
+| `staging_telegram_check.py` | Opt-in read-only real Telegram staging smoke test. |
 | `test_core.py` | Engine tests (28). |
 | `test_governance.py` | Rules/roles/branding tests (33). |
 | `test_bots.py` | Bot wiring tests (26) — handlers, menus, funnel, roles, owner bypass. |
@@ -114,14 +118,16 @@ deploy.
   reliability + reputation. Bands A/B/C; match **like-with-like**; promote/demote as scores change;
   subscriber size is only a tiebreaker. Real views need `views_provider.py` (MTProto); without it
   the engine uses the reliability proxy (no fake views).
-- **`/rank`** shows the live score/band/status per channel.
+- **`/rank`** shows the live score/performance-tier/status per channel; the user-facing menu label is `🏆 Leaderboard`.
+- **User-owned Telegram verification:** each destination owner connects their own BotFather bot with `/connectbot`, adds it as an administrator, and registers with `/register @destination`. Telegram supplies member counts; manual counts are not accepted.
+- **Fail-closed participation:** destinations receive zero participation capacity until bot identity, administrator status, permissions, accessibility, eligibility, and active state are verified.
 
 ## 7. Governance features (governance.py — 33 tests)
 The terms & limits + roles you asked for. Pure logic in `governance.py`, tested by `test_governance.py`.
-- **Post limit scales with size × performance.** `daily_post_cap(size, band, status, is_owner)`:
-  size base (1–4 slots) × performance multiplier (A=1.0, B=0.75, C=0.5). Floor of 1 for any
-  ACTIVE channel (never zeroed); RESTRICTED/REMOVED = 0; owner = unlimited. So a small channel
-  can't spam 10 posts/day — it's capped to what it can realistically deliver.
+- **Post limit scales with size × performance after verification.** `daily_post_cap(size, band, status, is_owner, connected)`:
+  unverified destinations receive 0 slots; verified size base (1–4 slots) × performance multiplier
+  (A=1.0, B=0.75, C=0.5) applies a floor of 1; RESTRICTED/REMOVED = 0; owner is unlimited only
+  after verification. No unconnected participation allowance remains.
 - **Submission gate (terms & regulations):** sender must accept the terms (button), declare a
   **niche category** (from `POST_CATEGORIES`), and the category must be one the target channel
   agreed to *receive*. Hard-block list catches scam / money-asking / fraud / phishing / free-stuff
@@ -176,3 +182,12 @@ The full project documentation lives in `docs/` — read this before changing co
 - Add each bot as **admin (Post Messages)** in your own channel so it can post for you.
 - For partners who want true automation, have them add your bot as admin in their channel.
 - Keep volume low and always respect a partner's choice — this is a trust network, not a spam tool.
+
+## Compliance and enforcement
+
+CLICKMINT is compliance-first: it verifies Telegram permissions before direct posting,
+validates Mini App initData server-side, keeps borderline content in human review, and
+never treats one report or keyword as proof of wrongdoing. The durable enforcement,
+report, evidence, timeline, and safe-mode foundation is in `enforcement.py`; its policy and
+current gaps are documented in `docs/COMPLIANCE_AND_ENFORCEMENT.md`. Revenue, deposits,
+Boost purchases, withdrawals, and external payouts remain disabled.

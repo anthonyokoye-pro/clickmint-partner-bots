@@ -45,15 +45,19 @@ if ! sudo -u "$APP_USER" env -C "$APP_DIR" "$APP_DIR/.venv/bin/python3" prefligh
 fi
 
 echo "==> Installing systemd services (all THREE bots)"
-sudo cp "$APP_DIR/clickmint.service" "$APP_DIR/clickmint-partner.service" \
+# Install the reward unit under the name used by systemd below. The source file
+# is named clickmint.service for backwards compatibility with manual installs.
+sudo cp "$APP_DIR/clickmint.service" \
+        /etc/systemd/system/clickmint-reward.service
+sudo cp "$APP_DIR/clickmint-partner.service" \
         "$APP_DIR/clickmint-admin.service" /etc/systemd/system/
-# point at the venv python
+# Point at the venv python.
 sudo sed -i "s#/usr/bin/python3#$APP_DIR/.venv/bin/python3#" \
-     /etc/systemd/system/clickmint.service \
+     /etc/systemd/system/clickmint-reward.service \
      /etc/systemd/system/clickmint-partner.service \
      /etc/systemd/system/clickmint-admin.service || true
 sudo systemctl daemon-reload
-sudo systemctl enable clickmint-reward clickmint-partner clickmint-admin 2>/dev/null || true
+sudo systemctl enable clickmint-reward clickmint-partner clickmint-admin
 sudo systemctl restart clickmint-reward clickmint-partner clickmint-admin
 
 echo "==> Done. Check logs:"

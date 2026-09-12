@@ -50,7 +50,7 @@ Shorter alternative (if you want one line): `CLICKMINT Partner Network`
 ```
 CLICKMINT is a partner & reward network for AI, crypto and airdrop channels.
 
-Earn credits by sharing another channel's post, then spend them to get your own posts
+Earn 🪙 MINT by sharing another channel's post, then spend it to get your own posts
 shared across the network. Every post is vetted: niche content only, no spam, no
 money-asking, no scam, no third-party ads.
 
@@ -62,7 +62,7 @@ Partner with channels you choose, agree a contract, and the owner mediates.
 
 ### About / short description  (≤120 chars — profile page + share)
 ```
-Verified partner & reward network for AI/crypto channels. Earn credits, share posts, partner safely.
+Verified partner & reward network for AI/crypto channels. Earn 🪙 MINT, share posts safely.
 ```
 
 ---

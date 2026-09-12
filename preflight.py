@@ -19,6 +19,11 @@ import re
 import sys
 
 import config
+from console import configure as configure_console
+
+# Windows consoles may default to a legacy code page that cannot print the
+# status symbols below. Configure streams before emitting any diagnostics.
+configure_console()
 
 TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{30,}$")
 PLACEHOLDERS = {"", "YOUR_REWARD_BOT_TOKEN", "YOUR_PARTNER_BOT_TOKEN",
@@ -91,7 +96,21 @@ def check_local() -> None:
         good(f"OWNER_USER_ID = {config.OWNER_USER_ID} — exempt from credits/caps, "
              "sole grantor of admin invites")
 
-    print("\n\033[1m3. Storage\033[0m")
+    print("\n\033[1m3. User-owned bot credential security\033[0m")
+    if not config.CLICKMINT_CREDENTIAL_KEY or len(config.CLICKMINT_CREDENTIAL_KEY) < 32:
+        bad("CLICKMINT_CREDENTIAL_KEY is missing or too short",
+            "set a random secret of at least 32 characters in the deployment secret manager")
+    else:
+        good("CLICKMINT_CREDENTIAL_KEY is configured")
+
+    print("\n\033[1m4. Verification policy\033[0m")
+    if config.VERIFICATION_MAX_AGE_SECONDS <= 0:
+        bad("VERIFICATION_MAX_AGE_SECONDS must be positive",
+            "set it to a positive number of seconds, such as 86400")
+    else:
+        good(f"Verification freshness = {config.VERIFICATION_MAX_AGE_SECONDS} seconds")
+
+    print("\n\033[1m5. Storage\033[0m")
     store_dir = os.path.abspath(config.STORE_DIR)
     if not os.path.isdir(store_dir):
         bad(f"STORE_DIR does not exist: {store_dir}", f"mkdir -p {store_dir}")
@@ -107,11 +126,13 @@ def check_local() -> None:
 
 
 async def check_live() -> None:
-    print("\n\033[1m4. Telegram\033[0m")
+    print("\n\033[1m6. Telegram\033[0m")
     try:
         from aiogram import Bot
-    except ImportError:
-        bad("aiogram is not installed", "pip install -r requirements.txt")
+        import cryptography  # noqa: F401
+    except ImportError as exc:
+        bad(f"required dependency is not installed: {exc.name or exc}",
+            "pip install -r requirements.txt")
         return
 
     for name, tok, script in BOTS:

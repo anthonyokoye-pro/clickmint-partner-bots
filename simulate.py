@@ -23,6 +23,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 import textwrap
 
 QUIET = "--quiet" in sys.argv
@@ -35,10 +36,12 @@ os.environ.setdefault("PARTNER_BOT_TOKEN", "222222:SIMTOKENSIMTOKENSIMTOKENSIMTO
 os.environ.setdefault("ADMIN_BOT_TOKEN", "333333:SIMTOKENSIMTOKENSIMTOKENSIMTOKEN")
 OWNER_ID = 555000555
 os.environ["OWNER_USER_ID"] = str(OWNER_ID)
+os.environ["CLICKMINT_CREDENTIAL_KEY"] = "simulation-only-key"
 
 from aiogram.client.session.base import BaseSession                # noqa: E402
 from aiogram.types import (CallbackQuery, Chat, Message,           # noqa: E402
                            MessageOriginUser, Update, User)
+from telegram_verification import VerificationResult       # noqa: E402
 
 import admin_bot                                                   # noqa: E402
 import partnership_bot                                             # noqa: E402
@@ -132,6 +135,7 @@ class Sim:
 
     def attach(self, module):
         module.bot.session = SimSession(self)
+
 
     # -- record + render every outgoing call -------------------------------
     def on_call(self, name: str, data: dict):
@@ -265,6 +269,26 @@ async def main() -> int:
         sim.attach(mod)
     R, P, A = reward_bot, partnership_bot, admin_bot
 
+    async def fake_connect(owner_id: int, token: str) -> dict:
+        return R.bot_credentials.save(owner_id, token,
+                                      {"id": owner_id + 900000, "is_bot": True,
+                                       "username": f"sim_bot_{owner_id}"})
+
+    async def fake_verify(owner_id: int, chat_ref) -> VerificationResult:
+        counts = {"@alphadrops": 12000, "@bravoai": 4300,
+                  "@charliedefi": 2600, "@deltaguides": 300}
+        ref = str(chat_ref)
+        return VerificationResult("VERIFIED", True, ref, "channel", ref.lstrip("@"),
+                                  ref.lstrip("@"), "administrator", counts.get(ref, 1000),
+                                  int(time.time()), (), {"can_post_messages": True})
+
+    R.telegram_verification.connect_bot = fake_connect
+    R.telegram_verification.verify = fake_verify
+    P.telegram_verification.connect_bot = fake_connect
+    P.telegram_verification.verify = fake_verify
+    for actor in (ALPHA, BRAVO, CHARLIE, DELTA):
+        await sim.send(R, actor, "/connectbot 999:simulation-token")
+
     print(f"{BOLD}CLICKMINT offline simulation{RESET}  "
           f"{DIM}(real handlers, mocked Telegram — nothing is sent){RESET}")
     print(f"{DIM}state dir: {_TMP}   owner user id: {OWNER_ID}{RESET}")
@@ -277,15 +301,15 @@ async def main() -> int:
 
     # ---------------------------------------------------------------- 2
     head(2, "Everyone registers a channel")
-    await sim.send(R, ALPHA, "/register @alphadrops 12000")
-    expect("Registered" in sim.last_text(), "/register parses '@channel <subs>'")
-    await sim.send(R, BRAVO, "/register @bravoai 4300")
-    await sim.send(R, CHARLIE, "/register @charliedefi 2600")
-    await sim.send(R, DELTA, "/register @deltaguides 300")
-    note("the audited build never parsed these args — everyone stayed at size 0")
+    await sim.send(R, ALPHA, "/register @alphadrops")
+    expect("VERIFIED" in sim.last_text(), "registration verifies the user-owned bot")
+    await sim.send(R, BRAVO, "/register @bravoai")
+    await sim.send(R, CHARLIE, "/register @charliedefi")
+    await sim.send(R, DELTA, "/register @deltaguides")
+    note("member counts came from the mocked Telegram Bot API, never user input")
 
     await sim.send(R, ALPHA, "/balance")
-    expect("balance 2" in sim.last_text(), "onboarding seed is 2 credits")
+    expect("🪙 2 MINT" in sim.last_text(), "onboarding seed is 2 MINT")
 
     # ---------------------------------------------------------------- 3
     head(3, "Alpha walks the submission funnel (buttons only)")
@@ -295,7 +319,8 @@ async def main() -> int:
     await sim.tap(R, ALPHA, "Accept")
     await sim.tap(R, ALPHA, "Airdrops")
     await sim.tap(R, ALPHA, "Forward")
-    await sim.tap(R, ALPHA, "Loud")
+    # Loud is group-only; the registered destinations here are channels.
+    await sim.tap(R, ALPHA, "Silent")
     await sim.tap(R, ALPHA, "Submit")
 
     # ---------------------------------------------------------------- 4
@@ -341,8 +366,8 @@ async def main() -> int:
         if who:
             await sim.tap(R, who, "Agree", screen=handle)
     await sim.send(R, ALPHA, "/balance")
-    expect("earned 1" in sim.last_text(),
-           "Alpha earned +1 for SHARING someone else's post (not for sending one)")
+    expect("Earned: 🪙 1 MINT" in sim.last_text(),
+           "Alpha earned 🪙 1 MINT for SHARING someone else's post (not for sending one)")
 
     # ---------------------------------------------------------------- 8
     head(8, "Now Alpha's own post can circulate")
@@ -356,7 +381,7 @@ async def main() -> int:
            "tapping the number actually distributes (pick_spend is registered)")
     bal_after = reward_bot.ledger.balance(ALPHA.handle)["balance"]
     expect(bal_after < bal_before,
-           f"credits were charged to the sender: {bal_before} → {bal_after}")
+           f"MINT was charged to the sender: {bal_before} → {bal_after}")
 
     # ---------------------------------------------------------------- 9
     head(9, "Self-dealing: can Alpha agree to Alpha's own post?")
@@ -443,7 +468,7 @@ async def main() -> int:
     await sim.tap(R, DELTA, "Guides")
     await sim.tap(R, DELTA, "Submit")
     cap = reward_bot.daily_post_cap(300, reward_bot.perf.score(DELTA.handle)["band"],
-                                    "ACTIVE", False)
+                                    "ACTIVE", False, connected=False)
     note(f"computed cap for a 300-sub channel: {cap} post(s)/day")
     note("(the cap is consumed when a post is DISTRIBUTED, not when it is submitted)")
     blocked = False

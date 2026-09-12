@@ -25,6 +25,7 @@ import os
 import sys
 import tempfile
 import traceback
+import time
 
 # --- isolate the stores + a known owner BEFORE the bot modules are imported ---
 _TMP = tempfile.mkdtemp(prefix="clickmint-tests-")
@@ -32,6 +33,7 @@ os.environ["STORE_DIR"] = _TMP
 os.environ["REWARD_BOT_TOKEN"] = "111111:TESTTOKENTESTTOKENTESTTOKENTESTTOKEN"
 os.environ["PARTNER_BOT_TOKEN"] = "222222:TESTTOKENTESTTOKENTESTTOKENTESTTOKEN"
 os.environ["ADMIN_BOT_TOKEN"] = "333333:TESTTOKENTESTTOKENTESTTOKENTESTTOKEN"
+os.environ["CLICKMINT_CREDENTIAL_KEY"] = "test-only-credential-key-please-change"
 OWNER_ID = 555000555
 os.environ["OWNER_USER_ID"] = str(OWNER_ID)
 
@@ -60,10 +62,22 @@ class MockSession(BaseSession):
     async def stream_content(self, *args, **kwargs):    # pragma: no cover
         yield b""
 
+    # Telegram semantics the old mock ignored: a bot can only forward a message it
+    # can read. Inbox copies belong to the bot whose token received them. Set
+    # `visible_chats[token_prefix]` to the chat ids that bot may read from; when a
+    # bot forwards from anything else we raise like Telegram does. Unset → lenient.
+    visible_chats: dict | None = None
+
     async def make_request(self, bot, method, timeout=None):
         name = type(method).__name__
         data = method.model_dump(exclude_none=True)
         self.calls.append((name, data))
+        if name == "ForwardMessage" and self.visible_chats is not None:
+            from aiogram.exceptions import TelegramBadRequest
+            who = str(bot.token).split(":", 1)[0]
+            allowed = {str(c) for c in self.visible_chats.get(who, ())}
+            if str(data.get("from_chat_id")) not in allowed:
+                raise TelegramBadRequest(method=method, message="Bad Request: message to forward not found")
         if name in ("SendMessage", "ForwardMessage", "EditMessageText"):
             return Message(message_id=len(self.calls) + 1000,
                            date=dt.datetime.now(dt.timezone.utc),
@@ -94,16 +108,21 @@ def _fresh_bot(module) -> MockSession:
     module.bot.session = session
     module.store._data = {}
     module.store._dirty = set()
+    vs = getattr(module, "verification_store", None)
+    if vs is not None:                       # shared SQLite: wipe both tables too
+        vs._conn.execute("DELETE FROM destinations"); vs._conn.execute("DELETE FROM bot_credentials")
+        vs.reload()
     if hasattr(module, "ledger"):
         module.ledger.ledger = {}
         module.ledger.store["ledger"] = {}
     module.store.sync()
-    for attr in ("audit", "reports", "review", "contracts", "sched"):
+    for attr in ("reports", "review", "contracts", "sched"):
         obj = getattr(module, attr, None)
         if obj is not None and hasattr(obj, "key"):
             module.store[obj.key] = []
-    module.store["roles_users"] = {}
-    module.store["roles_invites"] = {}
+    module.audit.clear()                     # shared SQLite audit table
+    module.platform_kv.clear()               # shared SQLite roles
+    module.platform_kv.reload()
     module.store["sessions"] = {}
     module.store.sync()
     return session
@@ -227,19 +246,17 @@ def test_menus_build_without_positional_args():
 # ---------------------------------------------------------------------------
 # 2) Reward bot — registration, funnel, credits, caps
 # ---------------------------------------------------------------------------
-def test_start_registers_a_channel():
+def test_start_requires_user_bot_and_rejects_manual_count():
     s = _fresh_bot(reward_bot)
     errs = run(feed(reward_bot, make_message("/start @MyChan 1200", uid=1001)))
-    assert_no_errors(errs, "/start with args")
-    assert "@MyChan" in reward_bot.ledger.ledger
-    assert reward_bot.ledger.ledger["@MyChan"]["size"] == 1200
-    assert "Registered @MyChan" in s.texts()
-    # a typo answers with help instead of exploding
+    assert_no_errors(errs, "/start with manual count")
+    assert "@MyChan" not in reward_bot.ledger.ledger
+    assert "Telegram" in s.texts() or "Usage" in s.texts()
     s.reset()
     errs = run(feed(reward_bot, make_message("/register @Other twelve", uid=1002)))
-    assert_no_errors(errs, "/register with a bad number")
-    assert "not a number" in s.texts()
-    print("OK /start and /register actually register a channel")
+    assert_no_errors(errs, "/register with legacy count")
+    assert "Usage" in s.texts()
+    print("OK registration rejects manual counts and requires Telegram verification")
 
 
 def test_menu_and_cap_screens_render():
@@ -254,8 +271,18 @@ def test_menu_and_cap_screens_render():
 
 
 def _register(module, username: str, uid: int, size: int, **flags):
-    m = module.ledger.register("@" + username, size, **flags)
-    module.ledger.set_user_id("@" + username, uid)
+    handle = "@" + username
+    m = module.ledger.register(handle, size, **flags)
+    module.ledger.set_user_id(handle, uid)
+    # Test fixtures represent a destination that has completed the new
+    # user-owned-bot verification flow; manual ledger rows are intentionally
+    # not eligible for participation.
+    registry = getattr(module, "channels", None)
+    if registry is not None:
+        registry.add(uid, handle, handle, "channel", ["General"], size=size, bot_added=True)
+        registry.update(uid, handle, verified_state="VERIFIED", status="ACTIVE",
+                        telegram_member_count=size, telegram_member_count_source="telegram_api",
+                        last_verified_at=int(__import__('time').time()))
     return m
 
 
@@ -358,6 +385,134 @@ def test_chain_agree_credits_the_sharer_not_the_sender():
     print("OK the credit goes to the channel that shares, not the one that posts")
 
 
+def test_destination_inline_controls_and_background_reverify():
+    """Step 4/5: /mychannels renders per-destination controls; Re-verify runs a
+    live check through the state machine; the background worker only touches
+    destinations that are due and notifies the owner on a real status change."""
+    import destination_state
+    s = _fresh_bot(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    reward_bot.channels.update(1001, "@alice", last_verified_at=int(time.time()) - 7 * 3600)
+    s.reset()
+    errs = run(feed(reward_bot, make_message("/mychannels", uid=1001, username="alice")))
+    assert_no_errors(errs, "/mychannels")
+    assert "Re-verify" in s.texts()
+    sent = [d for d in s.sent() if d.get("reply_markup")]
+    assert sent, "no inline controls rendered"
+    # Re-verify with a stubbed Telegram: the bot lost admin rights.
+    async def degraded_verify(uid, ref):
+        return destination_state and __import__('telegram_verification').VerificationResult(
+            state="DEGRADED", eligible=False, chat_id="-100123", chat_type="channel",
+            username="alice", member_status="member", member_count=2500, checked_at=int(time.time()),
+            reasons=("bot is not an administrator",),
+            checks={"destination": "passed", "bot_membership": "passed",
+                    "administrator": "failed", "permissions": "failed"},
+            error_kind="not_enough_rights")
+    original = reward_bot.telegram_verification.verify
+    reward_bot.telegram_verification.verify = degraded_verify
+    try:
+        s.reset()
+        errs = run(feed(reward_bot, make_callback("dest:verify:0", 1001, "alice")))
+        assert_no_errors(errs, "re-verify tap")
+        row = reward_bot.channels.get("@alice")
+        assert row["verified_state"] == "DEGRADED" and row["status"] == "DEGRADED", row
+        assert row["state_history"][-1]["source"] == "scan"
+        # Background worker: DEGRADED rechecks every 30 min → due after 31 min.
+        async def healthy_verify(uid, ref):
+            r = await degraded_verify(uid, ref)
+            return r.__class__(**{**r.__dict__, "eligible": True, "state": "VERIFIED",
+                                  "member_status": "administrator", "reasons": (), "error_kind": None,
+                                  "checks": {k: "passed" for k in r.checks}})
+        reward_bot.telegram_verification.verify = healthy_verify
+        s.reset()
+        assert run(reward_bot._background_reverify(now=int(time.time()) + 60)) == [], "not due yet"
+        notes = run(reward_bot._background_reverify(now=int(time.time()) + 31 * 60))
+        assert notes and "DEGRADED → ACTIVE" in notes[0], notes
+        row = reward_bot.channels.get("@alice")
+        assert row["status"] == "ACTIVE" and row["state_history"][-1]["source"] == "background"
+        assert "access changed" in s.texts(), "owner must be notified of the change"
+        # Healthy destination is not re-probed again until its 6 h interval elapses.
+        assert run(reward_bot._background_reverify(now=int(time.time()) + 32 * 60)) == []
+    finally:
+        reward_bot.telegram_verification.verify = original
+    # Remove via inline control goes through the state machine and drops the row.
+    s.reset()
+    errs = run(feed(reward_bot, make_callback("dest:remove:0", 1001, "alice")))
+    assert_no_errors(errs, "remove tap")
+    assert reward_bot.channels.get("@alice") is None
+    print("OK inline re-verify + scheduled background re-verification")
+
+
+def test_direct_delivery_uses_a_bot_that_can_read_the_source():
+    """Regression for the relay bug: with Telegram's read rules enforced by the mock,
+    the owner's bot must never be asked to forward the platform bot's inbox copy.
+    Route 1: platform bot administers the destination → platform forwards.
+    Route 2: owner bot administers the ORIGIN channel → owner forwards from origin.
+    Otherwise: fail closed, audited, no fabricated post."""
+    from aiogram.types import MessageOriginChannel
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    _register(reward_bot, "bob", 1002, 2500)
+    reward_bot.ledger.earn("@alice")
+    for u in ("@alice", "@bob"):
+        reward_bot.perf.mark_offered(u); reward_bot.perf.mark_posted(u)
+    # bob's own bot (9002) is connected; the platform bot is 111111.
+    reward_bot.bot_credentials.save(1002, "9002:test-token", {"id": 9002, "username": "bobbot"})
+    from aiogram import Bot as TgBot
+    owner_bot = TgBot(token="9002:test-token"); owner_bot.session = s
+    reward_bot.telegram_verification.bot_factory = lambda token: owner_bot
+    # Strict Telegram semantics: platform bot can read alice's private chat (1001);
+    # bob's bot can read only the channel it administers (-100777).
+    s.visible_chats = {"111111": {1001}, "9002": {-100777}}
+    run(feed(reward_bot, make_callback("terms:accept", 1001, "alice")))
+    run(feed(reward_bot, make_callback("cat:Airdrops", 1001, "alice")))
+
+    def submit_and_route(origin=None):
+        msg = make_message("A verified airdrop guide.", uid=1001, username="alice", forwarded=True)
+        if origin is not None:
+            msg = msg.model_copy(update={"forward_origin": origin})
+        errs = run(feed(reward_bot, msg)); assert_no_errors(errs, "forward")
+        s.reset()
+        errs = run(feed(reward_bot, make_callback("s:1", 1001, "alice"))); assert_no_errors(errs, "route")
+        return [(n, d) for n, d in s.calls if n == "ForwardMessage"]
+
+    # Case A — bob's destination verified with HIS bot and no origin channel he
+    # administers: Auto-post cannot even be enabled (decision #1), and a submission
+    # becomes a chain OFFER — no ForwardMessage is attempted.
+    reward_bot.channels.update(1002, "@bob", telegram_bot_id=9002)
+    errs = run(feed(reward_bot, make_callback("dest:auto:0", 1002, "bob")))
+    assert_no_errors(errs, "auto-post toggle without route")
+    assert not reward_bot.channels.get("@bob").get("auto_post"), "toggle must be refused without a legal route"
+    fwds = submit_and_route()
+    assert not fwds, f"a forward was attempted with no legal route: {fwds}"
+    last = reward_bot.audit.all()[-1]
+    assert last["mode"] == "chain" and last["status"] == "offered", last
+
+    # Case B — origin is a channel bob's bot administers → bob's bot forwards from origin.
+    reward_bot.channels.add(1002, "-100777", "@bobnews", "channel", ["General"], size=100, bot_added=True)
+    reward_bot.channels.update(1002, "-100777", verified_state="VERIFIED", status="ACTIVE", canonical_chat_id=-100777)
+    origin = MessageOriginChannel(type="channel", date=dt.datetime.now(dt.timezone.utc),
+                                  chat=Chat(id=-100777, type="channel", title="Bob News"), message_id=9)
+    # Now bob administers -100777 → the owner may enable Auto-post on @bob.
+    run(feed(reward_bot, make_callback("dest:auto:0", 1002, "bob")))
+    assert reward_bot.channels.get("@bob").get("auto_post") is True
+    reward_bot.ledger.earn("@alice")
+    fwds = submit_and_route(origin)
+    assert fwds and fwds[-1][1]["from_chat_id"] == -100777 and fwds[-1][1]["message_id"] == 9, fwds
+    assert reward_bot.audit.all()[-1].get("relay") == "owner_origin"
+
+    # Case C — bob's destination is administered by the PLATFORM bot → platform forwards inbox copy.
+    reward_bot.channels.update(1002, "@bob", telegram_bot_id=111111)
+    reward_bot.ledger.earn("@alice")
+    fwds = submit_and_route()
+    assert fwds and fwds[-1][1]["from_chat_id"] == 1001, fwds
+    assert reward_bot.audit.all()[-1].get("relay") == "platform"
+    s.visible_chats = None
+    reward_bot.telegram_verification.bot_factory = None
+    print("OK direct delivery is routed to the one bot that can read the source; otherwise fails closed")
+
+
 def test_report_is_filed_pending_for_a_human():
     s = _fresh_bot(reward_bot)
     _register(reward_bot, "alice", 1001, 2500)
@@ -409,11 +564,11 @@ def test_admin_invite_codes_are_owner_only():
     s = _fresh_bot(reward_bot)
     errs = run(feed(reward_bot, make_callback("admin:invite:both", 1001, "alice")))
     assert_no_errors(errs, "non-owner invite attempt")
-    assert not reward_bot.store.get("roles_invites"), "a non-owner generated a code"
+    assert not reward_bot.platform_kv.get("roles_invites"), "a non-owner generated a code"
     s.reset()
     errs = run(feed(reward_bot, make_callback("admin:invite:reward", OWNER_ID, "owner")))
     assert_no_errors(errs, "owner invite")
-    codes = reward_bot.store.get("roles_invites") or {}
+    codes = reward_bot.platform_kv.get("roles_invites") or {}
     assert len(codes) == 1
     code = list(codes)[0]
     # a scoped admin gets exactly that scope, and the code is single-use
@@ -485,18 +640,50 @@ def test_panels_are_closed_to_regular_users():
 # ---------------------------------------------------------------------------
 # 3) Partnership bot
 # ---------------------------------------------------------------------------
+def test_partnership_inline_controls_and_background_reverify():
+    """The partnership store gets the same per-destination controls and worker."""
+    import telegram_verification as tv
+    s = _fresh_bot(partnership_bot)
+    _register(partnership_bot, "dave", 2001, 3000)
+    s.reset()
+    errs = run(feed(partnership_bot, make_message("/mychannels", uid=2001, username="dave")))
+    assert_no_errors(errs, "partnership /mychannels")
+    assert "Re-verify" in s.texts()
+    async def kicked(uid, ref):
+        return tv.VerificationResult(state="DISCONNECTED", eligible=False, chat_id="-100777", chat_type="channel",
+                                     username="dave", member_status="kicked", member_count=3000,
+                                     checked_at=int(time.time()), reasons=("bot was kicked",),
+                                     checks={"destination": "passed", "bot_membership": "failed"},
+                                     error_kind="bot_kicked")
+    original = partnership_bot.telegram_verification.verify
+    partnership_bot.telegram_verification.verify = kicked
+    try:
+        errs = run(feed(partnership_bot, make_callback("dest:verify:0", 2001, "dave")))
+        assert_no_errors(errs, "partnership re-verify tap")
+        row = partnership_bot.channels.get("@dave")
+        assert row["status"] == "DISCONNECTED", row
+        # DISCONNECTED rechecks every 6 h; the worker leaves it alone before then.
+        assert run(partnership_bot._background_reverify(now=int(time.time()) + 3600)) == []
+        assert run(partnership_bot._background_reverify(now=int(time.time()) + 7 * 3600)) == [], "still kicked → no change, no spam"
+        assert partnership_bot.channels.get("@dave")["state_history"][-1]["source"] == "scan", "unchanged recheck must not append history"
+    finally:
+        partnership_bot.telegram_verification.verify = original
+    print("OK partnership bot: inline re-verify + scheduled worker")
+
+
 def test_partnership_start_and_contract():
     s = _fresh_bot(partnership_bot)
     errs = run(feed(partnership_bot, make_message("/start @PartnerChan 3000", uid=2001,
                                                   username="partner")))
     assert_no_errors(errs, "partnership /start")
-    assert partnership_bot.ledger.ledger["@PartnerChan"]["is_partner"] is True
-    # a bad subscriber count must not raise out of the handler
+    assert "@PartnerChan" not in partnership_bot.ledger.ledger
+    assert "bot" in s.texts().lower() or "usage" in s.texts().lower()
+    # Manual counts are no longer accepted by the partnership bot either.
     s.reset()
     errs = run(feed(partnership_bot, make_message("/start @X lots", uid=2001,
                                                   username="partner")))
-    assert_no_errors(errs, "partnership /start with a bad number")
-    assert "Usage" in s.texts()
+    assert_no_errors(errs, "partnership /start with a legacy count")
+    assert "bot" in s.texts().lower() or "usage" in s.texts().lower()
     # a user with NO telegram username used to crash the contract flow ("@"+None)
     s.reset()
     errs = run(feed(partnership_bot, make_message("/contract", uid=2002, username=None)))
@@ -526,6 +713,17 @@ def test_partnership_offer_respects_receive_types_and_cap():
     other = partnership_bot.ledger.register("@doesnt", 2000, is_partner=True)
     other["receive_types"] = ["DeFi"]
     partnership_bot.ledger.save()
+    for handle, owner in (("@sender", 2010), ("@wants", 2020), ("@doesnt", 2030)):
+        partnership_bot.channels.add(owner, handle, handle, "channel", ["General"],
+                                      size=2000, bot_added=True)
+        partnership_bot.channels.update(owner, handle, verified_state="VERIFIED",
+                                        status="ACTIVE", telegram_member_count=2000,
+                                        telegram_member_count_source="telegram_api",
+                                        last_verified_at=int(__import__('time').time()))
+    for owner, bot_id in ((2010, 9010), (2020, 9020), (2030, 9030)):
+        partnership_bot.bot_credentials.save(owner, f"{bot_id}:test-token", {
+            "id": bot_id, "username": f"bot_{owner}"})
+    partnership_bot.telegram_verification.bot_factory = lambda token: partnership_bot.bot
     run(feed(partnership_bot, make_callback("terms:accept", 2010, "sender")))
     run(feed(partnership_bot, make_callback("cat:Airdrops", 2010, "sender")))
     s.reset()
@@ -568,7 +766,7 @@ def test_admin_dashboard_owner_only_and_back_works():
     assert "ADMIN DASHBOARD" in session.texts()
     # every dashboard panel, including the Back button that used to be shadowed
     for data in ("dash:cap", "dash:rev:reward", "dash:rev:partnership",
-                 "dash:contracts", "dash:admins", "dash:back"):
+                 "dash:contracts", "dash:admins", "dash:safety", "dash:back"):
         session.reset()
         errs = run(feed(admin_bot, make_callback(data, OWNER_ID, "owner")))
         assert_no_errors(errs, f"admin panel {data}")
@@ -624,11 +822,308 @@ def test_owner_broadcast_is_not_offered_to_the_owner():
     print("OK the owner's broadcast is never offered back to the owner")
 
 
+# ---------------------------------------------------------------------------
+# Shared enforcement gate is wired into every participation path
+# ---------------------------------------------------------------------------
+def _clean_enforcement(module):
+    """Start every enforcement test from an ACTIVE world with safe mode off."""
+    import sqlite3
+    with sqlite3.connect(module.enforcement.path) as conn:
+        for table in ("enforcement_entities", "enforcement_events", "compliance_reports",
+                      "compliance_evidence", "compliance_appeals", "safety_controls"):
+            conn.execute(f"DELETE FROM {table}")
+
+
+def test_restricted_member_cannot_distribute_but_can_appeal():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    reward_bot.ledger.earn("@alice")
+    run(feed(reward_bot, make_callback("terms:accept", 1001, "alice")))
+    run(feed(reward_bot, make_callback("cat:Airdrops", 1001, "alice")))
+    reward_bot.enforcement.enforce(1001, "user", "RESTRICTED", actor_id="owner",
+                                   reason="human-reviewed report")
+    s.reset()
+    errs = run(feed(reward_bot, make_message("A verified airdrop guide.", uid=1001,
+                                             username="alice", forwarded=True)))
+    assert_no_errors(errs, "forward while restricted")
+    assert "restricted" in s.texts().lower(), s.texts()
+    assert "How many" not in s.texts(), "a restricted member must not reach the funnel"
+    # The member can put their side on record; nothing changes by itself.
+    s.reset()
+    errs = run(feed(reward_bot, make_message("/appeal I was flagged by mistake", uid=1001, username="alice")))
+    assert_no_errors(errs, "/appeal")
+    assert "Appeal apl_" in s.texts(), s.texts()
+    assert reward_bot.enforcement.get(1001, "user")["state"] == "RESTRICTED"
+    # A second appeal while one is open is refused politely.
+    s.reset()
+    run(feed(reward_bot, make_message("/appeal again", uid=1001, username="alice")))
+    assert "already open" in s.texts()
+    # Only an explicit human decision (overturn) restores the member.
+    appeal = reward_bot.enforcement.list_appeals("OPEN")[0]
+    reward_bot.enforcement.decide_appeal(appeal["appeal_id"], "OVERTURNED", decided_by="owner", notes="mistake")
+    assert reward_bot.enforcement.get(1001, "user")["state"] == "ACTIVE"
+    s.reset()
+    errs = run(feed(reward_bot, make_message("A verified airdrop guide.", uid=1001,
+                                             username="alice", forwarded=True)))
+    assert_no_errors(errs, "forward after restore")
+    assert "restricted" not in s.texts().lower()
+    _clean_enforcement(reward_bot)
+    print("OK restricted members are blocked at the shared gate and can appeal to a human")
+
+
+def test_safe_mode_pauses_members_but_never_the_owner_panel():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    run(feed(reward_bot, make_callback("terms:accept", 1001, "alice")))
+    run(feed(reward_bot, make_callback("cat:Airdrops", 1001, "alice")))
+    reward_bot.enforcement.set_emergency(True, actor_id="owner", reason="incident")
+    s.reset()
+    errs = run(feed(reward_bot, make_message("A verified airdrop guide.", uid=1001,
+                                             username="alice", forwarded=True)))
+    assert_no_errors(errs, "forward during safe mode")
+    assert "safe mode" in s.texts().lower(), s.texts()
+    # Owner panels keep working during an incident — that is when they matter.
+    s.reset()
+    errs = run(feed(reward_bot, make_message("/start", uid=OWNER_ID, username="owner")))
+    assert_no_errors(errs, "owner /start in safe mode")
+    assert "Welcome, Owner" in s.texts()
+    reward_bot.enforcement.set_emergency(False, actor_id="owner", reason="resolved")
+    _clean_enforcement(reward_bot)
+    print("OK safe mode pauses member automation without locking the owner out")
+
+
+def test_bot_reports_are_mirrored_into_the_compliance_store():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    _register(reward_bot, "bob", 1002, 2500)
+    errs = run(feed(reward_bot, make_callback("report:@alice:@bob", 1002, "bob")))
+    assert_no_errors(errs, "reporting a post")
+    mirrored = reward_bot.enforcement.list_reports("PENDING")
+    assert len(mirrored) == 1 and mirrored[0]["entity_id"] == "@alice", mirrored
+    assert reward_bot.enforcement.get("@alice", "channel")["state"] == "ACTIVE"  # never auto-banned
+    # partnership bot too
+    ps = _fresh_bot(partnership_bot)
+    _register(partnership_bot, "alice", 1001, 2500, is_partner=True)
+    _register(partnership_bot, "bob", 1002, 2500, is_partner=True)
+    errs = run(feed(partnership_bot, make_callback("chk:report:@alice", 1002, "bob")))
+    assert_no_errors(errs, "partner report")
+    assert len(partnership_bot.enforcement.list_reports("PENDING")) == 2
+    _clean_enforcement(reward_bot)
+    print("OK in-bot reports land in the durable compliance store, still pending a human")
+
+
+def test_admin_bot_safe_mode_toggle_is_owner_only():
+    session = MockSession()
+    admin_bot.bot.session = session
+    _clean_enforcement(admin_bot)
+    errs = run(feed(admin_bot, make_callback("safety:on", 1001, "alice")))
+    assert_no_errors(errs, "member toggles safe mode")
+    assert not admin_bot.enforcement.emergency_enabled("safe_mode"), "a member enabled safe mode"
+    session.reset()
+    errs = run(feed(admin_bot, make_callback("safety:on", OWNER_ID, "owner")))
+    assert_no_errors(errs, "owner enables safe mode")
+    assert admin_bot.enforcement.emergency_enabled("safe_mode")
+    assert "ON" in session.texts()
+    run(feed(admin_bot, make_callback("safety:off", OWNER_ID, "owner")))
+    assert not admin_bot.enforcement.emergency_enabled("safe_mode")
+    _clean_enforcement(admin_bot)
+    print("OK admin bot safe-mode toggle is owner-only and reversible")
+
+
+def test_broadcast_worker_honours_safe_mode_and_blocked_recipients():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    q = reward_bot.broadcasts
+    cid = q.create_campaign(bot_scope="reward", created_by=OWNER_ID, payload={"text": "hello members"})
+    q.queue_campaign(cid, [1001, 1002])
+    reward_bot.enforcement.enforce(1002, "user", "BANNED", actor_id="owner", reason="confirmed abuse")
+    # safe mode: nothing is claimed, nothing sent, both stay pending
+    reward_bot.enforcement.set_emergency(True, actor_id="owner", reason="incident")
+    run(reward_bot._process_reward_broadcasts())
+    assert not s.sent() and q.campaign_summary(cid)["deliveries"].get("pending") == 2
+    reward_bot.enforcement.set_emergency(False, actor_id="owner", reason="over")
+    s.reset()
+    run(reward_bot._process_reward_broadcasts())
+    recipients = {d.get("chat_id") for d in s.sent()}
+    assert recipients == {1001}, recipients
+    d = q.campaign_summary(cid)["deliveries"]
+    assert d.get("sent") == 1 and d.get("blocked") == 1, d
+    _clean_enforcement(reward_bot)
+    print("OK broadcast worker pauses in safe mode and never messages a banned member")
+
+
+def test_broadcast_draft_captures_telegram_entities_and_replays_them():
+    """Decision #3: the owner composes in Telegram; the admin bot stores text+entities
+    verbatim; the reward worker sends with entities= and NO parse_mode. Members and
+    non-owners cannot create drafts. Typed '<b>' stays literal text."""
+    from aiogram.types import MessageEntity
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    admin_session = MockSession(); admin_bot.bot.session = admin_session
+    text = "Update: <b>not markup</b> and real bold"
+    ents = [MessageEntity(type="bold", offset=34, length=4),
+            MessageEntity(type="custom_emoji", offset=0, length=1, custom_emoji_id="9")]
+    msg = make_message(text, uid=OWNER_ID, username="owner").model_copy(update={"entities": ents})
+    before = {c["campaign_id"] for c in reward_bot.broadcasts.recent_campaigns(bot_scope="reward", limit=100)}
+    # A non-owner sending the same thing gets the lock screen and no draft.
+    run(feed(admin_bot, make_message(text, uid=1001, username="alice").model_copy(update={"entities": ents})))
+    assert "owner's admin panel" in admin_session.texts()
+    errs = run(feed(admin_bot, msg)); assert_no_errors(errs, "capture draft")
+    new = [c for c in reward_bot.broadcasts.recent_campaigns(bot_scope="reward", limit=100) if c["campaign_id"] not in before]
+    assert len(new) == 1 and new[0]["status"] == "draft", new
+    payload = new[0]["payload"]
+    assert payload["text"] == text and payload["entities"] == [{"type": "bold", "offset": 34, "length": 4}], payload
+    assert "bold" in admin_session.texts() and "DRAFT" in admin_session.texts()
+    # Deliver: entities travel, parse_mode does not.
+    reward_bot.broadcasts.queue_campaign(new[0]["campaign_id"], [1001])
+    run(reward_bot._process_reward_broadcasts())
+    sent = s.sent()
+    assert len(sent) == 1 and sent[0]["text"] == text and sent[0].get("parse_mode") in (None, "None"), sent
+    assert sent[0]["entities"] == [{"type": "bold", "offset": 34, "length": 4}], sent[0]
+    # Owner can delete only while it is a draft (it is queued now).
+    cid = new[0]["campaign_id"]
+    run(feed(admin_bot, make_callback(f"bcdel:{cid}", OWNER_ID, "owner")))
+    assert reward_bot.broadcasts.get_campaign(cid) is not None
+    print("OK broadcast drafts capture Telegram entities verbatim and replay them without parse_mode")
+
+
+def _group_message(text, chat_id, uid, username="member", reply_to=None, chat_username=None):
+    _uid_seq[0] += 1
+    return Message(message_id=_uid_seq[0], date=dt.datetime.now(dt.timezone.utc),
+                   chat=Chat(id=chat_id, type="supergroup", username=chat_username, title="Group"),
+                   from_user=make_user(uid, username), text=text, reply_to_message=reply_to)
+
+
+def _clean_ads(module):
+    import sqlite3
+    with sqlite3.connect(module.ads.path) as conn:
+        for table in ("ad_terms", "ad_consents", "ad_campaigns", "ad_deliveries", "ad_events"):
+            conn.execute(f"DELETE FROM {table}")
+
+
+def test_group_report_files_with_evidence_and_private_report_targets_registered_only():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    # a registered group with a real chat id
+    reward_bot.channels.add(1001, "-100777", "@alicegroup", "group", ["General"], size=300, bot_added=True)
+    reward_bot.channels.update(1001, "-100777", verified_state="VERIFIED", status="ACTIVE", canonical_chat_id=-100777)
+    # unregistered group -> nothing to report
+    errs = run(feed(reward_bot, _group_message("/report spam", -100999, 7001)))
+    assert_no_errors(errs, "report in unregistered group")
+    assert "not registered" in s.texts()
+    # registered group, replying to a message -> report + evidence, by a non-member of CLICKMINT
+    s.reset()
+    offending = _group_message("buy followers here", -100777, 7002, "spammer")
+    errs = run(feed(reward_bot, _group_message("/report sells fake engagement", -100777, 7001, reply_to=offending)))
+    assert_no_errors(errs, "report in registered group")
+    reports = reward_bot.enforcement.list_reports("PENDING", entity_type="group")
+    assert len(reports) == 1 and reports[0]["entity_id"] == "@alicegroup", reports
+    evidence = reward_bot.enforcement.evidence_for("@alicegroup", "group", report_id=reports[0]["report_id"])
+    assert evidence and evidence[0]["reference"] == f"telegram:-100777/{offending.message_id}"
+    assert reward_bot.enforcement.get("@alicegroup", "group")["state"] == "ACTIVE"   # never automatic
+    # private: owner cannot report own destination; stranger can report a registered one
+    s.reset()
+    run(feed(reward_bot, make_message("/report @alice self report", uid=1001, username="alice")))
+    assert "own destination" in s.texts()
+    s.reset()
+    errs = run(feed(reward_bot, make_message("/report @alice scam links", uid=1002, username="bob")))
+    assert_no_errors(errs, "private report")
+    assert "filed against @alice" in s.texts()
+    s.reset()
+    run(feed(reward_bot, make_message("/report @ghost anything", uid=1002, username="bob")))
+    assert "not registered" in s.texts()
+    _clean_enforcement(reward_bot)
+    print("OK group-scoped /report files evidence-backed reports; private /report only targets registered destinations")
+
+
+def test_ads_consent_is_per_destination_and_delivery_is_labelled():
+    s = _fresh_bot(reward_bot)
+    _clean_enforcement(reward_bot); _clean_ads(reward_bot)
+    _register(reward_bot, "alice", 1001, 2500)
+    _register(reward_bot, "bob", 1002, 2500)
+    reward_bot.bot_credentials.save(1001, "9001:test-token", {"id": 9001, "username": "alicebot"})
+    reward_bot.telegram_verification.bot_factory = lambda token: reward_bot.bot
+    # The mocked session cannot answer getChat/getChatMember (covered by
+    # test_telegram_verification.py); treat the destination as verified here.
+    real_verify = reward_bot._verify_task_channel
+    async def fake_verify(row):
+        return {"row": row, "chat_id": -100555, "verification": None}, None
+    reward_bot._verify_task_channel = fake_verify
+    # no terms yet -> cannot opt in
+    run(feed(reward_bot, make_message("/ads on @alice", uid=1001, username="alice")))
+    assert "No advertising terms" in s.texts()
+    reward_bot.ads.publish_terms("Ads are labelled; you may opt out anytime.", published_by="owner")
+    s.reset()
+    run(feed(reward_bot, make_message("/ads on @bob", uid=1001, username="alice")))   # not hers
+    assert "only manage consent for a destination you registered" in s.texts()
+    s.reset()
+    errs = run(feed(reward_bot, make_message("/ads on @alice", uid=1001, username="alice")))
+    assert_no_errors(errs, "/ads on")
+    assert reward_bot.ads.consent("@alice") is not None and reward_bot.ads.consent("@bob") is None
+    # campaign approved by owner, queued -> only @alice gets a delivery
+    cid = reward_bot.ads.create_campaign(title="Launch", advertiser_label="Acme Wallet", category="General", text="Try Acme", created_by=OWNER_ID)
+    reward_bot.ads.submit_for_review(cid, actor_id=OWNER_ID)
+    reward_bot.ads.review(cid, approved=True, reviewer_id=OWNER_ID, reason="disclosed")
+    reward_bot.ads.enabled = True
+    assert reward_bot.ads.queue(cid, actor_id=OWNER_ID) == 1
+    s.reset()
+    run(reward_bot._process_ad_deliveries())
+    sent = s.sent()
+    assert len(sent) == 1 and "Ad · Acme Wallet" in sent[0]["text"] and "Sponsored" in sent[0]["text"], sent
+    assert reward_bot.ads.get_campaign(cid)["status"] == "completed"
+    # opt out cancels anything pending and stops future deliveries
+    cid2 = reward_bot.ads.create_campaign(title="Second", advertiser_label="Acme", category="General", text="Again", created_by=OWNER_ID)
+    reward_bot.ads.submit_for_review(cid2, actor_id=OWNER_ID)
+    reward_bot.ads.review(cid2, approved=True, reviewer_id=OWNER_ID, reason="ok")
+    reward_bot.ads.queue(cid2, actor_id=OWNER_ID)
+    s.reset()
+    run(feed(reward_bot, make_message("/ads off @alice", uid=1001, username="alice")))
+    assert "opted out" in s.texts()
+    s.reset()
+    run(reward_bot._process_ad_deliveries())
+    assert not s.sent(), "nothing may be sent after opt-out"
+    assert reward_bot.ads.summary(cid2)["deliveries"].get("cancelled") == 1
+    # kill switch: disabled worker sends nothing even with consent
+    reward_bot.ads.enabled = False
+    run(feed(reward_bot, make_message("/ads on @alice", uid=1001, username="alice")))
+    s.reset()
+    run(reward_bot._process_ad_deliveries())
+    assert not s.sent()
+    reward_bot._verify_task_channel = real_verify
+    _clean_ads(reward_bot); _clean_enforcement(reward_bot)
+    print("OK ads: consent is per destination and revocable; deliveries are labelled and use the owner's bot")
+
+
+def test_enforced_partner_is_never_offered_a_post():
+    s = _fresh_bot(partnership_bot)
+    _clean_enforcement(partnership_bot)
+    for name, uid in (("alice", 1001), ("bob", 1002), ("carol", 1003)):
+        m = _register(partnership_bot, name, uid, 2500, is_partner=True)
+        m["receive_types"] = ["Airdrops"]
+        partnership_bot.bot_credentials.save(uid, f"{uid + 8000}:test-token", {"id": uid + 8000, "username": f"bot_{uid}"})
+    partnership_bot.ledger.save()
+    partnership_bot.telegram_verification.bot_factory = lambda token: partnership_bot.bot
+    partnership_bot.enforcement.enforce("@carol", "channel", "SUSPENDED", actor_id="owner", reason="reviewed")
+    run(feed(partnership_bot, make_callback("terms:accept", 1001, "alice")))
+    run(feed(partnership_bot, make_callback("cat:Airdrops", 1001, "alice")))
+    s.reset()
+    errs = run(feed(partnership_bot, make_message("Airdrop guide", uid=1001, username="alice", forwarded=True)))
+    assert_no_errors(errs, "partner forward")
+    targets = {d.get("chat_id") for d in s.sent() if str(d.get("chat_id", "")).startswith("@")}
+    assert "@bob" in targets and "@carol" not in targets, (targets, s.texts())
+    _clean_enforcement(partnership_bot)
+    print("OK a suspended partner is skipped by the shared gate")
+
+
 ALL_TESTS = [
     test_all_handlers_are_coroutines,
     test_expected_callbacks_are_registered,
     test_menus_build_without_positional_args,
-    test_start_registers_a_channel,
+    test_start_requires_user_bot_and_rejects_manual_count,
     test_menu_and_cap_screens_render,
     test_full_submission_funnel_distributes_and_charges,
     test_two_members_do_not_share_funnel_state,
@@ -636,6 +1131,9 @@ ALL_TESTS = [
     test_captioned_scam_post_is_still_gated,
     test_borderline_post_goes_to_human_review,
     test_chain_agree_credits_the_sharer_not_the_sender,
+    test_destination_inline_controls_and_background_reverify,
+    test_partnership_inline_controls_and_background_reverify,
+    test_direct_delivery_uses_a_bot_that_can_read_the_source,
     test_report_is_filed_pending_for_a_human,
     test_owner_bypasses_credits_caps_and_funnel,
     test_non_owner_cannot_route_to_all,
@@ -652,6 +1150,16 @@ ALL_TESTS = [
     # --- added after the dry-run simulation ---
     test_owner_is_recognised_before_ever_forwarding,
     test_owner_broadcast_is_not_offered_to_the_owner,
+    # --- shared enforcement gate (2026-09 audit item 1) ---
+    test_restricted_member_cannot_distribute_but_can_appeal,
+    test_safe_mode_pauses_members_but_never_the_owner_panel,
+    test_bot_reports_are_mirrored_into_the_compliance_store,
+    test_enforced_partner_is_never_offered_a_post,
+    test_broadcast_worker_honours_safe_mode_and_blocked_recipients,
+    test_broadcast_draft_captures_telegram_entities_and_replays_them,
+    test_group_report_files_with_evidence_and_private_report_targets_registered_only,
+    test_ads_consent_is_per_destination_and_delivery_is_labelled,
+    test_admin_bot_safe_mode_toggle_is_owner_only,
 ]
 
 

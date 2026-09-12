@@ -62,7 +62,16 @@ ask_token() {
     say "${D}  In Telegram, open @BotFather → /newbot → copy the long token it gives you."
     say "  It looks like:  8123456789:AAF9xQ2mKp7vLzR3tYuIoP1aSdFgHjKlZxC"
     say "  (this one runs $script)${N}"
-    read -r -p "  Paste the token here: " value
+    # Never echo bot tokens into the terminal or a captured shell transcript.
+    # Bash's -s works in Git Bash as well as native Unix shells.
+    if [ -t 0 ] && [ -t 1 ]; then
+      read -r -s -p "  Paste the token here: " value
+      printf '\n'
+    else
+      # Keep setup usable from automation/non-interactive wrappers. The caller
+      # is responsible for protecting stdin in that case.
+      read -r value
+    fi
     value="$(printf '%s' "$value" | tr -d '[:space:]')"
     if [ -z "$value" ]; then
       err "Nothing entered — try again."
@@ -107,6 +116,10 @@ if [ "${KEEP_ENV:-0}" != "1" ]; then
     err "That must be digits only (no @, no spaces, no minus sign)."
   done
 
+  # Generate the encryption key locally; it protects user-owned Telegram bot
+  # tokens and must never be sent to Telegram or committed to Git.
+  CREDENTIAL_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+
   # ------------------------------------------------------------- write .env
   {
     echo "# Written by setup.sh on $(date -u '+%Y-%m-%d %H:%M UTC')."
@@ -115,16 +128,27 @@ if [ "${KEEP_ENV:-0}" != "1" ]; then
     echo "PARTNER_BOT_TOKEN=$TOK_PARTNER"
     echo "ADMIN_BOT_TOKEN=$TOK_ADMIN"
     echo "OWNER_USER_ID=$OWNER_ID"
+    echo "CLICKMINT_CREDENTIAL_KEY=$CREDENTIAL_KEY"
   } > .env
   chmod 600 .env 2>/dev/null
   say ""
   ok "Saved to .env (readable only by you)."
+else
+  # Existing installations created before user-owned bot credentials were
+  # introduced may not have an encryption key. Add one without replacing any
+  # existing tokens or settings.
+  if ! grep -q '^CLICKMINT_CREDENTIAL_KEY=' .env 2>/dev/null; then
+    CREDENTIAL_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+    printf '\nCLICKMINT_CREDENTIAL_KEY=%s\n' "$CREDENTIAL_KEY" >> .env
+    chmod 600 .env 2>/dev/null
+    ok "Generated and added the missing credential encryption key."
+  fi
 fi
 
 # ---------------------------------------------------------------- deps
 rule
 say "${B}Installing what the bots need${N} ${D}(aiogram — this can take a minute)${N}"
-if python3 -c "import aiogram" >/dev/null 2>&1; then
+if python3 -c "import aiogram, cryptography" >/dev/null 2>&1; then
   ok "Already installed."
 else
   if python3 -m pip install -q -r requirements.txt 2>/dev/null; then

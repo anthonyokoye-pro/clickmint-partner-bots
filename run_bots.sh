@@ -65,6 +65,10 @@ case "${1:-}" in
       printf '%s✗%s No .env file — run %sbash setup.sh%s first.\n' "$R" "$N" "$B" "$N"
       exit 1
     fi
+    if ! python3 -c 'import config; from launch_scope import assert_nonfinancial_scope; assert_nonfinancial_scope(config)' 2>"logs/scope.log"; then
+      printf '%s✗%s Financial features are enabled; launch scope is non-financial. See logs/scope.log.\n' "$R" "$N"
+      exit 1
+    fi
     printf '%sStarting CLICKMINT%s\n' "$B" "$N"
     for pair in $BOTS; do start_one "${pair%%:*}" "${pair##*:}"; done
     printf '%s  (giving them a few seconds to connect to Telegram...)%s\n' "$D" "$N"

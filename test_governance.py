@@ -40,6 +40,10 @@ def test_cap_zero_for_nonactive():
     assert daily_post_cap(9000, "A", status="REMOVED") == 0
 
 
+def test_unverified_destination_is_fail_closed():
+    assert daily_post_cap(9000, "A", connected=False) == 0
+
+
 def test_cap_unlimited_for_owner():
     assert daily_post_cap(0, "C", is_owner=True) == -1
 
